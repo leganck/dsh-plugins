@@ -4,17 +4,25 @@
  * and feeds it the exact session-event shapes observed in dsh-session /
  * dsh-agent-loop / dsh-compaction-basic sources.
  */
-import { mkdtempSync, readFileSync, existsSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { zstdCompressSync } from 'node:zlib'
 
 const pluginPath = pathToFileURL(join(import.meta.dirname, 'index.js')).href
-const { apply } = await import(pluginPath)
+const { apply, BUILD } = await import(pluginPath)
 
 const handlers = new Map()
 const fakeCtx = { on: (name, fn) => { handlers.set(name, fn) } }
+
+// The plugin writes an activation marker on apply(), and it defaults to
+// `_loaded.json` next to the module. A test run that used to delete that file
+// could destroy a live install's marker (or, in a package-managed node_modules,
+// fail to write at all), so the marker is redirected into a temp dir for the
+// whole run and asserted at the end.
+const markerPath = join(mkdtempSync(join(tmpdir(), 'dsh-archive-marker-')), '_loaded.json')
+process.env.DSH_MEMORY_ARCHIVE_MARKER = markerPath
 
 const workdir = mkdtempSync(join(tmpdir(), 'dsh-archive-test-'))
 apply(fakeCtx, { archiveDir: '.dsh-archive', redact: true })
@@ -520,18 +528,37 @@ await mapPrune.get('agent/pre-step')(
 check('prune: the pointer tells the model the evicted file exists',
   (pruneInbox[0]?.content?.[0]?.text ?? '').includes('evicted.md'))
 
+// --- activation marker: the only disk side effect of apply() ----------------
+// Distributable behaviour, in two parts: a redirected marker must be honoured
+// (read-only or package-managed install dirs, and this very test), and a test
+// run must leave a live install untouched.
+const envMarker = existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, 'utf8')) : null
+check('activation: marker honours DSH_MEMORY_ARCHIVE_MARKER', envMarker !== null)
+check('activation: marker reports the build and where it was written',
+  envMarker?.build === BUILD && envMarker?.markerFile === markerPath && envMarker?.pid === process.pid,
+  `build=${envMarker?.build} markerFile=${envMarker?.markerFile}`)
+check('activation: self-test left no marker next to the module',
+  !existsSync(join(import.meta.dirname, '_loaded.json')))
+{
+  // Second branch: config.markerFile, with the env override removed, into a
+  // directory that does not exist yet (the plugin must create it).
+  const cfgMarker = join(mkdtempSync(join(tmpdir(), 'dsh-archive-marker-cfg-')), 'nested', 'marker.json')
+  const saved = process.env.DSH_MEMORY_ARCHIVE_MARKER
+  delete process.env.DSH_MEMORY_ARCHIVE_MARKER
+  apply({ on: () => {} }, { archiveDir: '.dsh-archive', markerFile: cfgMarker })
+  process.env.DSH_MEMORY_ARCHIVE_MARKER = saved
+  const cfg = existsSync(cfgMarker) ? JSON.parse(readFileSync(cfgMarker, 'utf8')) : null
+  check('activation: config.markerFile is honoured and its parent dir created',
+    cfg?.markerFile === resolve(cfgMarker), `got ${cfg?.markerFile}`)
+  check('activation: env override wins over config.markerFile',
+    !existsSync(join(import.meta.dirname, '_loaded.json')))
+}
+
 const failed = results.filter((r) => !r.ok)
 for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : `  ${r.detail}`}`)
 console.log(`\n--- injected notice (verbatim) ---\n${noticeBody}`)
 console.log(`\narchive dir: ${dir}`)
 
-// The plugin writes an activation marker next to itself on apply(); a test run
-// must not leave one behind, or it would be indistinguishable from the app
-// having loaded the plugin. See README "验证激活".
-const marker = join(import.meta.dirname, '_loaded.json')
-if (existsSync(marker)) {
-  rmSync(marker)
-  console.log('\nremoved the activation marker written by this test run')
-}
+console.log(`\nactivation marker written to: ${markerPath}`)
 console.log(failed.length === 0 ? `\nALL ${results.length} CHECKS PASSED` : `\n${failed.length}/${results.length} CHECKS FAILED`)
 process.exit(failed.length === 0 ? 0 : 1)
