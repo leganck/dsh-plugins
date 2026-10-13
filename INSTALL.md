@@ -16,18 +16,25 @@ Node 版本不够**不会报错**：插件降级到 `session.snapshotEvents()`�
 
 ## 获取产物
 
-仓库：<https://git.example.com/your-org/dsh-memory-archive>（tag `v1.1.0`）。
-构建好的产物同时发布在该项目的**通用包仓库**上（`dsh-memory-archive` / `1.1.0`）：
+**点开即下（推荐，浏览器可用）**——产物随仓库发布，属于普通静态文件：
 
-| 文件 | 用途 |
+| 文件 | 链接 |
 |---|---|
-| `local-dsh-memory-archive-1.1.0.tgz` | npm/pnpm 可安装的 tarball（路径 A 用） |
-| `dsh-memory-archive-1.1.0.zip` | 直接复制文件用（路径 B/C 用） |
-| `SHA256SUMS.txt` | 两者的 SHA-256 |
+| tarball | `…/your-org/dsh-memory-archive/-/releases/v1.1.0/downloads/local-dsh-memory-archive-1.1.0.tgz` |
+| zip | `…/your-org/dsh-memory-archive/-/releases/v1.1.0/downloads/dsh-memory-archive-1.1.0.zip` |
+| 校验和 | `…/your-org/dsh-memory-archive/-/releases/v1.1.0/downloads/SHA256SUMS.txt` |
+
+前缀 `https://git.example.com/git1`。未登录时会 **302 跳登录页**（不是 JSON 报错）；
+项目为 `internal`，任何登录本 GitLab 的账号都能取。
+
+> ⚠️ **不要**把 `.../api/v4/projects/850/packages/generic/...` 这种**包仓库 API** 地址当下载链接发给别人：
+> 它要求 token/Basic 认证，浏览器直接打开只会得到 30 字节的 `{"message":"401 Unauthorized"}` JSON。
+> 那条路是给命令行/CI 用的（见下）。
+
+**命令行取**（glab 已登录，或带 token 的 curl）：
 
 ```bash
-# 需要对该项目的读取权限：internal 项目 = 任何登录该 GitLab 的账号；private = 仅项目成员。
-# 匿名访问一律 401（GitLab 不为 internal 项目做匿名下发）。glab 已登录时可直接取
+# internal 项目 = 任何登录该 GitLab 的账号可读；匿名一律 401
 glab api "projects/850/packages/generic/dsh-memory-archive/1.1.0/local-dsh-memory-archive-1.1.0.tgz" \
   > local-dsh-memory-archive-1.1.0.tgz
 curl --header "PRIVATE-TOKEN: <token>" -O \
@@ -37,6 +44,9 @@ sha256sum -c SHA256SUMS.txt
 # 或自行构建
 pwsh -File build-plugin-dist.ps1
 ```
+
+仓库：<https://git.example.com/your-org/dsh-memory-archive>（tag `v1.1.0`，
+产物位于 `release/`，通用包仓库 `dsh-memory-archive` / `1.1.0` 同步发布同一份文件）。
 
 ## 三条路径
 

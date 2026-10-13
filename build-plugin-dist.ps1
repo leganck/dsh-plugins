@@ -11,6 +11,10 @@
     3. npm pack -> dist/<name>-<version>.tgz   (installable via pnpm / dsh plugin add)
     4. Compress-Archive -> dist/dsh-memory-archive-<version>.zip  (copy-the-files form)
     5. writes dist/SHA256SUMS.txt
+    6. copies all three into the tracked release/ dir, so a plain browser link
+       (-/raw/<tag>/release/<file> or the release downloads path) can serve them.
+       The package-registry API URLs need a token and answer a browser with a
+       401 JSON body -- that is NOT a usable download link.
 
   Run it with the bundled Node/npm, e.g.:
     pwsh -File build-plugin-dist.ps1
@@ -50,7 +54,7 @@ Write-Host ''
 
 # --- 1. self-test ------------------------------------------------------------
 if (-not $SkipTests) {
-  Write-Host '--- 1/5 self-test ---'
+  Write-Host '--- 1/6 self-test ---'
   $test = & $NodeExe (Join-Path $root 'test.mjs') 2>&1
   $verdict = ($test | Where-Object { $_ -match 'CHECKS (PASSED|FAILED)' })
   $test | Where-Object { $_ -match '^FAIL' } | ForEach-Object { Write-Host "  $_" }
@@ -59,12 +63,12 @@ if (-not $SkipTests) {
   }
   Write-Host "  $verdict"
 } else {
-  Write-Host '--- 1/5 self-test SKIPPED (-SkipTests) ---'
+  Write-Host '--- 1/6 self-test SKIPPED (-SkipTests) ---'
 }
 Write-Host ''
 
 # --- 2. validate the bundle patch under the loader dialect -------------------
-Write-Host '--- 2/5 validate cordis.patch.yml ---'
+Write-Host '--- 2/6 validate cordis.patch.yml ---'
 $yamlCandidates = @(
   'C:\Users\you\Documents\deepseek-harness\default-workspace\dsh-comparison\dsh-src\dsh\node_modules\js-yaml\index.js'
 )
@@ -104,7 +108,7 @@ Write-Host '  structural checks ok'
 Write-Host ''
 
 # --- 3. npm pack -------------------------------------------------------------
-Write-Host '--- 3/5 npm pack ---'
+Write-Host '--- 3/6 npm pack ---'
 $npm = Join-Path $nodeDir 'npm.cmd'
 if (-not (Test-Path $npm)) { $npm = (Get-Command npm -ErrorAction SilentlyContinue).Source }
 if (-not $npm) { throw 'npm not found; cannot build the tarball' }
@@ -121,7 +125,7 @@ Write-Host "  $tgz  ($([int]((Get-Item $tgz).Length/1024)) KB)"
 Write-Host ''
 
 # --- 4. zip ------------------------------------------------------------------
-Write-Host '--- 4/5 zip ---'
+Write-Host '--- 4/6 zip ---'
 $zip = Join-Path $dist ("dsh-memory-archive-$version.zip")
 if (Test-Path $zip) { Remove-Item $zip -Force }
 $stage = Join-Path $env:TEMP ("dsh-ma-stage-" + [guid]::NewGuid().ToString('N'))
@@ -143,12 +147,23 @@ Write-Host "  $zip  ($([int]((Get-Item $zip).Length/1024)) KB)"
 Write-Host ''
 
 # --- 5. checksums ------------------------------------------------------------
-Write-Host '--- 5/5 SHA256SUMS.txt ---'
+Write-Host '--- 5/6 SHA256SUMS.txt ---'
 $sums = Get-ChildItem $dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name | ForEach-Object {
   $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
   "$h  $($_.Name)"
 }
 $sums | Set-Content -LiteralPath (Join-Path $dist 'SHA256SUMS.txt') -Encoding ascii
 $sums | ForEach-Object { Write-Host "  $_" }
+Write-Host ''
+
+# --- 6. copy into the tracked release/ dir -----------------------------------
+Write-Host '--- 6/6 release/ (tracked static files) ---'
+$rel = Join-Path $root 'release'
+New-Item -ItemType Directory -Path $rel -Force | Out-Null
+Get-ChildItem $dist -File | ForEach-Object {
+  Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $rel $_.Name) -Force
+  Write-Host "  release/$($_.Name)"
+}
+Write-Host '  commit release/ -- the release download links resolve to these paths.'
 Write-Host ''
 Write-Host 'done.'
