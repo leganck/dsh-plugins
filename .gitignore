@@ -1,5 +1,3 @@
 dist/
 _loaded.json
 node_modules/
-*.tgz
-*.zip
