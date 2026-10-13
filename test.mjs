@@ -4,7 +4,7 @@
  * and feeds it the exact session-event shapes observed in dsh-session /
  * dsh-agent-loop / dsh-compaction-basic sources.
  */
-import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -23,6 +23,13 @@ const fakeCtx = { on: (name, fn) => { handlers.set(name, fn) } }
 // whole run and asserted at the end.
 const markerPath = join(mkdtempSync(join(tmpdir(), 'dsh-archive-marker-')), '_loaded.json')
 process.env.DSH_MEMORY_ARCHIVE_MARKER = markerPath
+
+// A marker next to the module may legitimately already exist when this runs
+// inside a live install (the running app wrote it). The invariant is therefore
+// "the test neither creates nor modifies it" -- not "it must not exist".
+const selfMarker = join(import.meta.dirname, '_loaded.json')
+const fingerprint = (file) => (existsSync(file) ? `${statSync(file).mtimeMs}:${statSync(file).size}` : 'absent')
+const selfMarkerBefore = fingerprint(selfMarker)
 
 const workdir = mkdtempSync(join(tmpdir(), 'dsh-archive-test-'))
 apply(fakeCtx, { archiveDir: '.dsh-archive', redact: true })
@@ -537,8 +544,8 @@ check('activation: marker honours DSH_MEMORY_ARCHIVE_MARKER', envMarker !== null
 check('activation: marker reports the build and where it was written',
   envMarker?.build === BUILD && envMarker?.markerFile === markerPath && envMarker?.pid === process.pid,
   `build=${envMarker?.build} markerFile=${envMarker?.markerFile}`)
-check('activation: self-test left no marker next to the module',
-  !existsSync(join(import.meta.dirname, '_loaded.json')))
+check('activation: self-test neither created nor modified a marker next to the module',
+  fingerprint(selfMarker) === selfMarkerBefore, `before=${selfMarkerBefore} after=${fingerprint(selfMarker)}`)
 {
   // Second branch: config.markerFile, with the env override removed, into a
   // directory that does not exist yet (the plugin must create it).
@@ -551,7 +558,7 @@ check('activation: self-test left no marker next to the module',
   check('activation: config.markerFile is honoured and its parent dir created',
     cfg?.markerFile === resolve(cfgMarker), `got ${cfg?.markerFile}`)
   check('activation: env override wins over config.markerFile',
-    !existsSync(join(import.meta.dirname, '_loaded.json')))
+    fingerprint(selfMarker) === selfMarkerBefore)
 }
 
 const failed = results.filter((r) => !r.ok)
