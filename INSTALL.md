@@ -14,6 +14,29 @@
 Node 版本不够**不会报错**：插件降级到 `session.snapshotEvents()`。加载后可用
 `_loaded.json` 的 `capabilities.zstd` 判断实际能力（`false` 即降级）。
 
+## 获取产物
+
+仓库：<https://git.example.com/your-org/dsh-memory-archive>（tag `v1.1.0`）。
+构建好的产物同时发布在该项目的**通用包仓库**上（`dsh-memory-archive` / `1.1.0`）：
+
+| 文件 | 用途 |
+|---|---|
+| `local-dsh-memory-archive-1.1.0.tgz` | npm/pnpm 可安装的 tarball（路径 A 用） |
+| `dsh-memory-archive-1.1.0.zip` | 直接复制文件用（路径 B/C 用） |
+| `SHA256SUMS.txt` | 两者的 SHA-256 |
+
+```bash
+# 需要对该私有项目的读取权限；glab 已登录时可直接取
+glab api "projects/850/packages/generic/dsh-memory-archive/1.1.0/local-dsh-memory-archive-1.1.0.tgz" \
+  > local-dsh-memory-archive-1.1.0.tgz
+curl --header "PRIVATE-TOKEN: <token>" -O \
+  "https://git.example.com/api/v4/projects/850/packages/generic/dsh-memory-archive/1.1.0/dsh-memory-archive-1.1.0.zip"
+# 校验
+sha256sum -c SHA256SUMS.txt
+# 或自行构建
+pwsh -File build-plugin-dist.ps1
+```
+
 ## 三条路径
 
 ### A. 原生 bundle（推荐）
