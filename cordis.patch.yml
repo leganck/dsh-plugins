@@ -1,0 +1,15 @@
+# Bundle patch: inserts one Host plugin row.
+# Install with plugin_manager(action: "install_bundle", target: "<abs dir of this package>").
+- insert:
+    - id: memory-archive
+      name: '@local/dsh-memory-archive'
+      config:
+        # `~`, `$DSH_HOME`, `$HOME` and `%USERPROFILE%` are expanded by the plugin;
+        # quoted because a bare `~` is YAML null. Defaults to the user's DSH home so
+        # verbatim tool output never lands in the recorded repository.
+        archiveDir: "~/.dsh/archive"
+        includeToolResults: true
+        redact: true
+        announce: true
+        maxEventsPerSession: 20000
+        maxSegmentBytes: 1500000

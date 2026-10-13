@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Compaction Archive",
+    "description": "Archives every compaction as a greppable segment_NNN.md with the checkpoint summary and the verbatim shadowed turns, plus an INDEX.md."
+  }
+}

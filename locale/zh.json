@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "压缩归档",
+    "description": "把每次压缩落成可检索的 segment_NNN.md（含 checkpoint 摘要与被压缩区间的原始轮次），并维护 INDEX.md。"
+  }
+}

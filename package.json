@@ -1,0 +1,23 @@
+{
+  "name": "@local/dsh-memory-archive",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Compaction archive: for every compaction in this profile, write a greppable segment_NNN.md containing the checkpoint summary and the verbatim shadowed turns, plus an INDEX.md.",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
