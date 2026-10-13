@@ -26,7 +26,8 @@ Node 版本不够**不会报错**：插件降级到 `session.snapshotEvents()`�
 | `SHA256SUMS.txt` | 两者的 SHA-256 |
 
 ```bash
-# 需要对该私有项目的读取权限；glab 已登录时可直接取
+# 需要对该项目的读取权限：internal 项目 = 任何登录该 GitLab 的账号；private = 仅项目成员。
+# 匿名访问一律 401（GitLab 不为 internal 项目做匿名下发）。glab 已登录时可直接取
 glab api "projects/850/packages/generic/dsh-memory-archive/1.1.0/local-dsh-memory-archive-1.1.0.tgz" \
   > local-dsh-memory-archive-1.1.0.tgz
 curl --header "PRIVATE-TOKEN: <token>" -O \
