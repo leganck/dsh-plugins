@@ -134,47 +134,27 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 
 ## 安装
 
-**不要**手改 profile 的 `package.json` / `cordis.patch.yml` 里的依赖，**不要**在 profile 目录跑 pnpm。
+三条路径的完整说明、前提、卸载与排错见 **[INSTALL.md](./INSTALL.md)**。速览：
 
-### A. 有插件工具的会话
+| 路径 | 适用 | 做法 |
+|---|---|---|
+| A. 原生 bundle | `dsh plugin` 可用的 profile | `dsh plugin --profile <p> add <包/tarball/git-url>`，再把包名加进 `dsh.profile.bundles` |
+| B. 一键脚本 | `desktop` 等被应用独占管理的 profile | `pwsh -File install.ps1 -Profile desktop`（`-DryRun` 预演，`-Uninstall` 回滚） |
+| C. 手工 | 任意 | 复制包到工作区外 + 在 profile 补丁末尾插入 `memory-archive` 行 + 重启 |
 
-```text
-plugin_manager(action: "install_bundle", target: "<本目录的绝对路径>")
-```
+要点：
 
-然后按返回结果判断，不要靠日志或进程列表：
-
-- `application: applied` → 已生效
-- `warnings` / `failed` / `overridden` / `restart-required` → 按提示处理
-
-用 `cordis_inspect_query`（不需要审批）确认新增行 `memory-archive`。
-
-### B. 手动（本机 desktop 实测走的就是这条）
-
-本机没有插件安装入口：`plugin_manager` 工具默认 disabled，`dsh plugin --profile desktop` 被应用
-独占管理拒绝，Web 侧栏也没有「插件」页。所以直接写 profile 的用户补丁层。
-
-1. 把本目录复制到工作区**外**的固定位置，例如
-   `C:\Users\you\dsh-bundles\dsh-memory-archive\`（避免被工作区清理波及）。
-2. 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 末尾插入：
-
-```yaml
-- insert:
-    - id: memory-archive
-      name: "file:///C:/Users/you/dsh-bundles/dsh-memory-archive/index.js"
-      config:
-        archiveDir: "C:/Users/you/.dsh/archive"
-        includeToolResults: true
-        redact: true
-        announce: true
-```
-
-3. **重启 app**（理由见下节）。回滚＝删掉这段。
-
-`name` 用 `file://` 而不是包名：loader 在 Node 侧走 ESM 解析，`file://` 与相对路径都可解析，
-因此无需 pnpm、无需写 profile 依赖与 lockfile。
-首次安装时 `archiveDir` 写**绝对路径且用正斜杠**：旧代码不展开 `~`，会在会话 cwd 下建出字面量
-`~` 目录。换上新代码后才可以安全地写 `~/.dsh/archive` 或 `$DSH_HOME/archive`。
+- 本包**已经是 DSH bundle**：`package.json` 声明了 `dsh.bundle.patch`，`cordis.patch.yml` 插入一行
+  `memory-archive`，走 A 时 `name` 用包名 `@local/dsh-memory-archive`（loader 按 Node ESM 解析）。
+- 走 B/C 时 `name` 必须解析到 **`index.js` 本身**（`file:///<绝对路径>/index.js`），
+  **不需要** pnpm、**不要**改 profile 的 `package.json`。
+- `desktop` profile 被 Electron 应用**独占管理**：`dsh plugin --profile desktop` 与
+  `dsh --dump-config --profile desktop` 都会直接失败（`profile "desktop" is managed exclusively
+  by the Electron application`），Web 侧栏没有插件页，`plugin_manager` 工具的对应行在 base bundle
+  里默认 disabled —— 所以该 profile 只能走 B/C。
+- **改配置热生效，改代码必须重启**（见下节）。新装或升级后都要重启。
+- 首次安装 `archiveDir` 建议写**绝对路径且用正斜杠**（`install.ps1` 默认就是这么写的）：旧代码
+  不展开 `~`，会在会话 cwd 下建出字面量 `~` 目录。升级并重启后才可安全用 `~/.dsh/archive`。
 
 ## 改配置不用重启，改代码必须重启（实测，别再猜）
 
@@ -239,14 +219,15 @@ plugin_manager(action: "install_bundle", target: "<本目录的绝对路径>")
 
 ### 独立复算（不 import 插件）
 
-脚本在 `dsh-comparison/` 根目录（与插件源码同仓，但**不 import 插件**，所以插件的 bug 不能给自己背书）：
+脚本在本包的 **`tools/`** 目录（随包分发；**不 import 插件**，所以插件的 bug 不能给自己背书）：
 
-1. `verify-segments.mjs <归档目录> [sessionsRoot]`：从原始会话日志重算每段的事件覆盖、事件数、
+1. `tools/verify-segments.mjs <归档目录> [sessionsRoot]`：从原始会话日志重算每段的事件覆盖、事件数、
    工具调用总数与按名计数、配对标注、目标文件数、脱敏，逐条对比 segment 文本。
    当前 4 个归档 / 9 个段全部通过。
-2. `verify-evicted.mjs <归档目录>`：prune 账本与 `evicted.md` 的结构与文本切片校验。
-3. `backfill-session.mjs --session <id> [--out <dir>]`：只喂控制事件、正文全部从日志恢复的
-   端到端回填。产出的 9 个文件与线上归档**逐字节相同**，唯一差异是 `Written` / `writtenAt` 时间戳。
+2. `tools/verify-evicted.mjs <归档目录>`：prune 账本与 `evicted.md` 的结构与文本切片校验。
+3. `tools/backfill-session.mjs [--session <id>] [--out <dir>]`：只喂控制事件、正文全部从日志恢复的
+   端到端回填。省略 `--session` 时自动取**最近写入**的会话。产出的文件与线上归档**逐字节相同**，
+   唯一差异是 `Written` / `writtenAt` 时间戳。
 
 ### 验证器自己的两个坑（都曾造成误判，已修）
 
@@ -260,6 +241,10 @@ plugin_manager(action: "install_bundle", target: "<本目录的绝对路径>")
 突变检验（干净套件不算证据）：删一条渲染 → FAIL 并定位到具体 seq；改工具名 → FAIL；
 把它移到别的块 → FAIL；块内重复渲染 → FAIL；换入另一条真实参数 → FAIL；
 无损往返（只读写不改内容）→ PASS。每个突变只挂 1 项检查，无连带误伤。
+
+激活标记同样量过（1.1.0 新增）：**改回「总写模块旁」的旧行为 → 5 项 FAIL**；
+忽略 `DSH_MEMORY_ARCHIVE_MARKER` → 4 项 FAIL；去掉标记父目录创建 → **正好 1 项 FAIL**。
+其中第一条正是「在已安装的 bundle 里跑自测会删掉 app 的标记」这个缺陷的可复现证据。
 
 ## 配置
 
@@ -276,6 +261,7 @@ plugin_manager(action: "install_bundle", target: "<本目录的绝对路径>")
 | `maxEventsPerSession` | `20000` | 每会话缓冲事件上限（超出丢最旧） |
 | `maxEventsPerSegment` | `4000` | 单段 verbatim 最多渲染多少条 |
 | `maxSegmentBytes` | `1500000` | 单段字节上限，超出截断并标注 |
+| `markerFile` | `null` | 激活标记写到哪里。默认＝模块旁的 `_loaded.json`。设它（或环境变量 `DSH_MEMORY_ARCHIVE_MARKER`，优先级更高）用于**只读／包管理安装位**，或让自测不碰线上安装目录。相对路径按**模块所在目录**解析，父目录会自动创建 |
 
 ## 已知限制（实测）
 
@@ -351,7 +337,7 @@ node test.mjs
 `test.mjs` 用假 ctx / 假 agent 驱动真实的 `session/event`、`agent/pre-step`、
 `agent.inbox`、`tool/result` 消息形状（含 `message.toolCallId` 与
 `source: { kind: 'tool', callId }`，取自 `dsh-session`、`dsh-agent-loop`、
-`dsh-compaction-basic`、`dsh-agent-instructions` 源码），覆盖 **83 项断言**：
+`dsh-compaction-basic`、`dsh-agent-instructions` 源码），覆盖 **88 项断言**：
 
 产物结构、固定文件头（含“去查别改”提示）、verbatim 工具返回、工具调用↔返回**双向配对**、
 无返回调用的标记与计数、三项 Cursor 同款统计（unique target files / size estimate /
@@ -364,8 +350,10 @@ reasoning 文本不倾倒进归档、**工具名/工具数/每消息工具标题
 （JSON 字符串 arguments + `block.id` 配对）计算**、`Tool calls` 列计数、围栏长度随内容自适应、
 以及“会话形态确实发布 `tool/call` 事件”时的旧路径兼容、
 **磁盘日志回填（多帧 zstd 必须逐帧解、无 `snapshotEvents`、按 seq 排序、范围外事件不入段、
-日志缺失时降级为只见实时）**、**`compaction/prune` 落盘与重复投递去重**
-—— 共 **83 项断言**。
+日志缺失时降级为只见实时）**、**`compaction/prune` 落盘与重复投递去重**、
+**激活标记可重定向（`DSH_MEMORY_ARCHIVE_MARKER` / `markerFile`，父目录自动创建，
+且自测不再触碰安装目录）**
+—— 共 **88 项断言**。
 
 > **测试价值的自证**：断言不是“跑绿了”就算数，逐个用**突变检验**量过：
 > 把磁盘读取关掉 → 4 项 FAIL；把多帧解码换成单帧 → 5 项 FAIL；去掉 prune 分支 → 7 项 FAIL；

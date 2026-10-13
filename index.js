@@ -30,7 +30,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -41,7 +41,7 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url))
  * Bump when the behaviour changes. It is written into `_loaded.json` so the
  * running app can be shown to hold *this* code, not a stale module cache.
  */
-const BUILD = '2026-10-13.4'
+export const BUILD = '2026-10-13.5'
 
 /** Config defaults; a row may override any field through the bundle patch. */
 const DEFAULTS = {
@@ -73,6 +73,15 @@ const DEFAULTS = {
   maxEventsPerSegment: 4000,
   /** Announce each archived segment to the model so the archive actually gets used. */
   announce: true,
+  /**
+   * Where to write the activation marker. `null` (the default) writes
+   * `_loaded.json` next to this module. Set it — or the
+   * `DSH_MEMORY_ARCHIVE_MARKER` env var, which wins — when the install
+   * directory is read-only (a package-managed `node_modules`, for instance) or
+   * to keep a self-test from touching a live install. A relative value resolves
+   * against this module's own directory, never the session cwd.
+   */
+  markerFile: null,
 }
 
 /** Event types buffered for the verbatim section, in the order they appear. */
@@ -711,6 +720,27 @@ async function buildNoticeMessage(notice) {
   })
 }
 
+/**
+ * Resolve the activation-marker path.
+ *
+ * Precedence: `DSH_MEMORY_ARCHIVE_MARKER` (tests/CI) > `config.markerFile` >
+ * `_loaded.json` next to this module. The default exists because the marker is
+ * the only disk evidence that *this* build is loaded; the overrides exist
+ * because an installed bundle may sit in a read-only or package-managed
+ * directory, and because a self-test must never delete a live install's marker.
+ * An absolute value is used as-is; a relative one resolves against this module's
+ * directory so it cannot depend on the session's cwd.
+ */
+function resolveMarkerFile(config) {
+  const fromEnv = process.env.DSH_MEMORY_ARCHIVE_MARKER
+  const chosen = (typeof fromEnv === 'string' && fromEnv.trim() !== '')
+    ? fromEnv
+    : (typeof config.markerFile === 'string' ? config.markerFile : null)
+  if (chosen === null || chosen.trim() === '') return join(SELF_DIR, '_loaded.json')
+  const expanded = expandPath(chosen)
+  return isAbsolute(expanded) ? resolve(expanded) : resolve(SELF_DIR, expanded)
+}
+
 export function apply(ctx, rawConfig) {
   const config = pluginConfig(rawConfig)
 
@@ -723,8 +753,10 @@ export function apply(ctx, rawConfig) {
   // resolved path proves the *code* that computed it is the code on disk, so a
   // stale module cache is detectable instead of assumed away.
   try {
+    const markerFile = resolveMarkerFile(config)
+    mkdirSync(dirname(markerFile), { recursive: true })
     writeFileSync(
-      join(SELF_DIR, '_loaded.json'),
+      markerFile,
       `${JSON.stringify({
         loadedAt: new Date().toISOString(),
         pid: process.pid,
@@ -739,6 +771,8 @@ export function apply(ctx, rawConfig) {
         // deprecated in-memory reader.
         capabilities: { zstd: typeof zlib.zstdDecompressSync === 'function' },
         announce: config.announce,
+        // Where this file was written, so a redirected marker is self-describing.
+        markerFile,
       }, null, 2)}\n`,
       'utf8',
     )
