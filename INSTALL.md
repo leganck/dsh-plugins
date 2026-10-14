@@ -20,9 +20,9 @@ Node 版本不够**不会报错**：插件降级到 `session.snapshotEvents()`�
 
 | 文件 | 链接 |
 |---|---|
-| tarball | `…/your-org/dsh-memory-archive/-/releases/v1.1.0/downloads/local-dsh-memory-archive-1.1.0.tgz` |
-| zip | `…/your-org/dsh-memory-archive/-/releases/v1.1.0/downloads/dsh-memory-archive-1.1.0.zip` |
-| 校验和 | `…/your-org/dsh-memory-archive/-/releases/v1.1.0/downloads/SHA256SUMS.txt` |
+| tarball | `…/your-org/dsh-memory-archive/-/releases/v1.1.1/downloads/local-dsh-memory-archive-1.1.1.tgz` |
+| zip | `…/your-org/dsh-memory-archive/-/releases/v1.1.1/downloads/dsh-memory-archive-1.1.1.zip` |
+| 校验和 | `…/your-org/dsh-memory-archive/-/releases/v1.1.1/downloads/SHA256SUMS.txt` |
 
 前缀 `https://git.example.com/git1`。未登录时会 **302 跳登录页**（不是 JSON 报错）；
 项目为 `internal`，任何登录本 GitLab 的账号都能取。
@@ -35,18 +35,26 @@ Node 版本不够**不会报错**：插件降级到 `session.snapshotEvents()`�
 
 ```bash
 # internal 项目 = 任何登录该 GitLab 的账号可读；匿名一律 401
-glab api "projects/850/packages/generic/dsh-memory-archive/1.1.0/local-dsh-memory-archive-1.1.0.tgz" \
-  > local-dsh-memory-archive-1.1.0.tgz
+glab api "projects/850/packages/generic/dsh-memory-archive/1.1.1/local-dsh-memory-archive-1.1.1.tgz" \
+  > local-dsh-memory-archive-1.1.1.tgz
 curl --header "PRIVATE-TOKEN: <token>" -O \
-  "https://git.example.com/api/v4/projects/850/packages/generic/dsh-memory-archive/1.1.0/dsh-memory-archive-1.1.0.zip"
+  "https://git.example.com/api/v4/projects/850/packages/generic/dsh-memory-archive/1.1.1/dsh-memory-archive-1.1.1.zip"
 # 校验
 sha256sum -c SHA256SUMS.txt
 # 或自行构建
 pwsh -File build-plugin-dist.ps1
 ```
 
-仓库：<https://git.example.com/your-org/dsh-memory-archive>（tag `v1.1.0`，
-产物位于 `release/`，通用包仓库 `dsh-memory-archive` / `1.1.0` 同步发布同一份文件）。
+**升级后给已有归档补上新的 INDEX 关键词**（只重写 `index.jsonl` 与 `INDEX.md`，
+各自保留一份 `.bak`；segment 文件只读不改）：
+
+```bash
+node tools/reindex.mjs --dry-run   # 先看会改什么
+node tools/reindex.mjs             # 确认后落盘
+```
+
+仓库：<https://git.example.com/your-org/dsh-memory-archive>（tag `v1.1.1`，
+产物位于 `release/`，通用包仓库 `dsh-memory-archive` / `1.1.1` 同步发布同一份文件）。
 
 ## 三条路径
 
