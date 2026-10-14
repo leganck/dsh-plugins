@@ -41,7 +41,22 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url))
  * Bump when the behaviour changes. It is written into `_loaded.json` so the
  * running app can be shown to hold *this* code, not a stale module cache.
  */
-export const BUILD = '2026-10-13.5'
+export const BUILD = '2026-10-14.1'
+
+/**
+ * Bumped whenever the keyword extractor changes shape.
+ *
+ * A row's keywords are final once written, so an improved extractor never reaches
+ * archives that already exist. Stamping the version gives `tools/reindex.mjs` a way
+ * to find the stale rows, and makes the rewrite idempotent: rows already at the
+ * current version are skipped.
+ *
+ * 1 -> 2: the extractor stopped ranking raw term frequency. It now folds case,
+ * drops host paths and generic code/transcript vocabulary, weights issue ids,
+ * file names, and identifiers higher, extracts CJK phrases, and breaks ties on
+ * codepoint order instead of `localeCompare`.
+ */
+export const KEYWORDS_VERSION = 2
 
 /** Config defaults; a row may override any field through the bundle patch. */
 const DEFAULTS = {
@@ -103,12 +118,84 @@ const ROLE_LABEL = {
   'tool/result': 'Tool response',
 }
 
+/**
+ * English function words plus generic code, transcript, and path vocabulary.
+ *
+ * An INDEX keyword is only worth a slot if it helps a reader pick one segment out
+ * of the archive. Measured on a real session before this list grew, the eight slots
+ * were filled by `Users`, `you`, `node_modules`, `Line`, `json`, `tool`, `call`,
+ * `session` — i.e. host path fragments and vocabulary every segment shares. Those
+ * tokens are useless for the one job the index has, so they are dropped here.
+ */
 const STOPWORDS = new Set([
+  // function words
   'this', 'that', 'with', 'from', 'have', 'will', 'your', 'what', 'when', 'then',
   'there', 'their', 'which', 'would', 'could', 'should', 'about', 'these', 'those',
   'into', 'over', 'than', 'them', 'they', 'been', 'were', 'also', 'only', 'some',
   'more', 'most', 'such', 'because', 'while', 'where', 'after', 'before', 'using',
   'used', 'does', 'each', 'other', 'same', 'make', 'made', 'must', 'need',
+  'here', 'just', 'like', 'want', 'very', 'well', 'even', 'much', 'many', 'both',
+  // The original list started here and omitted the most common English words, which
+  // is why `the` and `and` used to reach the top of a keyword row.
+  'the', 'and', 'for', 'not', 'all', 'any', 'are', 'was', 'were', 'has', 'had',
+  'its', 'can', 'but', 'you', 'our', 'who', 'how', 'why', 'get', 'set', 'new',
+  'old', 'run', 'use', 'see', 'one', 'two', 'out', 'off', 'per', 'via', 'yet',
+  'way', 'day', 'end', 'top', 'far', 'did', 'say', 'she', 'his', 'her', 'him',
+  'put', 'let', 'own', 'may', 'while', 'still', 'back', 'down', 'next', 'last',
+  // generic code and language vocabulary
+  'const', 'let', 'var', 'function', 'return', 'import', 'export', 'require',
+  'module', 'exports', 'class', 'async', 'await', 'true', 'false', 'null',
+  'undefined', 'string', 'number', 'boolean', 'object', 'array', 'value', 'values',
+  'type', 'types', 'name', 'names', 'text', 'line', 'lines', 'json', 'jsonl',
+  'yaml', 'html', 'http', 'https', 'api', 'url', 'urls', 'code', 'file', 'files',
+  'path', 'paths', 'dir', 'dirs', 'bytes', 'size', 'count', 'total', 'item',
+  'items', 'list', 'lists', 'array', 'error', 'errors', 'warn', 'info', 'debug',
+  'stack', 'trace', 'print', 'printf', 'echo', 'exit', 'stdio', 'stdout', 'stderr',
+  'node', 'npx', 'npm', 'pnpm', 'bash', 'shell', 'cmd', 'powershell', 'utf', 'null',
+  // transcript, tooling, and archive vocabulary that recurs in every segment
+  'tool', 'tools', 'call', 'calls', 'result', 'results', 'event', 'events',
+  'session', 'sessions', 'index', 'archive', 'compaction', 'plugin', 'config',
+  'args', 'options', 'table', 'tables', 'column', 'columns', 'row', 'rows',
+  'message', 'messages', 'content', 'role', 'block', 'blocks', 'chunk', 'delta',
+  'user', 'assistant', 'system', 'developer', 'tooluse', 'toolresult', 'toolcall',
+  'toolcallid', 'callid', 'tool-call', 'tool-call-result', 'seq', 'pwsh', 'grep',
+  'glob', 'read', 'edit', 'write', 'find', 'search', 'stdin', 'argv', 'splice',
+  'unknow', 'unknown', 'none', 'note', 'notes', 'example', 'sample', 'default',
+  'test', 'tests', 'mock', 'fixture', 'output', 'input', 'command', 'commands',
+  // redaction placeholders: never let a masked secret become a keyword
+  'redacted', 'masked', 'jwt', 'token', 'secret', 'bearer',
+  // stack, SQL, and log vocabulary that every segment in a Java/MySQL session shares
+  'response', 'request', 'utc', 'git', 'java', 'console', 'console.log', 'utf8',
+  'segment', 'segments', 'turn', 'turns', 'select', 'insert', 'delete', 'update',
+  'where', 'limit', 'offset', 'join', 'distinct', 'commit', 'branch', 'remote',
+])
+
+/** Filesystem and host fragments that describe where a session ran, not what it did. */
+const PATH_NOISE = new Set([
+  'users', 'home', 'desktop', 'documents', 'downloads', 'appdata', 'local',
+  'roaming', 'temp', 'tmp', 'program', 'files', 'programdata', 'windows',
+  'system32', 'node_modules', 'dist', 'build', 'out', 'bin', 'lib', 'src',
+  'main', 'scripts', 'assets', 'public', 'static', 'cache', 'scoop', 'shims',
+  'resources', 'runtime', 'profiles', 'sessions', 'attachments', 'staging',
+  'attic', 'workspace', 'workspaces', 'default', 'project', 'projects', 'repo',
+  'mcps', 'skills', 'plugins', 'extensions', 'canvases', 'transcripts', 'agent-transcripts',
+])
+
+/** Connectives split CJK runs into phrase candidates; also trimmed from phrase edges. */
+const CJK_SPLIT = /[的了是在和与及就把被给对从到为用并且如果因为所以但是然后而且或者]/
+
+/** Characters trimmed from both ends of a CJK phrase. */
+const CJK_EDGE = new Set('的了是在和与及就把被给对从到为用并且如果因为所以但是然后而且或者也都还会要能可以要想已很更最')
+
+/** CJK phrases made purely of function words; never worth a keyword slot. */
+const CJK_STOPWORDS = new Set([
+  '可以', '如果', '因为', '所以', '这个', '那个', '什么', '时候', '需要', '应该',
+  '可能', '已经', '还是', '就是', '一个', '我们', '你们', '他们', '现在', '这里',
+  '那里', '这样', '那样', '以及', '并且', '但是', '然后', '而且', '或者', '不过',
+  '只是', '同时', '全部', '所有', '一下', '一些', '进行', '使用', '通过', '关于',
+  '对于', '由于', '为了', '根据', '按照', '包括', '例如', '比如', '表示', '认为',
+  '发现', '看到', '注意', '问题', '内容', '方式', '情况', '结果', '地方', '东西',
+  '时候', '一般', '默认', '实际', '具体', '可能', '当前', '本次', '之前', '之后',
 ])
 
 /** Mask JWT-like and bearer-like strings so archives do not retain credentials. */
@@ -344,18 +431,216 @@ function toolCallsOf(shadowed) {
 /** A filesystem-safe single path segment. */
 const safeSegment = (value) => String(value ?? 'session').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)
 
-/** Top keywords for the index row, derived from the segment text. */
-function keywordsOf(text, limit = 8) {
-  const counts = new Map()
-  for (const token of String(text).match(/[A-Za-z_][A-Za-z0-9_]{3,}|[0-9]{5,}/g) ?? []) {
-    const key = token.length > 40 ? token.slice(0, 40) : token
-    if (STOPWORDS.has(key.toLowerCase())) continue
-    counts.set(key, (counts.get(key) ?? 0) + 1)
+/**
+ * Token shapes worth keeping, most specific first.
+ *
+ * Every match consumes the characters it covers, so a file name cannot also emit
+ * its extension and an issue id cannot also emit its prefix. Without that, one
+ * `index.jsonl` would spend three slots on `index.jsonl`, `jsonl`, and `index`.
+ */
+const KEYWORD_PATTERNS = [
+  // Issue ids: DEMOPRD-5170, DEMO-3464, demo-3459, DEMO-G027. The prefix must be letters
+  // only, which keeps UUID fragments (`a2b0-487`, `d18-828`) out of the boost.
+  { re: /\b[A-Za-z]{2,12}-[A-Z]?\d{2,}\b/g, weight: 3.2 },
+  { re: /[A-Za-z_][A-Za-z0-9_-]*\.[A-Za-z]{1,6}\b/g, weight: 2.2, minLength: 5 }, // index.jsonl
+  { re: /\d{8,}/g, weight: 0.6 }, // order, payment, and ticket numbers
+  { re: /[A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*/g, weight: 1 }, // identifiers and words
+]
+
+/**
+ * Escape sequences collapsed before tokenizing.
+ *
+ * Rendered tool output keeps JSON escapes, so `\n` glues the next word onto an `n`
+ * (`\nconst` tokenizes as `nconst`). A backslash followed by a letter has two
+ * readings — newline escape, or path separator — and they are lexically identical:
+ * measured in one real segment, 838 single-backslash `\n` against 82 single-backslash
+ * `\Users`, with both `…\Temp\node_modules\…` and `…$js=@'\nconst` present.
+ *
+ * The separator reading is recognised by its context: a path segment follows a word
+ * character (`Temp\node_modules`), a drive colon (`C:\temp`) or a relative-path dot
+ * (`..\temp`), so those backslashes are left alone. Anywhere else the pair is an
+ * escape and is collapsed, which is what removes `nconst` and `nconsole.log`.
+ *
+ * The choice is deliberately biased toward keeping paths intact: collapsing every
+ * `\n` would turn `\node_modules` into `ode_modules` and `\temp` into `emp`, fragments
+ * that occur nowhere in the segment and can never be grepped — a broken index entry.
+ * The residue of the bias is an occasional odd-but-verbatim keyword, which a reader
+ * can still search for and recognise as an artifact.
+ */
+const ESCAPES = /(?<![\w:.])\\(?:[ntr"'\\/]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})/g
+
+const EMPTY_NOISE = new Set()
+
+/**
+ * Multiplier for shapes that are cheap to grep and expensive to guess.
+ *
+ * These are the tokens a reader would actually type: a status constant
+ * (`REFUND_SUCCESS`), a domain identifier (`saleCode`), a compound name
+ * (`go-devops`). Plain lowercase words keep weight 1.
+ */
+function shapeWeight(token) {
+  if (/^[A-Z][A-Z0-9_]{2,}$/.test(token)) return 1.5
+  if (/[a-z][A-Z]/.test(token)) return 1.5
+  if (/[-_]/.test(token)) return 1.3
+  return 1
+}
+
+/** One folded key renders in its most frequent spelling; ties break by codepoint. */
+function displayForm(forms) {
+  let best = null
+  for (const [token, seen] of forms ?? []) {
+    if (best === null || seen > best[1] || (seen === best[1] && token < best[0])) best = [token, seen]
   }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, limit)
-    .map(([token]) => token)
+  return best === null ? '' : best[0]
+}
+
+const isCjk = (value) => /[\u3400-\u9fff]/.test(value)
+
+/** Split one CJK run into phrase candidates, dropping function-word-only fragments. */
+function cjkPhrases(run) {
+  const phrases = []
+  for (const part of run.split(CJK_SPLIT)) {
+    let start = 0
+    let end = part.length
+    while (start < end && CJK_EDGE.has(part[start])) start += 1
+    while (end > start && CJK_EDGE.has(part[end - 1])) end -= 1
+    const phrase = part.slice(start, end)
+    if (phrase.length < 2 || phrase.length > 8) continue
+    if (CJK_STOPWORDS.has(phrase)) continue
+    phrases.push(phrase)
+  }
+  return phrases
+}
+
+/** Folded path segments of the given paths; see {@link keywordNoiseFor}. */
+function noiseTokensFor(values) {
+  const noise = new Set()
+  for (const value of values) {
+    if (typeof value !== 'string' || value === '') continue
+    for (const part of value.split(/[\\/]+/)) {
+      const token = part.trim().toLowerCase()
+      if (token.length >= 3) noise.add(token)
+    }
+  }
+  return noise
+}
+
+/**
+ * Host path fragments for one session.
+ *
+ * Derived from the real home directory and session cwd instead of a hardcoded
+ * machine name: every segment of those paths is where the session *lives*, not what
+ * it is about, so none of them can discriminate between two segments.
+ */
+export function keywordNoiseFor(session) {
+  const cwd = typeof session?.header?.cwd === 'string' ? session.header.cwd : ''
+  return noiseTokensFor([homedir(), cwd])
+}
+
+/**
+ * Host path fragments for an already-archived session, recovered from its log.
+ *
+ * Reindexing runs after the fact: the `session` object the live write path uses is
+ * gone, but the log's first line is the session header and carries the authoritative
+ * `cwd` (measured shape: `{"type":"session","version":4,…,"cwd":"C:\\…\\workspace"}`).
+ * Reading it back keeps a reindexed row identical to one the plugin would write
+ * today. When the log is missing — the session was cleaned up — only the home
+ * directory is used, and `cwd` comes back empty so the caller can say so.
+ *
+ * @param sessionId Archive directory name, i.e. the session id.
+ * @param config Plugin config; defaults apply here so callers need not know them.
+ * @returns {{noise: Set<string>, cwd: string, log: string|null}}
+ */
+export function keywordNoiseForArchived(sessionId, config = null) {
+  const merged = pluginConfig(config)
+  const root = resolve(process.cwd(), expandPath(merged.sessionRoot))
+  const log = findSessionLog(root, String(sessionId))
+  let cwd = ''
+  if (log !== null) {
+    try {
+      const text = decodeSessionLog(readFileSync(log))
+      const end = text.indexOf('\n')
+      const header = JSON.parse(end === -1 ? text : text.slice(0, end))
+      if (typeof header?.cwd === 'string') cwd = header.cwd
+    } catch {
+      // An unreadable or rotated log only costs precision, never correctness.
+    }
+  }
+  return { noise: noiseTokensFor([homedir(), cwd]), cwd, log }
+}
+
+/**
+ * Top keywords for one index row.
+ *
+ * The reader's only question is "which segment has this?", so a keyword has to be
+ * discriminating and verbatim greppable. Issue ids, file names, and domain
+ * identifiers outrank plain words; host paths, generic vocabulary, and redaction
+ * placeholders are dropped outright. Ties break on codepoint order instead of
+ * `localeCompare`, so one segment always yields the same list under any host locale.
+ *
+ * @param text Segment summary plus its masked verbatim turns.
+ * @param limit Maximum keywords to return.
+ * @param noise Extra folded tokens to drop, normally from {@link keywordNoiseFor}.
+ * @returns Display spellings, best first.
+ */
+export function keywordsOf(text, limit = 8, noise = null) {
+  const raw = String(text).replace(ESCAPES, ' ')
+  const extra = noise instanceof Set ? noise : EMPTY_NOISE
+  const used = new Uint8Array(raw.length)
+  const score = new Map()
+  const count = new Map()
+  const forms = new Map()
+
+  const consider = (token, weight, key) => {
+    score.set(key, (score.get(key) ?? 0) + weight)
+    count.set(key, (count.get(key) ?? 0) + 1)
+    const seen = forms.get(key) ?? new Map()
+    seen.set(token, (seen.get(token) ?? 0) + 1)
+    forms.set(key, seen)
+  }
+
+  for (const pattern of KEYWORD_PATTERNS) {
+    pattern.re.lastIndex = 0
+    for (const match of raw.matchAll(pattern.re)) {
+      const start = match.index
+      const end = start + match[0].length
+      let free = true
+      for (let at = start; at < end; at += 1) if (used[at] === 1) { free = false; break }
+      if (!free) continue
+      // Consume the span even when the token is dropped as noise, otherwise
+      // `you.json` would fall back to spending a slot on `you` or `json`.
+      for (let at = start; at < end; at += 1) used[at] = 1
+      const token = match[0]
+      if (pattern.minLength !== undefined && token.length < pattern.minLength) continue
+      const key = token.toLowerCase()
+      if (key.length < 3 || STOPWORDS.has(key) || PATH_NOISE.has(key) || extra.has(key)) continue
+      consider(token, pattern.weight * shapeWeight(token), key)
+    }
+  }
+
+  for (const match of raw.matchAll(/[\u3400-\u9fff]{2,}/g)) {
+    for (const phrase of cjkPhrases(match[0])) {
+      consider(phrase, phrase.length >= 4 ? 1.6 : 1.1, phrase)
+    }
+  }
+
+  const ranked = [...score]
+    .map(([key, value]) => ({ key, score: value, seen: count.get(key) ?? 0, display: displayForm(forms.get(key)) }))
+    .sort((left, right) =>
+      right.score - left.score ||
+      right.seen - left.seen ||
+      (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
+
+  const picked = []
+  for (const item of ranked) {
+    if (picked.length >= limit) break
+    // CJK phrases that contain one another are one finding, not two: without this,
+    // `退款` and `退款接口` would each take a slot.
+    if (isCjk(item.key) && picked.some((other) => isCjk(other.key)
+      && (item.key.includes(other.key) || other.key.includes(item.key)))) continue
+    picked.push(item)
+  }
+  return picked.map((item) => item.display)
 }
 
 /**
@@ -468,7 +753,7 @@ function indexToolPairs(shadowed) {
 }
 
 /** Build one segment document. Pure string work; never touches the session. */
-function buildSegment({ sessionId, index, summaryEvent, shadowed, config, now }) {
+function buildSegment({ sessionId, index, summaryEvent, shadowed, config, now, keywordNoise = null }) {
   const data = summaryEvent.data ?? {}
   const summaryText = mask(blocksToText(data.summary), config.redact)
   const types = countBy(shadowed.map((event) => event.type))
@@ -638,15 +923,20 @@ function buildSegment({ sessionId, index, summaryEvent, shadowed, config, now })
     toolErrors,
     unanswered,
     targetFiles,
-    keywords: keywordsOf(keywordSource),
+    keywords: keywordsOf(keywordSource, undefined, keywordNoise),
   }
 }
 
-function renderIndex(rows, evictedRows = []) {
+export function renderIndex(rows, evictedRows = []) {
   const lines = []
   lines.push('# Compaction Archive Index')
   lines.push('')
   lines.push('Generated by `@local/dsh-memory-archive`. One row per compaction; open or grep the segment file for the full text.')
+  lines.push('')
+  lines.push('`Keywords` answer "which segment has this?". They are picked to be discriminating')
+  lines.push('and verbatim greppable — issue ids, file names, and domain identifiers outrank plain')
+  lines.push('words — while host paths, generic vocabulary, and redaction placeholders are')
+  lines.push('excluded. Grep one across `segment_*.md` to land on the segment that holds it.')
   lines.push('')
   lines.push('| Segment | File | Compaction | Shadowed seqs | Events | Tool calls | Bytes | Keywords |')
   lines.push('|---|---|---|---|---|---|---|---|')
@@ -1014,6 +1304,7 @@ export function apply(ctx, rawConfig) {
       shadowed,
       config,
       now: new Date().toISOString(),
+      keywordNoise: keywordNoiseFor(session),
     })
 
     let text = built.text
@@ -1036,6 +1327,7 @@ export function apply(ctx, rawConfig) {
       bytes,
       toolErrors: built.toolErrors,
       keywords: built.keywords,
+      keywordsVersion: KEYWORDS_VERSION,
       writtenAt: new Date().toISOString(),
     })
     writeFileSync(indexFile, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')

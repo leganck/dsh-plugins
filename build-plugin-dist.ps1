@@ -112,7 +112,7 @@ Write-Host '--- 3/6 npm pack ---'
 $npm = Join-Path $nodeDir 'npm.cmd'
 if (-not (Test-Path $npm)) { $npm = (Get-Command npm -ErrorAction SilentlyContinue).Source }
 if (-not $npm) { throw 'npm not found; cannot build the tarball' }
-Get-ChildItem $dist -Filter '*.tgz' -ErrorAction SilentlyContinue | Remove-Item -Force
+Get-ChildItem $dist -File -ErrorAction SilentlyContinue | Remove-Item -Force
 Push-Location $root
 try {
   $packed = & $npm pack --pack-destination $dist 2>&1
@@ -132,7 +132,11 @@ $stage = Join-Path $env:TEMP ("dsh-ma-stage-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 Get-ChildItem $root -Recurse -File |
   Where-Object {
-    $_.FullName -notmatch '\\dist\\' -and $_.FullName -notmatch '\\node_modules\\' -and
+    # dist/ and release/ hold the build outputs themselves: zipping them would embed
+    # the previous build's archive in the next one, so the artifact would grow on
+    # every run. The package is the source tree only.
+    $_.FullName -notmatch '\\dist\\' -and $_.FullName -notmatch '\\release\\' -and
+    $_.FullName -notmatch '\\node_modules\\' -and
     $_.Name -ne '_loaded.json' -and $_.Name -ne '.gitignore'
   } |
   ForEach-Object {
@@ -160,9 +164,18 @@ Write-Host ''
 Write-Host '--- 6/6 release/ (tracked static files) ---'
 $rel = Join-Path $root 'release'
 New-Item -ItemType Directory -Path $rel -Force | Out-Null
+$kept = @{}
 Get-ChildItem $dist -File | ForEach-Object {
+  $kept[$_.Name] = $true
   Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $rel $_.Name) -Force
   Write-Host "  release/$($_.Name)"
+}
+# Mirror, don't accumulate: an older version's artifact left behind would also be
+# absent from SHA256SUMS.txt, so the directory and the sums file would disagree.
+# The old version stays downloadable through its own tag (`/-/raw/v1.1.0/release/...`).
+Get-ChildItem $rel -File | Where-Object { -not $kept.ContainsKey($_.Name) } | ForEach-Object {
+  Write-Host "  release/$($_.Name) removed (superseded; still served by its tag)"
+  Remove-Item $_.FullName -Force
 }
 Write-Host '  commit release/ -- the release download links resolve to these paths.'
 Write-Host ''

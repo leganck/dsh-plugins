@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url'
 import { zstdCompressSync } from 'node:zlib'
 
 const pluginPath = pathToFileURL(join(import.meta.dirname, 'index.js')).href
-const { apply, BUILD } = await import(pluginPath)
+const { apply, BUILD, KEYWORDS_VERSION, keywordsOf } = await import(pluginPath)
 
 const handlers = new Map()
 const fakeCtx = { on: (name, fn) => { handlers.set(name, fn) } }
@@ -165,6 +165,80 @@ check('index carries keywords', /\| `?segment_000\.md`? \|/.test(indexText))
 check('index column is labelled Tool calls', indexText.includes('| Tool calls |'))
 check('index reports the real tool-call count', /\| 000 \| `segment_000\.md` \| `cmp-1` \| 8 \| 8 \| 3 \|/.test(indexText))
 check('index keywords never expose a masked secret fragment', !indexText.includes('abcdefghij'))
+
+const indexRows = readFileSync(join(dir, 'index.jsonl'), 'utf8')
+  .split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
+check('index stamps the keyword extractor version so stale rows can be found',
+  indexRows.length > 0 && indexRows.every((row) => row.keywordsVersion === KEYWORDS_VERSION),
+  `got ${indexRows.map((row) => row.keywordsVersion).join(',')}`)
+check('every index row carries at least one keyword',
+  indexRows.every((row) => Array.isArray(row.keywords) && row.keywords.length > 0))
+check('INDEX.md explains what the keyword column answers',
+  indexText.includes('which segment has this?'))
+
+// --- keyword extractor -----------------------------------------------------
+// The index exists so a reader can pick one segment out of the archive, so these
+// cases pin the properties that make a keyword usable. Each one reproduces a real
+// failure measured on this machine's archives: eight slots filled by host paths
+// (`Users`, `you`, `node_modules`), by `the`/`and`/`seq`, by UUID halves boosted
+// as issue ids (`a2b0-487`), and by `nconsole` glued out of a literal `\n`.
+// A mixed sample: CJK prose, a Windows path, an issue id, a UUID, a payment number,
+// and transcript noise. The determinism check runs the extractor on it twice.
+const SAMPLE_TEXT = [
+  '退款接口返回 refundOverLimit，商户 61528500 门店 POS 001。',
+  'C:\\Users\\you\\Documents\\deepseek-harness\\default-workspace\\index.js',
+  'DEMO-3459 splat-5511 a2b0-487e-40fc-8d18 0012609291623110034',
+  'const x = "\\nconsole.log"; tool-call callId seq the and',
+].join('\n')
+
+const kw = (text, limit = 8, noise = null) => keywordsOf(text, limit, noise)
+
+check('keywords: an issue id outranks a word that merely repeats',
+  kw('DEMO-3459 DEMO-3459 order order order order order')[0] === 'DEMO-3459',
+  `got ${kw('DEMO-3459 DEMO-3459 order order order order order')[0]}`)
+check('keywords: case variants fold into the most frequent spelling',
+  kw('Cursor Cursor cursor').filter((word) => word.toLowerCase() === 'cursor').length === 1
+  && kw('Cursor Cursor cursor').includes('Cursor'),
+  `got ${kw('Cursor Cursor cursor').join(',')}`)
+check('keywords: host path fragments never take a slot',
+  kw('C:\\Users\\you\\AppData\\Local\\Temp\\node_modules\\demo_core', 8, new Set(['you'])).join(',') === 'demo_core',
+  `got ${kw('C:\\Users\\you\\AppData\\Local\\Temp\\node_modules\\demo_core', 8, new Set(['you'])).join(',')}`)
+check('keywords: english function words and transcript noise are dropped',
+  kw('the and for seq callId tool-call').length === 0,
+  `got ${kw('the and for seq callId tool-call').join(',')}`)
+check('keywords: backslash-separated path words are never cut short',
+  ['target', 'new_folder'].every((word) => kw('a\\temp\\target\\new_folder').includes(word)),
+  `got ${kw('a\\temp\\target\\new_folder').join(',')}`)
+check('keywords: a path segment after a drive colon keeps its first letter',
+  kw('C:\\temp\\newfolder').includes('newfolder'),
+  `got ${kw('C:\\temp\\newfolder').join(',')}`)
+check('keywords: an escape after a quote is read as a newline, not as a word',
+  !kw("$js=@'\\nconst_total 1").some((word) => /^nconst/.test(word)),
+  `got ${kw("$js=@'\\nconst_total 1").join(',')}`)
+check('keywords: redaction placeholders are never keywords',
+  kw('***JWT*** ***REDACTED*** token secret').length === 0,
+  `got ${kw('***JWT*** ***REDACTED*** token secret').join(',')}`)
+check('keywords: a uuid is never split into id-shaped fragments',
+  kw('6787a2b0-487e-40fc-8d18-828eb4878ac6')
+    .every((word) => !/^[A-Za-z0-9_]{2,12}-[A-Za-z]?\d{2,}$/.test(word)),
+  `got ${kw('6787a2b0-487e-40fc-8d18-828eb4878ac6').join(',')}`)
+check('keywords: file names survive as single tokens',
+  kw('edited index.jsonl then index.jsonl').includes('index.jsonl'),
+  `got ${kw('edited index.jsonl then index.jsonl').join(',')}`)
+check('keywords: CJK phrases are kept verbatim so they stay greppable',
+  kw('POS 在退历史支付时把当前未完成销售单的 saleCode 带进了退款接口。')
+    .some((word) => /^[\u4e00-\u9fff]{2,8}$/.test(word)),
+  `got ${kw('POS 在退历史支付时把当前未完成销售单的 saleCode 带进了退款接口。').join(',')}`)
+check('keywords: nested CJK phrases collapse to one entry',
+  kw('退款接口 退款接口 退款接口').length === 1,
+  `got ${kw('退款接口 退款接口 退款接口').join(',')}`)
+check('keywords: equal counts break ties on the folded key, in codepoint order',
+  kw('Zeta alpha Zeta alpha', 2).join(',') === 'alpha,Zeta',
+  `got ${kw('Zeta alpha Zeta alpha', 2).join(',')}`)
+check('keywords: extraction is deterministic across runs',
+  JSON.stringify(kw(SAMPLE_TEXT)) === JSON.stringify(kw(SAMPLE_TEXT)))
+check('keywords: the limit is honoured',
+  kw('alpha beta gamma delta epsilon zeta eta theta', 3).length === 3)
 
 // --- duplicate compaction id must not create a second segment --------------
 emit('compaction/summary', {

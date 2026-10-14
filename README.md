@@ -32,6 +32,7 @@ details (exact code, file paths, tool outputs)`，以及 `Do NOT modify these fi
 ```text
 ~/.dsh/archive/<sessionId>/          # 默认；可配置，见「配置」
 ├── INDEX.md          # 每段一行：段号/文件/compactionId/影子事件数/事件数/工具数/字节/关键词
+│                     # 关键词回答的是「哪一段里有这个」，不是高频词；见下
 │                     # 末尾另有一段说明 evicted.md 覆盖了多少条（若有）
 ├── index.jsonl       # INDEX 的机器可读镜像（也用于段号计数、resume 去重）
 ├── segment_000.md
@@ -39,6 +40,35 @@ details (exact code, file paths, tool outputs)`，以及 `Do NOT modify these fi
 ├── evicted.md        # compaction/prune 摘掉的事件（任何 segment 都不可能有它们）
 └── evicted.jsonl     # evicted 账本：{seq, atSeq, tokens, bytes, writtenAt}
 ```
+
+### INDEX.md 的 Keywords 列
+
+它的唯一用途是回答**「哪一段里有这个」**，所以选词标准是「能区分 + 原文可 grep」，不是词频。
+一段 8 个词的排序大致是：工单号 > 文件名 / `CamelCase` / `CONSTANT_CASE` / 连字符复合词 > 普通词；
+中文短语按虚词切分后**原样保留**（2–8 字），所以可以直接拿去 grep。
+
+被排除的是：主机与路径片段（用户目录名、cwd 路径段，按会话动态推导）、英语虚词、通用代码与
+转写词汇（`json`、`const`、`callId`、`seq`……）、`***JWT***` 之类的脱敏占位符。
+
+实测对比（同一批归档，旧 → 新）：
+
+```text
+demo, null, java, Line, order, main, Code, false
+  → demo-3459, demo, POS, demoPayBook, order, pay, orderInfo, demo-svc-pay
+```
+
+`index.jsonl` 的每行带 `keywordsVersion`，用来判断该行由哪一版提取器生成。升级后用
+`tools/reindex.mjs` 把旧归档补上（只重写 `index.jsonl` 与 `INDEX.md`，各留一份 `.bak`）：
+
+```console
+node tools/reindex.mjs --dry-run          # 先看会改什么
+node tools/reindex.mjs                    # 落盘
+node tools/reindex.mjs --session <id>     # 只处理一个会话
+```
+
+**已知取舍**：渲染文本里，转义与路径分隔符同形（同一段里既有 `…\Temp\node_modules\…`
+也有 `…$js=@'\nconst`）。插件只吞掉无歧义的转义，宁可偶尔留下 `nconst` 这种原文可见、
+可 grep 的粘读词，也不产生 `ode_modules` 这种原文里不存在、grep 不到的碎片。
 
 单个 segment 的字段（按下表实测内容）：
 
