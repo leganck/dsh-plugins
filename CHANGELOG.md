@@ -1,6 +1,37 @@
 # Changelog
 
-归档产物的**格式**未变；1.1.0 是打包与健壮性版本。
+归档产物的**结构**未变（`segment_*.md` 照旧）；1.1.1 重做了 INDEX 关键词并新增补齐工具，
+1.1.0 是打包与健壮性版本。
+
+## 1.1.1 — 2026-10-14
+
+- **INDEX 关键词重做**（`KEYWORDS_VERSION = 2`）。旧版只取词频最高的 8 个词，实测结果是
+  一串路径与运行时噪声：`Users`、`you`、`node_modules`、`Line`、`json`、`tool`、
+  `call`、`session`——读者无法据此判断该打开哪一段。现在：
+  - **大小写折叠**：`cursor` 与 `Cursor` 不再各占一格；平局按**码点**排序而不是
+    `localeCompare`，同一段文本在任何 host locale 下产出同一份列表。
+  - **三层噪声过滤**：英语虚词（补上了此前漏掉的 `the`/`and`）、通用代码与转写词汇
+    （`json`、`const`、`callId`、`seq`……）、路径与主机片段。用户目录名与 cwd 路径段
+    **按会话动态推导**，不硬编码机器名；`***JWT***`/`***REDACTED***` 等占位符永不成词。
+  - **按形态加权**：工单号（`DEMO-3459`、`DEMOPRD-5170`）、文件名（`index.jsonl`）、
+    `CONSTANT_CASE`、`CamelCase`、连字符复合词（`demo-crm-order-5`）优先于普通小写词；
+    UUID 片段不会被误判成工单号。
+  - **中文短语**按虚词切分后原样保留（2–8 字），因此可直接 grep；互相包含的短语只留一个。
+  - 实测同一批归档：`demo, null, java, Line, order, main, Code, false` →
+    `demo-3459, demo, POS, demoPayBook, order, pay, orderInfo, demo-svc-pay`。
+- **`index.jsonl` 新增 `keywordsVersion`**：使"哪些行由旧版提取器生成"可判定，重复补齐为幂等。
+- **新增 `tools/reindex.mjs`**：从已有 segment 文件重算关键词，只重写 `index.jsonl` 与
+  `INDEX.md`（各自保留一份 `.bak`）；支持 `--dry-run`、`--session`、`--force`。会话 cwd 从
+  会话日志首行恢复（无日志时退化为只用 home 目录噪声），因此补齐结果与在线写入一致。
+- `INDEX.md` 顶部说明 `Keywords` 回答的是"哪一段里有这个"，以及它的选取口径。
+- 新增导出 `KEYWORDS_VERSION`、`keywordsOf`、`keywordNoiseFor`、`keywordNoiseForArchived`、
+  `renderIndex`，供校验与补齐工具复用。
+- 自测从 **88 项增至 104 项**（+3 索引断言，+13 提取器行为）。
+- **一个明确取舍**：转义序列与路径分隔符在渲染文本里同形——实测同一段里既有
+  `…\Temp\node_modules\…` 也有 `…$js=@'\nconst`，单反斜杠 `\n` 838 处、单反斜杠 `\Users`
+  82 处。插件只吞掉无歧义的转义（其后是空白/引号/反斜杠/行尾），宁可偶尔留下 `nconst`
+  这种**原文可见、可 grep** 的粘读词，也不产生 `ode_modules` 这种**原文里不存在、
+  grep 不到**的碎片——后者是坏索引项。
 
 ## 1.1.0 — 2026-10-13
 
