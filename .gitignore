@@ -1,3 +1,14 @@
+# 构建产物（由 build-plugin-dist.ps1 生成；release/ 才是随 tag 分发的静态副本）
 dist/
+
+# 插件运行时写的加载标记
 _loaded.json
+
+# 依赖
 node_modules/
+
+# 索引插件的本地库（默认落在 ~/.dsh/code-index，这里兜底防止误提交）
+*.db
+*.db-wal
+*.db-shm
+.dsh-index/

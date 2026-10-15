@@ -1,0 +1,33 @@
+{
+  "name": "@local/dsh-code-index",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=23.4.0"
+  },
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/*.js",
+    "test.mjs",
+    "README.md",
+    "INSTALL.md"
+  ],
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.7.6",
+    "onnxruntime-node": "^1.30.0"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.21.0": true,
+    "onnxruntime-node@1.30.0": true
+  }
+}

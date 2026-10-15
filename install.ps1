@@ -1,229 +1,194 @@
 <#
 .SYNOPSIS
-  Install or remove @local/dsh-memory-archive in a DSH profile.
+  安装本仓库里的 DSH 插件：源码 → bundle 目录 → 幂等写入 profile 的 cordis.patch.yml。
 
 .DESCRIPTION
-  Copies the bundle to <DshHome>\bundles\dsh-memory-archive, backs up the target
-  profile's cordis.patch.yml, and inserts one `memory-archive` row between
-  managed begin/end markers. Idempotent: re-running without -Force reports the
-  existing install instead of duplicating it.
+  两个插件各自的两步都做完：
+    1. 把 plugins/<name>/ 复制到 <BundleRoot>/dsh-<name>/（跳过 node_modules / dist）
+    2. 在 profile 补丁层里插入一条 `- insert: - id: <name>` 行（已存在则跳过）
 
-  Deliberately does NOT touch the profile's package.json and does NOT run pnpm in
-  the profile directory -- for a profile the Electron app manages exclusively
-  (e.g. `desktop`), the user patch layer is the only supported install surface.
+  为什么需要第 2 步：本机没有任何插件安装入口（`plugin_manager` 工具默认 disabled、
+  `dsh plugin --profile desktop` 被应用独占管理拒绝、Web 侧没有插件页），
+  cordis.patch.yml 就是这个 profile 的用户补丁层 —— 直接插入插件行是既定做法。
 
-.PARAMETER Profile
-  Profile name under <DshHome>\profiles. Defaults to $env:DSH_PROFILE, else 'desktop'.
+  注意：补丁层对**已存在的行**是热加载的，但**新插入的行要重启应用**才生效。
 
-.PARAMETER DshHome
-  DSH home. Defaults to $env:DSH_HOME, else ~/.dsh.
+.PARAMETER Plugin
+  all（默认）| memory-archive | code-index
 
-.PARAMETER BundleDir
-  Where to copy the bundle. Defaults to <DshHome>\bundles\dsh-memory-archive.
+.PARAMETER BundleRoot
+  插件安装目录，默认 C:\Users\you\dsh-bundles
 
-.PARAMETER ArchiveDir
-  Value for the archiveDir config. Defaults to an absolute <DshHome>\archive with
-  forward slashes (old plugin code does not expand `~`).
+.PARAMETER ProfileConfig
+  要写入的补丁层，默认 %USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml
 
-.PARAMETER Uninstall
-  Remove the managed block from the profile patch.
+.PARAMETER SkipNpm
+  跳过 code-index 依赖安装（onnxruntime-node 原生二进制约 661 MB，已装过就不必重复）
+
+.PARAMETER SkipPatch
+  只复制文件，不改 cordis.patch.yml
+
+.PARAMETER FetchModel
+  code-index 额外从 ModelScope 拉取 bge-small-zh-v1.5 的 ONNX 模型到 ~/.dsh/models/
 
 .PARAMETER DryRun
-  Print the planned changes and write nothing.
-
-.PARAMETER Force
-  Reinstall over an existing managed block.
+  只打印将要做什么，不落盘
 
 .EXAMPLE
-  pwsh -File install.ps1 -Profile desktop -DryRun
-  pwsh -File install.ps1 -Profile desktop
-  pwsh -File install.ps1 -Profile desktop -Uninstall
+  pwsh -File install.ps1 -Plugin all
+  pwsh -File install.ps1 -Plugin code-index -SkipNpm -DryRun
 #>
 [CmdletBinding()]
 param(
-  [string]$Profile,
-  [string]$DshHome,
-  [string]$BundleDir,
-  [string]$ArchiveDir,
-  [switch]$Uninstall,
-  [switch]$DryRun,
-  [switch]$Force
+  [ValidateSet('all', 'memory-archive', 'code-index')]
+  [string]$Plugin = 'all',
+  [string]$BundleRoot = 'C:\Users\you\dsh-bundles',
+  [string]$ProfileConfig = (Join-Path $env:USERPROFILE '.dsh\profiles\desktop\cordis.patch.yml'),
+  [switch]$SkipNpm,
+  [switch]$SkipPatch,
+  [switch]$FetchModel,
+  [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
+$repoRoot = $PSScriptRoot
 
-$BEGIN = '# >>> dsh-memory-archive (managed by install.ps1) >>>'
-$END = '# <<< dsh-memory-archive <<<'
-$ROW_ID = 'memory-archive'
-$PLUGIN_ENTRY = 'index.js'
+function Write-Step($msg) { Write-Host "  $msg" }
+function Write-Head($msg) { Write-Host "`n=== $msg ===" }
 
-# --- resolve inputs ---------------------------------------------------------
-if (-not $Profile) { $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'desktop' } }
-if (-not $DshHome) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' } }
-$DshHome = [System.IO.Path]::GetFullPath($DshHome)
-if (-not $BundleDir) { $BundleDir = Join-Path (Join-Path $DshHome 'bundles') 'dsh-memory-archive' }
-$BundleDir = [System.IO.Path]::GetFullPath($BundleDir)
-$SourceDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
-$ProfileDir = Join-Path (Join-Path $DshHome 'profiles') $Profile
-$PatchFile = Join-Path $ProfileDir 'cordis.patch.yml'
-if (-not $ArchiveDir) { $ArchiveDir = ($DshHome -replace '\\', '/') + '/archive' }
-
-Write-Host 'dsh-memory-archive installer'
-Write-Host "  source     : $SourceDir"
-Write-Host "  bundle dir : $BundleDir"
-Write-Host "  profile    : $Profile  ($ProfileDir)"
-Write-Host "  patch file : $PatchFile"
-Write-Host "  archiveDir : $ArchiveDir"
-if ($DryRun) { Write-Host '  mode       : DRY RUN (nothing will be written)' }
-Write-Host ''
-
-if (-not (Test-Path -LiteralPath $ProfileDir)) {
-  throw "profile directory not found: $ProfileDir`n(create or boot the profile once first, or pass -DshHome/-Profile)"
-}
-
-# --- read the patch, matching its existing newline style --------------------
-$existing = if (Test-Path -LiteralPath $PatchFile) { [System.IO.File]::ReadAllText($PatchFile) } else { '' }
-$nl = if ($existing.Contains("`r`n")) { "`r`n" } else { "`n" }
-$lines = if ($existing -eq '') { @() } else { $existing -split "`r?`n" }
-
-function Get-ManagedRange {
-  param([string[]]$AllLines)
-  $beginAt = -1; $endAt = -1
-  for ($i = 0; $i -lt $AllLines.Count; $i++) {
-    if ($AllLines[$i].Trim() -eq $BEGIN) { $beginAt = $i; continue }
-    if ($beginAt -ge 0 -and $AllLines[$i].Trim() -eq $END) { $endAt = $i; break }
+# 每个插件的补丁配置块。archiveDir / indexDirBase 放在用户 DSH 目录，不放工作区：
+# 这些是运行期数据（逐字工具输出、向量索引），不该进代码仓库也不该被工作区清理波及。
+$plugins = @{
+  'memory-archive' = @{
+    Dir  = 'plugins\dsh-memory-archive'
+    Id   = 'memory-archive'
+    Pkg  = 'dsh-memory-archive'
+    Patch = @(
+      '        archiveDir: "C:/Users/you/.dsh/archive"'
+      '        includeToolResults: true'
+      '        redact: true'
+      '        announce: true'
+    )
   }
-  if ($beginAt -ge 0 -and $endAt -ge $beginAt) { return @{ start = $beginAt; end = $endAt } }
-  return $null
-}
-
-$managed = Get-ManagedRange -AllLines $lines
-
-# --- uninstall --------------------------------------------------------------
-if ($Uninstall) {
-  if (-not (Test-Path -LiteralPath $PatchFile)) { throw "nothing to uninstall: $PatchFile does not exist" }
-  if (-not $managed) {
-    Write-Host "no managed block found in $PatchFile -- nothing to do."
-    exit 0
+  'code-index' = @{
+    Dir  = 'plugins\dsh-code-index'
+    Id   = 'code-index'
+    Pkg  = 'dsh-code-index'
+    Patch = @(
+      '        indexDirBase: "C:/Users/you/.dsh/code-index"'
+      '        roots:'
+      '          - "D:/Code"'
+      '        embedding:'
+      '          backend: "auto"'
+      '          modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"'
+    )
   }
-  $kept = @()
-  if ($managed.start -gt 0) { $kept += $lines[0..($managed.start - 1)] }
-  if ($managed.end + 1 -lt $lines.Count) { $kept += $lines[($managed.end + 1)..($lines.Count - 1)] }
-  # drop a trailing run of blank lines, keep one
-  while ($kept.Count -gt 1 -and $kept[-1].Trim() -eq '' -and $kept[-2].Trim() -eq '') { $kept = $kept[0..($kept.Count - 2)] }
-  $backup = "$PatchFile.bak-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
-  if (-not $DryRun) {
-    Copy-Item -LiteralPath $PatchFile -Destination $backup -Force
-    [System.IO.File]::WriteAllText($PatchFile, (($kept -join $nl) + $nl))
+}
+
+$targets = if ($Plugin -eq 'all') { @('memory-archive', 'code-index') } else { @($Plugin) }
+
+function To-FileUrl([string]$p) { 'file:///' + ($p -replace '\\', '/') }
+
+# ---------------------------------------------------------------- 1. 复制源码
+Write-Head '1. 复制源码到 bundle 目录'
+foreach ($name in $targets) {
+  $spec = $plugins[$name]
+  $src = Join-Path $repoRoot $spec.Dir
+  $dst = Join-Path $BundleRoot $spec.Pkg
+  if (-not (Test-Path (Join-Path $src 'index.js'))) { throw "源码缺 index.js：$src" }
+  Write-Step "$name : $src"
+  Write-Step "        → $dst"
+  if ($DryRun) { Write-Step '        (DryRun：跳过复制)'; continue }
+  # /E 递归但不 purge：目标目录里的 _loaded.json 会被插件自己在加载时重建
+  robocopy $src $dst /E /XD node_modules dist release .git /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+  Write-Step '        完成'
+}
+
+# ---------------------------------------------------------------- 2. 依赖
+$needsNpm = $targets -contains 'code-index'
+if ($needsNpm -and -not $SkipNpm) {
+  Write-Head '2. 安装 code-index 依赖（第一次约 661 MB；之后可加 -SkipNpm）'
+  $dst = Join-Path $BundleRoot $plugins['code-index'].Pkg
+  $nm = Join-Path $dst 'node_modules\onnxruntime-node'
+  if ($DryRun) {
+    Write-Step "(DryRun：会在 $dst 执行 npm install)"
+  } elseif (Test-Path $nm) {
+    Write-Step '  已存在 node_modules/onnxruntime-node，跳过（要重装加 -Force 后手动删目录）'
+  } else {
+    Push-Location $dst
+    try {
+      & npm install --registry=https://registry.npmmirror.com --no-audit --no-fund
+      # 新版 npm 拦 postinstall，而 onnxruntime-node 的原生二进制（含 DirectML.dll）靠它下载
+      & npm install-scripts approve onnxruntime-node
+      & npm rebuild onnxruntime-node --foreground-scripts --registry=https://registry.npmmirror.com
+    } finally { Pop-Location }
+    $dml = Join-Path $nm 'bin\napi-v6\win32\x64\DirectML.dll'
+    if (Test-Path $dml) { Write-Step '  DirectML.dll 就位（GPU 路径可用）' }
+    else { Write-Step '  ⚠️ 未找到 DirectML.dll：GPU 路径会退化成 CPU' }
   }
-  Write-Host "removed the managed block (lines $($managed.start + 1)..$($managed.end + 1))."
-  if (-not $DryRun) {
-    Write-Host "backup: $backup"
-    Write-Host ''
-    Write-Host 'RESTART the app to unload the plugin. The archive directory is left untouched:'
-    Write-Host "  $ArchiveDir"
-    Write-Host "The copied bundle is also left in place; delete it manually if you want it gone:"
-    Write-Host "  $BundleDir"
-  }
-  exit 0
+} elseif ($needsNpm) {
+  Write-Head '2. 依赖安装被 -SkipNpm 跳过'
 }
 
-# --- install ----------------------------------------------------------------
-if ($managed -and -not $Force) {
-  Write-Host "already installed: found the managed block at line $($managed.start + 1)."
-  Write-Host 're-run with -Force to rewrite it (e.g. after moving the bundle), or -Uninstall to remove it.'
-  exit 0
-}
-
-$srcEntry = Join-Path $SourceDir $PLUGIN_ENTRY
-if (-not (Test-Path -LiteralPath $srcEntry)) { throw "not a bundle directory: $srcEntry not found" }
-
-$fileUri = 'file:///' + (($BundleDir -replace '\\', '/').TrimStart('/'))
-$rowName = "$fileUri/$PLUGIN_ENTRY"
-
-$block = @(
-  $BEGIN
-  "# @local/dsh-memory-archive  (compaction archive + injected pointer)"
-  "# written by install.ps1 on " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-  "# rollback: pwsh -File install.ps1 -Profile $Profile -Uninstall"
-  "# name must resolve to index.js itself; file:// needs no pnpm in the profile."
-  '- insert:'
-  "    - id: $ROW_ID"
-  "      name: `"$rowName`""
-  '      config:'
-  "        archiveDir: `"$ArchiveDir`""
-  '        includeToolResults: true'
-  '        redact: true'
-  '        announce: true'
-  $END
-) -join $nl
-
-Write-Host '--- planned actions ---'
-Write-Host "  1. copy bundle  $SourceDir"
-Write-Host "                -> $BundleDir   (skips _loaded.json and .git)"
-Write-Host "  2. backup      $PatchFile -> $PatchFile.bak-<timestamp>"
-if ($managed) { Write-Host "  3. replace     managed block at line $($managed.start + 1)" }
-else { Write-Host '  3. append      one managed block' }
-Write-Host ''
-
-if ($DryRun) {
-  Write-Host '--- block that would be written ---'
-  Write-Host $block
-  exit 0
-}
-
-# 1. copy the bundle
-if ($SourceDir -ne $BundleDir) {
-  New-Item -ItemType Directory -Path $BundleDir -Force | Out-Null
-  Get-ChildItem -LiteralPath $SourceDir -Recurse -File |
-    Where-Object { $_.Name -ne '_loaded.json' -and $_.FullName -notmatch '\\\.git\\' } |
-    ForEach-Object {
-      $rel = $_.FullName.Substring($SourceDir.Length).TrimStart('\')
-      $dst = Join-Path $BundleDir $rel
-      New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
-      Copy-Item -LiteralPath $_.FullName -Destination $dst -Force
+# ---------------------------------------------------------------- 3. 模型（可选）
+if ($FetchModel -and ($targets -contains 'code-index')) {
+  Write-Head '3. 拉取嵌入模型（ModelScope 镜像）'
+  $md = Join-Path $env:USERPROFILE '.dsh\models\bge-small-zh-v1.5'
+  $base = 'https://modelscope.cn/models/Xenova/bge-small-zh-v1.5/resolve/master'
+  if ($DryRun) { Write-Step "(DryRun：会下载到 $md)" }
+  else {
+    New-Item -ItemType Directory -Path $md -Force | Out-Null
+    foreach ($f in @('onnx/model_fp16.onnx', 'onnx/model_int8.onnx', 'tokenizer.json', 'tokenizer_config.json', 'config.json')) {
+      $out = Join-Path $md (Split-Path $f -Leaf)
+      if (Test-Path $out) { Write-Step "  已有 $(Split-Path $f -Leaf)"; continue }
+      & curl.exe -sSL -o $out "$base/$f"
+      Write-Step "  下载 $(Split-Path $f -Leaf)"
     }
-  Write-Host "copied bundle -> $BundleDir"
-} else {
-  Write-Host 'source and bundle dir are the same; skipping the copy'
+  }
 }
 
-# 2. backup
-if (Test-Path -LiteralPath $PatchFile) {
-  $backup = "$PatchFile.bak-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
-  Copy-Item -LiteralPath $PatchFile -Destination $backup -Force
-  Write-Host "backup -> $backup"
+# ---------------------------------------------------------------- 4. 补丁层
+if (-not $SkipPatch) {
+  Write-Head '4. 写入 profile 补丁层（幂等）'
+  if (-not (Test-Path $ProfileConfig)) { throw "找不到补丁层：$ProfileConfig" }
+  $text = [System.IO.File]::ReadAllText($ProfileConfig)
+  $added = 0
+  foreach ($name in $targets) {
+    $spec = $plugins[$name]
+    if ($text -match "(?m)^\s*-\s*id:\s*$([regex]::Escape($spec.Id))\s*$") {
+      Write-Step "$($spec.Id)：已存在，跳过"
+      continue
+    }
+    $bundle = Join-Path $BundleRoot $spec.Pkg
+    $block = @(
+      ''
+      "# $(Get-Date -Format 'yyyy-MM-dd') —— install.ps1 插入：$($spec.Pkg)"
+      '- insert:'
+      "    - id: $($spec.Id)"
+      "      name: `"$(To-FileUrl (Join-Path $bundle 'index.js'))`""
+      '      config:'
+    ) + ($spec.Patch | ForEach-Object { $_ })
+    if ($DryRun) {
+      Write-Step "$($spec.Id)：将追加以下内容"
+      $block | ForEach-Object { Write-Step "      $_" }
+    } else {
+      [System.IO.File]::AppendAllText($ProfileConfig, ($block -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+      $text += ($block -join "`n")
+      $added++
+      Write-Step "$($spec.Id)：已追加"
+    }
+  }
+  if ($added -gt 0 -or $DryRun) { Write-Step '提示：新插入的行需要**重启 DSH 应用**才会加载' }
 }
 
-# 3. insert or replace
-if ($managed) {
-  $new = @()
-  if ($managed.start -gt 0) { $new += $lines[0..($managed.start - 1)] }
-  $new += ($block -split "`r?`n")
-  if ($managed.end + 1 -lt $lines.Count) { $new += $lines[($managed.end + 1)..($lines.Count - 1)] }
-} else {
-  $new = @($lines)
-  while ($new.Count -gt 0 -and $new[-1].Trim() -eq '') { $new = $new[0..($new.Count - 2)] }
-  if ($new.Count -gt 0) { $new += '' }
-  $new += ($block -split "`r?`n")
+# ---------------------------------------------------------------- 5. 小结
+Write-Head '完成'
+foreach ($name in $targets) {
+  $spec = $plugins[$name]
+  $dst = Join-Path $BundleRoot $spec.Pkg
+  $marker = if ($name -eq 'memory-archive') { Join-Path $env:USERPROFILE '.dsh\archive\_loaded.json' } else { Join-Path $env:USERPROFILE '.dsh\code-index\_loaded.json' }
+  Write-Step "$name → $dst"
+  Write-Step "  加载标记（重启后应出现）：$marker"
 }
-[System.IO.File]::WriteAllText($PatchFile, (($new -join $nl) + $nl))
-Write-Host "patched $PatchFile"
-
-# 4. structural self-check (this file has no YAML parser available)
-$verify = [System.IO.File]::ReadAllText($PatchFile)
-$idCount = ([regex]::Matches($verify, "(?m)^\s*-?\s*id:\s*$([regex]::Escape($ROW_ID))\s*$")).Count
-$beginCount = ([regex]::Matches($verify, [regex]::Escape($BEGIN))).Count
-if ($idCount -ne 1 -or $beginCount -ne 1) {
-  throw "self-check failed: id:$ROW_ID appears $idCount time(s), managed begin marker $beginCount time(s). Restore the backup and report this."
-}
-Write-Host "self-check ok: 1 row, 1 managed block"
-
-Write-Host ''
-Write-Host 'RESTART the app now -- code changes are not hot-applied (config edits are).'
-Write-Host 'then verify the marker proves this build is loaded:'
-Write-Host "  Get-Content `"$BundleDir\_loaded.json`""
-Write-Host '  -> expect "build" and "archiveDirResolved"; either missing means the old module is still held.'
-Write-Host ''
-Write-Host 'rollback:'
-Write-Host "  pwsh -File `"$PSCommandPath`" -Profile $Profile -Uninstall"
+Write-Step ''
+Write-Step '下一步：重启 DSH 应用，然后确认加载标记出现。'
