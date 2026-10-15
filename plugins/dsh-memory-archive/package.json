@@ -7,11 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://git.example.com/your-org/dsh-memory-archive.git"
+    "url": "git+https://git.example.com/your-org/dsh-plugins.git",
+    "directory": "plugins/dsh-memory-archive"
   },
-  "homepage": "https://git.example.com/your-org/dsh-memory-archive",
+  "homepage": "https://git.example.com/your-org/dsh-plugins/-/tree/main/plugins/dsh-memory-archive",
   "bugs": {
-    "url": "https://git.example.com/your-org/dsh-memory-archive/-/issues"
+    "url": "https://git.example.com/your-org/dsh-plugins/-/issues"
   },
   "keywords": [
     "dsh",

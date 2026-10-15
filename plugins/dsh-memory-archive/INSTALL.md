@@ -20,9 +20,9 @@ Node 版本不够**不会报错**：插件降级到 `session.snapshotEvents()`�
 
 | 文件 | 链接 |
 |---|---|
-| tarball | `…/your-org/dsh-memory-archive/-/releases/v1.1.1/downloads/local-dsh-memory-archive-1.1.1.tgz` |
-| zip | `…/your-org/dsh-memory-archive/-/releases/v1.1.1/downloads/dsh-memory-archive-1.1.1.zip` |
-| 校验和 | `…/your-org/dsh-memory-archive/-/releases/v1.1.1/downloads/SHA256SUMS.txt` |
+| tarball | `…/your-org/dsh-plugins/-/releases/v1.1.1/downloads/local-dsh-memory-archive-1.1.1.tgz` |
+| zip | `…/your-org/dsh-plugins/-/releases/v1.1.1/downloads/dsh-memory-archive-1.1.1.zip` |
+| 校验和 | `…/your-org/dsh-plugins/-/releases/v1.1.1/downloads/SHA256SUMS.txt` |
 
 前缀 `https://git.example.com/git1`。未登录时会 **302 跳登录页**（不是 JSON 报错）；
 项目为 `internal`，任何登录本 GitLab 的账号都能取。
@@ -53,8 +53,12 @@ node tools/reindex.mjs --dry-run   # 先看会改什么
 node tools/reindex.mjs             # 确认后落盘
 ```
 
-仓库：<https://git.example.com/your-org/dsh-memory-archive>（tag `v1.1.1`，
-产物位于 `release/`，通用包仓库 `dsh-memory-archive` / `1.1.1` 同步发布同一份文件）。
+仓库：<https://git.example.com/your-org/dsh-plugins>（本插件位于
+`plugins/dsh-memory-archive/`；tag `v1.1.1`，产物位于 `release/`，
+通用包仓库 `dsh-memory-archive` / `1.1.1` 同步发布同一份文件）。
+
+> 仓库原名为 `dsh-memory-archive`，2026-10-15 并入第二个插件后改名为 `dsh-plugins`。
+> GitLab 对旧路径保留重定向，但请优先用新地址。
 
 ## 三条路径
 
@@ -63,8 +67,11 @@ node tools/reindex.mjs             # 确认后落盘
 适用于 `dsh plugin` 可用的 profile。本包已是 bundle，所以：
 
 ```bash
-dsh plugin --profile <profile> add <本目录 | .tgz | git+https://.../dsh-memory-archive.git>
+dsh plugin --profile <profile> add <本目录 | .tgz | git+https://git.example.com/your-org/dsh-plugins.git>
 ```
+
+> 仓库变为多插件后，git 依赖指向的是**仓库根**，而插件在 `plugins/dsh-memory-archive/`。
+> 用 git 形式时请让 `dsh` 解析到该子目录（或先 clone，再 `add` 子目录的本地路径）。
 
 再把包名加进该 profile `package.json` 的 `dsh.profile.bundles`：
 
