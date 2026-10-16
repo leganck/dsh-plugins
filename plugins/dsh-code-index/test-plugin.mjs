@@ -158,6 +158,11 @@ const cases = [
   ['非法 backend', { embedding: { backend: 'quantum' } }, /backend/],
   ['负数 maxEmbedPerRun', { maxEmbedPerRun: -1 }, /maxEmbedPerRun/],
   ['非法 roots', { roots: 'D:/Code' }, /roots/],
+  // 扫描排除：三种都是"静默失效"型配置错误 —— 写错了不报错，只是排除没生效，所以必须拒绝
+  ['excludeDirs 不是数组', { excludeDirs: 'node_modules' }, /excludeDirs/],
+  ['excludePaths 元素为空', { excludePaths: [''] }, /excludePaths/],
+  ['excludePaths 用绝对路径', { excludePaths: ['D:/Code/legacy'] }, /相对路径/],
+  ['excludePaths 含 ..', { excludePaths: ['../legacy'] }, /\.\./],
 ]
 for (const [label, cfg, pattern] of cases) {
   let msg = ''

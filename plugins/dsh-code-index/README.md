@@ -89,6 +89,8 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
       strategy: "auto"                                  # auto | ast | heuristic | window
       byExt: {}                                         # 按扩展名覆盖策略表，如 {".vue": {"strategy": "heuristic"}}
     maxFileBytes: 2097152                               # 单文件上限（默认 2 MB）
+    excludeDirs: []                                     # 排除目录**名**（任意深度），与内置默认合并
+    excludePaths: []                                    # 排除**仓库相对路径**前缀；遗留/生成物目录用这个
     defaultTopK: 10
     maxEmbedPerRun: 0                                   # 默认 0 = 建库不补算向量；>0 才自动补算（重负载，见上）
     embedding:
@@ -98,6 +100,34 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
       cachePath: null                                   # 默认 ~/.dsh/index/vectors.db（与实验版共用）
       depsDir: null                                     # 默认 %LOCALAPPDATA%/dsh-code-index/embed-deps
 ```
+
+### `excludeDirs` vs `excludePaths`：两种排除，别混用
+
+真实踩过的坑（0/4 → 2/4 那次）：一个 Java 仓库里同时存在
+
+| 目录 | 文件数 | 性质 |
+|---|---|---|
+| `legacy-grails-service/` | 1034 | **遗留 Grails**（GSP/taglib，里面全是中文界面文案） |
+| `billing-service/` | 117 | 现役 Java 模块 |
+
+两者**只差 `svc-`**。遗留目录被一起索引后，占掉了 85% 的块，而**中文界面文案与任意中文提问都有中等相似度** →
+纯自然语言的中文提问，正确答案被整体挤出前列（实测 4 题命中 **0/4**）。
+排除它之后：**2/4**，且 4 题的正确答案全部回到前 40 名候选内（第 1 / 7 / 6 / 2 名）——
+**剩下的是排序问题，不是召回问题**，那属于 reranker 的活。
+
+```yaml
+    # ① 按"目录名"排除：任意深度都排掉（会误伤别处同名目录），与内置默认**合并**
+    excludeDirs: ["legacy-web"]
+
+    # ② 按"仓库相对路径"排除：只排这一个（推荐用于遗留/生成物目录）
+    excludePaths: ["legacy-grails-service", "docs/2-technical"]
+```
+
+- **改完不用全量重建**：被排除的文件在下次 `code_index` 时走 `diffFiles` 的 `removed` 分支，
+  连同它的块、FTS 行、向量一起删掉（实测：`removed=1`、`mode=incremental`）。
+- **`code_index_status` 共用同一份排除规则**（否则会把已排除文件永远报成"过期"），
+  并在输出里显示 `已排除：…` 供确认。
+- 排除**单个文件**也可以（`excludePaths: ["src/Legacy.java"]`）。
 
 ## 文件结构
 
