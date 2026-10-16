@@ -21,6 +21,14 @@
  * `bge-small` 这一臂的名次必须复现此前对同范围的实测（一个 361 块的 Java 业务模块 → **1 / 7 / 6 / 2**）；
  * 复现不了就说明脚本或约定错了，后面的数字也不可信。
  *
+ * ## ⚠️ 样本量：**别用 4 道题下结论**（真踩过）
+ * 4 道题时曾得出"bge-base 大一档并不更准（hit@3 持平 2/4）"——**换成 20 道题后结论完全相反**：
+ * bge-base hit@3 = **8/20**，bge-small = **4/20**（差 2 倍）。4 题那批恰好落在 bge-small 碰巧答对的那一档。
+ * 所以：**≥20 道题**再说结论，题库见 `tools/cases/oss-mall-30.json`（每题的标准答案都用索引内容核验过）。
+ * 20 题实测（一个 361 块的 Java 业务模块）：
+ *   bge-small hit@3 4/20 · bge-base 8/20 · Qwen3-0.6B **13/20**；三者 hit@20 都是 16~18/20
+ *   → 召回池基本够用 ⇒ 剩下的差距要靠**重排**（小交叉编码器 + 只看 top-20）
+ *
  * ## 已知坑（实测踩过，留档）
  * 1. `pipeline()` 只认 `<dir>/onnx/<file>.onnx`；下载器用 `linkOnnxSubdir` 补硬链接。
  * 2. `pipeline()` 用的 ORT 是 transformers.js **精确钉死**的 1.21.0（嵌套副本），
@@ -115,13 +123,24 @@ const ARMS = [
   },
 ]
 
-/** 参考题目（来自真实排查场景；换仓库时按需替换） */
-const CASES = [
-  ['一天里定时任务重复执行，怎么保证同一天账单不被入库两次', 'DemoBillDownloadServiceImpl'],
-  ['运营改了字段配置后，记录是谁改的', 'DemoBillFieldServiceImpl'],
-  ['旧数据缺少后来新加的列，怎么把值补回来', 'DemoBillBackfillMerge'],
-  ['不认识的 CSV 表头怎么处理', 'DemoBillField'],
-]
+/**
+ * 参考题目（来自真实排查场景）。可用 `--cases <json>` 换成更大的题库，
+ * 例：`--cases tools/cases/oss-mall-30.json`（20 道，标准答案均已用索引内容核验过）。
+ * JSON 形状：`[[问题, 期望文件子串, 说明], ...]`
+ */
+const CASES = (() => {
+  const f = arg('--cases')
+  if (!f) return [
+    ['一天里定时任务重复执行，怎么保证同一天账单不被入库两次', 'DemoBillDownloadServiceImpl'],
+    ['运营改了字段配置后，记录是谁改的', 'DemoBillFieldServiceImpl'],
+    ['旧数据缺少后来新加的列，怎么把值补回来', 'DemoBillBackfillMerge'],
+    ['不认识的 CSV 表头怎么处理', 'DemoBillField'],
+  ]
+  const arr = JSON.parse(fs.readFileSync(f, 'utf8'))
+  if (!Array.isArray(arr) || !arr.length || !Array.isArray(arr[0])) throw new Error(`题库格式不对（应为 [[问题, 期望子串], ...]）：${f}`)
+  console.log(`题库：${f}（${arr.length} 题）`)
+  return arr
+})()
 
 const req = createRequire(path.join(DEPS, 'noop.js'))
 const ort = req('onnxruntime-node')
@@ -249,14 +268,12 @@ async function makePipelineEncoder(arm) {
   }
 }
 
+const RESULTS = []
 for (const arm of ARMS) {
   if (!fs.existsSync(arm.dir)) {
     console.log(`──── ${arm.label} ────  模型目录不存在，跳过（tools/fetch-model.mjs --model ${arm.key}）\n`)
     continue
   }
-  // 存盘键必须含**用的哪个 ONNX 文件**：否则换变体（int8 ↔ fp16）时会拿旧向量配新查询向量，
-  // 等于把两个模型混用，名次会变成垃圾（这个坑真踩到过）
-  const cacheKey = `${arm.key}-${(arm.file ?? arm._variant ?? 'auto').replace(/^model_?/, '').replace('.onnx', '') || 'auto'}`
   let encode
   try {
     encode = arm.kind === 'raw' ? await makeRawEncoder(arm) : await makePipelineEncoder(arm)
@@ -268,20 +285,45 @@ for (const arm of ARMS) {
     console.log(`──── ${arm.label} ────  没有可用的 ONNX 变体，跳过\n`)
     continue
   }
-  const variantInfo = arm._variant ? `/${arm._variant}` : ''
+  // 存盘键必须含**用的哪个变体/文件**：否则 int8 ↔ fp16 换变体时会拿旧文档向量配新查询向量，
+  // 等于把两个模型混用，名次变垃圾（这个坑真踩到过）
+  const fileWord = (arm.file ?? arm._variant ?? 'auto').replace(/^model_?/, '').replace('.onnx', '') || 'auto'
+  const cacheKey = `${arm.key}-${fileWord}`
+  const variantInfo = (arm._variant ?? fileWord) !== 'auto' ? `/${arm._variant ?? fileWord}` : ''
   const deviceInfo = arm.kind === 'raw' ? `/${arm.ep[0]}` : `/${arm.device}`
   const cached = has('--reuse') ? loadVecs(cacheKey) : null
-  if (cached) {
-    const tq = Date.now()
-    const qv = await encode(CASES.map(([q]) => arm.queryPrefix() + q))
-    report(`${arm.label}${variantInfo}${deviceInfo}　[文档向量复用存盘]`, cached[0].length, 0, Date.now() - tq, rankAll(cached, qv))
-  } else {
+  const tq0 = Date.now()
+  const qv = await encode(CASES.map(([q]) => arm.queryPrefix() + q))
+  const qMs = Date.now() - tq0
+  let dv = cached
+  let docMs = 0
+  if (!dv) {
     const t1 = Date.now()
-    const dv = await encode(docs)
-    const docMs = Date.now() - t1
+    dv = await encode(docs)
+    docMs = Date.now() - t1
     saveVecs(cacheKey, dv)
-    const tq = Date.now()
-    const qv = await encode(CASES.map(([q]) => arm.queryPrefix() + q))
-    report(`${arm.label}${variantInfo}${deviceInfo}`, dv[0].length, docMs, Date.now() - tq, rankAll(dv, qv))
+  }
+  const ranks = rankAll(dv, qv)
+  RESULTS.push({ label: `${arm.label}${variantInfo}${deviceInfo}`, dim: dv[0].length, docMs, qMs, ranks })
+  report(`${arm.label}${variantInfo}${deviceInfo}${cached ? '　[文档向量复用存盘]' : ''}`, dv[0].length, docMs, qMs, ranks)
+}
+
+// 逐题矩阵：哪个模型在第几名找到答案（多题时最有信息量）
+if (RESULTS.length > 1) {
+  console.log('════ 逐题对照（名次；❌ = 未进前 40）════')
+  console.log('  问题'.padEnd(50) + RESULTS.map((r) => r.label.split('（')[0].slice(0, 12).padStart(13)).join(''))
+  CASES.forEach(([q, expect], i) => {
+    const cells = RESULTS.map((r) => {
+      const v = r.ranks[i]
+      return (v === Infinity ? '❌' : String(v)).padStart(13)
+    })
+    console.log(`  ${q.slice(0, 24).padEnd(50)}${cells.join('')}`)
+  })
+  console.log()
+  console.log('════ 汇总 ════')
+  for (const r of RESULTS) {
+    const hit = (n) => r.ranks.filter((x) => x <= n).length
+    console.log(`  ${r.label}`)
+    console.log(`     hit@1=${hit(1)}/${CASES.length}  hit@3=${hit(3)}/${CASES.length}  hit@5=${hit(5)}/${CASES.length}  hit@10=${hit(10)}/${CASES.length}  hit@20=${hit(20)}/${CASES.length}  hit@40=${hit(40)}/${CASES.length}`)
   }
 }
