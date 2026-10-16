@@ -4,12 +4,18 @@
 
 .DESCRIPTION
   官方路径（cordis-plugin-development skill 推荐）：
-    用 `plugin_manager` 的 `install_bundle`，target 传**包目录的绝对路径**。
-    skill 原文：
+    用 `plugin_manager` 的 `install_bundle`。skill 原文说的是传**包目录的绝对路径**：
       "use ordinary workspace files to author a bundle, then `plugin_manager` with
        `action: install_bundle` and the absolute package directory as `target`"
       "Do not write the profile's package.json or cordis.patch.yml ... `install_bundle`
        performs those steps"
+
+  **但本仓库推荐传 `release/` 里的 `.tgz`，而不是包目录**（实测差异）：
+    - 目录 → pnpm 用 `link:`（软链）→ **源码目录成为运行时依赖**，删/移/`git clean` 即静默失效；
+      好处是"改源码 → 重启即生效"。
+    - `.tgz` → pnpm 解包成**实体安装** → 源码目录与运行时解耦，版本固定；
+      代价是改代码要重新打包 + 重装。
+  本脚本在存在 `.tgz` 时打印 tarball 调用，否则回落到包目录调用。
 
   为什么这个脚本不能自己完成官方安装：`install_bundle` 是 **agent 工具**，不是 CLI 命令。
   本机 CLI 那条路也走不通 —— `dsh plugin --profile desktop` 直接拒绝：
@@ -105,20 +111,38 @@ if ($Mode -eq 'Official') {
   Write-Head '2. 官方路径：交给 agent 执行 install_bundle'
   foreach ($name in $targets) {
     $dir = (Resolve-Path (Join-Path $repoRoot $plugins[$name].Dir)).Path
+    # 优先用 release/ 里的 .tgz：目录会走成 link:（源码目录成为运行时依赖）
+    $tgz = Get-ChildItem (Join-Path $dir 'release') -Filter '*.tgz' -ErrorAction SilentlyContinue |
+      Sort-Object Name -Descending | Select-Object -First 1
+    $target = if ($tgz) { $tgz.FullName } else { $dir }
     Write-Step "$name"
-    Write-Step "  目标目录：$dir"
+    if ($tgz) {
+      Write-Step "  目标（tarball，推荐）：$($tgz.FullName)"
+    } else {
+      Write-Step "  目标目录：$dir"
+      Write-Step '  ⚠️ 没有 release/*.tgz，将走成 link:（软链）—— 源码目录会成为运行时依赖'
+    }
     Write-Step '  调用：'
     # 注意：PowerShell 里反斜杠不是转义符，拼接时用单引号 + 变量，别写 \" 
-    Write-Step ('    plugin_manager(action: "install_bundle", target: "' + $dir + '")')
+    Write-Step ('    plugin_manager(action: "install_bundle", target: "' + $target + '")')
   }
   Write-Step ''
-  Write-Step '判定是否生效（skill 指定，不看日志/进程列表）：'
-  Write-Step '  - 读 install_bundle 返回的 application 与 warnings 字段'
-  Write-Step '  - 用 cordis_inspect_query 确认新行与工具（无需审批）'
+  Write-Step '判定是否生效（读机器可读回执，不看日志/进程列表）：'
+  Write-Step '  - install_bundle 返回的 application / warnings / pendingBuilds'
+  Write-Step '  - application：applied=热生效；restart-required=要重启；failed=看 error.code'
+  Write-Step '  - 再 list_bundles / list_plugins 复核 installed / enabled / fiberPhase'
+  Write-Step '  - 本 profile 没有 cordis_* 工具，拿不到 cordis_inspect_query'
+  Write-Step ''
+  Write-Step '两个实测坑：'
+  Write-Step '  - approvedBuilds 只在该包"待决定"时传；已批准过的名字再传 → stale-approval（pnpm 不跑）'
+  Write-Step '  - 带生命周期脚本的重依赖包可能撞 service 侧 idleTimeoutMs(600s) 超时并回滚；'
+  Write-Step '    先跑一次把构建产物落进 pnpm store，重试通常即秒级完成'
   Write-Step ''
   Write-Step '安装后 profile 的 cordis.patch.yml 里**不应**再有本插件的 - insert: 块 ——'
   Write-Step 'install_bundle 会写 profile 的 package.json / 锁文件与 bundle 选择；'
   Write-Step '若此前用手写 insert 行装过，请一并删除以免同一 id 两处定义。'
+  Write-Step 'bundle 未提供的配置项（如 code-index 的 roots）要在补丁层按 id 覆盖行补，'
+  Write-Step '否则会用默认值 —— roots 默认空 = 允许任意路径，白名单会静默消失。'
   return
 }
 
