@@ -21,6 +21,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { Store } from './lib/store.js'
 import { createEmbedder } from './lib/embedder.js'
+import { createReranker, RERANK_TIERS } from './lib/reranker.js'
 import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms, defaultDepsDir, EMBED_PACKAGES, GROUP_NAMES, DEP_GROUPS } from './lib/deps.js'
 import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strategies.js'
 import { search as hybridSearch } from './lib/search.js'
@@ -28,7 +29,7 @@ import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js
 import { normalizeRelPrefix } from './lib/scan.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-17.10'
+export const BUILD = '2026-10-17.11'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -144,6 +145,16 @@ const DEFAULTS = {
    * （实测 8227 块把机器卡了数分钟）。重活必须先说出来、由调用方显式决定。
    */
   maxEmbedPerRun: 0,
+  /**
+   * 交叉编码器重排（**默认关**）。取值：
+   *   `off`（默认）| `fast`（top-10 候选，约 +474 ms/查询）| `quality`（top-20，约 +939 ms）
+   * 实测（103 题、bge-small + bge-reranker-base fp16/DirectML）：hit@3 **42.7% → 59.2%**（quality）
+   * / **57.3%**（fast）。它**不需要重建索引**（在现有向量之上重排），这是它相对"换嵌入模型"的核心优势。
+   * 需要另下模型：`code_index_deps action=install group=rerank`（约 531 MB，不执行依赖脚本）。
+   * 模型缺失/依赖缺失/DML 不可用时**自动降级为不重排**，只在结果里报告原因，绝不因此让搜索失败。
+   */
+  rerank: 'off',
+  rerankModelDir: null,
 }
 
 /**
@@ -201,6 +212,11 @@ function normalizeConfig(raw = {}) {
   }
   if (typeof cfg.maxFileBytes !== 'number' || cfg.maxFileBytes <= 0) {
     throw new ConfigError(`config.maxFileBytes 必须是正数，收到 ${JSON.stringify(cfg.maxFileBytes)}`)
+  }
+  // 重排必须是三个已知取值之一：**不做"未知值就当 off"的宽容**，
+  // 否则拼错（rerank: 'quality2'）会静默退化成不重排，而使用者以为已开启。
+  if (!RERANK_TIERS[cfg.rerank] && cfg.rerank !== 'off') {
+    throw new ConfigError(`config.rerank 必须是 'off' / ${Object.keys(RERANK_TIERS).join(' / ')} 之一，收到 ${JSON.stringify(cfg.rerank)}`)
   }
   // ---- 扫描排除（两种语义不同，都要校验）----
   for (const key of ['excludeDirs', 'excludePaths']) {
@@ -317,6 +333,7 @@ function applyInner(ctx, rawConfig = {}) {
             indexDirBase: config.indexDirBase,
             roots: config.allowedRoots,
             embedding: { backend: config.embedding.backend, modelDir: expandPath(config.embedding.modelDir) ?? null },
+            rerank: { tier: config.rerank, modelDir: expandPath(config.rerankModelDir) ?? null },
             chunking: { strategy: config.chunking?.strategy ?? 'auto', byExt: Object.keys(config.chunking?.byExt ?? {}) },
             // 扫描范围与预算也要记：否则"加载时到底排除了哪些目录"无法回答 ——
             // 这个坑真的踩过：profile 的 config 覆盖条目**替换整份 config**，
@@ -408,6 +425,26 @@ function applyInner(ctx, rawConfig = {}) {
       })
     }
     return embedderPromise
+  }
+
+  /**
+   * 重排器（**懒加载**）：只在配置开启且真的用到时才建会话（531 MB 模型 + DML 会话不该在启动时付）。
+   * 失败不抛错 —— 返回 {ok:false, reason}，由 search 走"不重排"的分支并把原因写进结果。
+   */
+  let rerankerPromise = null
+  async function getReranker() {
+    if (config.rerank === 'off') return { ok: false, reason: '配置 rerank = off' }
+    if (!rerankerPromise) {
+      rerankerPromise = createReranker({
+        modelDir: expandPath(config.rerankModelDir) ?? undefined,
+        backend: config.embedding.backend === 'cpu' ? 'cpu' : 'auto',
+        threads: config.embedding.threads,
+        depsDir: expandPath(config.embedding.depsDir) ?? undefined,
+        depsFallbackDirs: [PLUGIN_DIR],
+        log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
+      })
+    }
+    return rerankerPromise
   }
 
   // ---------------------------------------------------------------- code_index
@@ -527,24 +564,36 @@ function applyInner(ctx, rawConfig = {}) {
           return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。索引位于 ${dbPath}`)
         }
         const embedder = await getEmbedder()
+        const reranker = await getReranker()
+        const tier = RERANK_TIERS[config.rerank]
         const r = await hybridSearch(store, embedder, args.query, {
           topK: args.top_k ?? config.defaultTopK,
           mode: args.mode ?? 'auto',
+          reranker: tier ? reranker : null,
+          rerankCandidates: tier?.candidates ?? 0,
         })
         if (!r.results.length) {
           return textResult(
-            { repoRoot, mode: r.mode, terms: r.terms, results: [] },
+            { repoRoot, mode: r.mode, terms: r.terms, results: [], rerank: r.rerank },
             `没有命中（通道 ${r.mode}，词项 ${r.terms.join(' / ') || '无'}）。${r.note}\n`
               + `建议：换更具体的标识符（类名/方法名/错误码），或先用 grep 找确切字符串。`,
           )
         }
         const lines = [`命中 ${r.results.length} 条（通道 ${r.mode}；词项 ${r.terms.join(' / ')}）`]
         if (r.note) lines.push(`  ${r.note}`)
+        // 重排状态必须显式报告：开了没生效（缺模型/降级）与"本来就没开"是两件事，
+        // 不写清楚就会让人以为在享受重排的收益。
+        if (r.rerank?.applied) {
+          lines.push(`  重排：${config.rerank}（${r.rerank.candidates} 个候选，${r.rerank.ms} ms，${r.rerank.backend}/${r.rerank.modelFile}）`)
+        } else if (r.rerank) {
+          lines.push(`  重排未生效：${r.rerank.reason ?? '未知原因'}`)
+        }
         for (const hit of r.results) {
-          lines.push(`\n[${hit.rank}] ${hit.path}:${hit.startLine}-${hit.endLine}  (fts ${hit.ftsRank ?? '-'} / vec ${hit.vecRank ?? '-'})`)
+          const rs = hit.rerankScore === undefined ? '' : ` / rerank ${hit.rerankScore}`
+          lines.push(`\n[${hit.rank}] ${hit.path}:${hit.startLine}-${hit.endLine}  (fts ${hit.ftsRank ?? '-'} / vec ${hit.vecRank ?? '-'}${rs})`)
           lines.push(hit.snippet.split('\n').map((l) => '    ' + l).join('\n'))
         }
-        return textResult({ repoRoot, mode: r.mode, terms: r.terms, results: r.results }, lines.join('\n'))
+        return textResult({ repoRoot, mode: r.mode, terms: r.terms, results: r.results, rerank: r.rerank }, lines.join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
@@ -586,6 +635,12 @@ function applyInner(ctx, rawConfig = {}) {
         if (args.scan !== false) {
           st = scanStatus(store, repoRoot, scanOptsOf(config))
           lines.push(`  新鲜度：${st.stale ? `过期（${st.changed} 改 / ${st.removed} 删）` : '最新'}；候选文件 ${st.scanned}`)
+        }
+        // 重排状态：只报"配置值"，**不在这里加载模型**（status 必须是轻量的，不该为了显示去建 531 MB 会话）
+        if (RERANK_TIERS[config.rerank]) {
+          lines.push(`  重排：${config.rerank}（候选 ${RERANK_TIERS[config.rerank].candidates} 个，实测约 +${config.rerank === 'fast' ? 474 : 939} ms/查询，首次用到时才加载模型）`)
+        } else {
+          lines.push('  重排：off')
         }
         // 排除规则要可见：用户改完配置最需要确认的就是"到底排掉了没有"
         const excl = [...config.excludePaths.map((p) => `路径 ${normalizeRelPrefix(p)}`), ...config.excludeDirs.map((d) => `目录名 ${d}`)]
@@ -680,7 +735,19 @@ function applyInner(ctx, rawConfig = {}) {
                 missing.map((g) => `${g}: ${DEP_GROUPS[g].map((p) => `${p.name}@${p.version}`).join(', ')}`).join('；')
             : '两组依赖都已就绪：code_index 传 max_embed=<正整数> 可补算向量；AST 切块（策略 ast）可直接使用。',
         )
-        return textResult({ depsDir, ...detail, status: st }, lines.join('\n'))
+        // 重排模型是**模型**不是 npm 依赖（与嵌入模型同一约定：模型由 tools/fetch-model.mjs 下）。
+        // 这里只如实报告它是否就位 —— 因为"开了 rerank 但模型没下"会静默降级成不重排。
+        const rrDir = expandPath(config.rerankModelDir) ?? path.join(os.homedir(), '.dsh', 'models', 'bge-reranker-base')
+        const rrHas = (f) => fs.existsSync(path.join(rrDir, f))
+        lines.push('')
+        lines.push(`重排模型（${rrDir}）：`)
+        if (rrHas('model_fp16.onnx')) lines.push('  ✅ model_fp16.onnx（DirectML 推荐，实测每候选 47 ms）')
+        if (rrHas('model_int8.onnx')) lines.push('  ✅ model_int8.onnx（仅 CPU，实测每候选 250 ms）')
+        if (!rrHas('model_fp16.onnx') && !rrHas('model_int8.onnx')) {
+          lines.push(`  ❌ 未下载 —— 下载：node tools/fetch-model.mjs --model bge-reranker-base --quant fp16（531 MB）`)
+        }
+        if (rrHas('tokenizer.json')) lines.push('  ✅ tokenizer.json')
+        return textResult({ depsDir, rerankModelDir: rrDir, ...detail, status: st }, lines.join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
