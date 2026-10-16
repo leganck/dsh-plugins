@@ -12,14 +12,38 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
+import { createRequire } from 'node:module'
 
 export const SCHEMA_VERSION = 1
+
+/**
+ * `node:sqlite` 必须**延迟加载**。
+ *
+ * 之前写成顶层 `import { DatabaseSync } from 'node:sqlite'`：只要宿主环境里这个内置
+ * 模块不可用（某些 Electron 运行时形态、或换了 Node 版本），整条 ESM 导入链就会失败，
+ * 插件行会被静默跳过 —— 不注册工具、不留日志、什么都没发生，排查代价极高。
+ *
+ * 改成首次用到时才 require，并抛出可读的错误：模块能加载、apply() 能跑完、
+ * 工具能注册，真正缺能力时由工具调用报出明确原因。
+ */
+let _DatabaseSync = null
+export function sqliteDriver() {
+  if (_DatabaseSync) return _DatabaseSync
+  try {
+    _DatabaseSync = createRequire(import.meta.url)('node:sqlite').DatabaseSync
+  } catch (e) {
+    throw new Error(
+      `当前运行时没有可用的 node:sqlite（Node >= 22.5 内置，Electron 需其内嵌 Node 版本支持）：${e.message}`,
+    )
+  }
+  if (typeof _DatabaseSync !== 'function') throw new Error('node:sqlite 存在但没有导出 DatabaseSync')
+  return _DatabaseSync
+}
 
 export class Store {
   static open(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true })
-    const db = new DatabaseSync(dbPath)
+    const db = new (sqliteDriver())(dbPath)
     db.exec('pragma journal_mode = wal')
     db.exec('pragma synchronous = normal')
     const s = new Store(db)

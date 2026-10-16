@@ -14,7 +14,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { DatabaseSync } from 'node:sqlite'
+// node:sqlite 延迟加载（理由见 lib/store.js）：顶层 import 会让整个插件在缺该内置模块时静默不加载
+import { sqliteDriver } from './store.js'
 
 export const DIM = 512
 export const MAX_TOKENS = 512
@@ -26,7 +27,7 @@ const DEFAULT_CACHE = path.join(os.homedir(), '.dsh', 'index', 'vectors.db')
 export class VectorCache {
   constructor(dbPath = DEFAULT_CACHE) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true })
-    this.db = new DatabaseSync(dbPath)
+    this.db = new (sqliteDriver())(dbPath)
     this.db.exec('create table if not exists vec (key text primary key, dim integer, v blob)')
   }
 

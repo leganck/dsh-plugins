@@ -23,8 +23,37 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-15.1'
+export const BUILD = '2026-10-15.2'
 export const SCHEMA_VERSION = 1
+
+// ------------------------------------------------------------------ 加载记录仪
+/**
+ * 为什么需要它：如果插件行在【模块导入期】就失败（例如某个顶层 import 在宿主运行时
+ * 不可用 —— `node:sqlite` 就曾是这样），现象是**完全静默**的：不注册工具、不写任何
+ * 日志、什么都不发生。2026-10-15 的安装就卡在这里，靠翻 asar 与进程时间线才定位。
+ *
+ * 因此：模块被导入时留一行、apply() 进入/结束/抛错各留一行，抛错连堆栈一起写文件。
+ * 记录落在 <DSH_HOME>/code-index/_boot.log（默认 ~/.dsh/code-index/_boot.log）。
+ * 记录仪自身绝不允许影响插件加载。
+ */
+function bootDir() {
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  return path.join(home, 'code-index')
+}
+
+export function bootLog(phase, detail) {
+  try {
+    const dir = bootDir()
+    fs.mkdirSync(dir, { recursive: true })
+    const stamp = new Date().toISOString()
+    const tail = detail === undefined ? '' : ' ' + JSON.stringify(detail)
+    fs.appendFileSync(path.join(dir, '_boot.log'), `${stamp} pid=${process.pid} node=${process.version} ${phase}${tail}\n`)
+  } catch {
+    /* 记录失败不影响插件 */
+  }
+}
+
+bootLog('module-imported', { build: BUILD })
 
 const DEFAULTS = {
   /** 索引基目录：<base>/<仓库名>-<路径哈希>/index.db，每仓库一库且不落在代码仓库里 */
@@ -60,7 +89,55 @@ const textResult = (value, text) => ({ content: [{ type: 'text', text }], struct
 const fail = (message) => ({ content: [{ type: 'text', text: `错误：${message}` }] })
 
 export function apply(ctx, rawConfig = {}) {
+  bootLog('apply-entered', { configKeys: Object.keys(rawConfig ?? {}) })
+  try {
+    const r = applyInner(ctx, rawConfig)
+    bootLog('apply-completed')
+    return r
+  } catch (e) {
+    // 抛错也要留下证据：应用层只会把它当成"这一行没加载"，不会告诉你原因
+    bootLog('apply-THREW', { message: e?.message ?? String(e), stack: String(e?.stack ?? '').slice(0, 1500) })
+    throw e
+  }
+}
+
+function applyInner(ctx, rawConfig = {}) {
   const config = normalizeConfig(rawConfig)
+
+  // 加载标记：尽早写。写在这里而不是函数末尾 —— 之后任何一步（尤其工具注册）
+  // 抛错时，标记仍能证明"apply() 确实被调用过"，从而把故障范围一分为二。
+  // 位置取 indexDirBase（配置给的是 ~/.dsh/code-index），没配就退回同一处。
+  try {
+    const markerDir = path.resolve(
+      expandPath(config.indexDirBase) ?? (expandPath(config.indexDir) ?? path.join(os.homedir(), '.dsh', 'code-index')),
+    )
+    fs.mkdirSync(markerDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(markerDir, '_loaded.json'),
+      JSON.stringify(
+        {
+          build: BUILD,
+          schemaVersion: SCHEMA_VERSION,
+          loadedAt: new Date().toISOString(),
+          pid: process.pid,
+          node: process.version,
+          pluginDir: path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
+          tools: ['code_index', 'code_search', 'code_index_status'],
+          config: {
+            indexDirBase: config.indexDirBase,
+            roots: config.allowedRoots,
+            embedding: { backend: config.embedding.backend, modelDir: expandPath(config.embedding.modelDir) ?? null },
+          },
+          markerFile: path.join(markerDir, '_loaded.json'),
+        },
+        null,
+        2,
+      ),
+    )
+  } catch (e) {
+    bootLog('marker-failed', { message: String(e?.message).slice(0, 200) })
+  }
+
   const stores = new Map()
   let embedderPromise = null
 
@@ -265,37 +342,5 @@ export function apply(ctx, rawConfig = {}) {
   ctx.logger?.info?.(
     `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}）`,
   )
-
-  // 加载标记：与 memory-archive 同一套做法 —— 否则"插件到底加载没有"在运行中不可观测。
-  // 位置取 indexDirBase（配置里给的是 ~/.dsh/code-index），没配就退回 ~/.dsh/code-index。
-  try {
-    const markerDir = path.resolve(
-      expandPath(config.indexDirBase) ?? (expandPath(config.indexDir) ?? path.join(os.homedir(), '.dsh', 'code-index')),
-    )
-    fs.mkdirSync(markerDir, { recursive: true })
-    fs.writeFileSync(
-      path.join(markerDir, '_loaded.json'),
-      JSON.stringify(
-        {
-          build: BUILD,
-          schemaVersion: SCHEMA_VERSION,
-          loadedAt: new Date().toISOString(),
-          pid: process.pid,
-          node: process.version,
-          pluginDir: path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
-          tools: ['code_index', 'code_search', 'code_index_status'],
-          config: {
-            indexDirBase: config.indexDirBase,
-            roots: config.allowedRoots,
-            embedding: { backend: config.embedding.backend, modelDir: expandPath(config.embedding.modelDir) ?? null },
-          },
-          markerFile: path.join(markerDir, '_loaded.json'),
-        },
-        null,
-        2,
-      ),
-    )
-  } catch (e) {
-    ctx.logger?.warn?.(`dsh-code-index: 写加载标记失败：${String(e.message).slice(0, 120)}`)
-  }
+  bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_index_status'] })
 }
