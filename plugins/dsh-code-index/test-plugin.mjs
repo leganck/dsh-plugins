@@ -7,7 +7,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { apply } from './index.js'
+import * as plugin from './index.js'
 import { walkRepo } from './lib/scan.js'
 
 const argv = process.argv.slice(2)
@@ -34,22 +34,50 @@ function check(label, cond, extra = '') {
   }
 }
 
-// ---- 假 ctx：只实现插件真正用到的那两件事 ----
-const registry = new Map()
-const logs = []
-const ctx = {
-  tools: {
-    register(def) {
-      if (registry.has(def.name)) throw new Error(`already registered: ${def.name}`)
-      registry.set(def.name, def)
-      return () => registry.delete(def.name)
+/**
+ * 忠实模拟 cordis 的 ctx：**只有插件在 `inject` 里声明过的服务才挂得上**，
+ * 未声明就访问会抛出与 cordis 同款的错误。
+ *
+ * 为什么必须这样：2026-10-16 的真实故障是插件缺少 `export const inject = ['tools']`，
+ * 在 app 里报 `cannot get property "tools" without inject` 而整行不生效；而此前这个
+ * 测试用的是"什么都给"的宽容假 ctx，该类错误 **100% 逃过测试**。假 ctx 越宽容，
+ * 测试越没用。
+ */
+function cordisLikeCtx(mod) {
+  const declared = new Set(mod.inject ?? [])
+  const registry = new Map()
+  const logs = []
+  // 需要 inject 才能访问的服务名（cordis 内建的 logger 不在其中）
+  const SERVICES = ['tools']
+  const impl = {
+    tools: {
+      register(def) {
+        if (registry.has(def.name)) throw new Error(`already registered: ${def.name}`)
+        registry.set(def.name, def)
+        return () => registry.delete(def.name)
+      },
     },
-  },
-  logger: { info: (m) => logs.push(String(m)) },
+  }
+  const ctx = new Proxy(impl, {
+    get(target, prop) {
+      // ctx.logger 是 cordis 内建，不需要 inject
+      if (prop === 'logger') {
+        return { info: (m) => logs.push(String(m)), warn: (m) => logs.push(String(m)) }
+      }
+      // 关键：按【是否声明】判定，而不是按"实现里有没有"——
+      // 之前写成 !(prop in target) 导致夹具其实很宽容，测不出缺 inject 的插件
+      if (typeof prop === 'string' && SERVICES.includes(prop) && !declared.has(prop)) {
+        throw new Error(`cannot get property "${prop}" without inject`)
+      }
+      return target[prop]
+    },
+  })
+  return { ctx, registry, logs, declared }
 }
 
 const indexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-plugin-'))
-apply(ctx, {
+const { ctx, registry, logs, declared } = cordisLikeCtx(plugin)
+plugin.apply(ctx, {
   indexDir,
   roots: [repo],
   embedding: process.argv.includes('--no-embed') ? { backend: 'off' } : { backend: 'auto', modelDir },
@@ -60,6 +88,23 @@ console.log(`仓库: ${repo}\n索引目录: ${indexDir}\n`)
 
 // ---------- 注册面 ----------
 console.log('[1] 工具注册面')
+check('声明了 inject: tools（否则 cordis 上读不到 ctx.tools）', plugin.inject?.includes('tools') === true, JSON.stringify(plugin.inject))
+check('测试夹具自身会拒绝未声明的服务访问', (() => {
+  try {
+    void cordisLikeCtx({}).ctx.tools
+    return false
+  } catch (e) {
+    return /without inject/.test(e.message)
+  }
+})())
+check('未声明 inject 时 apply 会抛错（回归保护）', (() => {
+  try {
+    plugin.apply(cordisLikeCtx({ inject: [] }).ctx, { indexDir, roots: [repo], embedding: { backend: 'off' } })
+    return false
+  } catch (e) {
+    return /without inject/.test(e.message)
+  }
+})())
 check('注册了 3 个工具', registry.size === 3, [...registry.keys()].join(','))
 for (const name of ['code_index', 'code_search', 'code_index_status']) {
   check(`包含 ${name}`, registry.has(name))
