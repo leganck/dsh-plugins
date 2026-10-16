@@ -205,9 +205,17 @@ check('插件写入了加载日志', logs.some((l) => l.includes('dsh-code-index
 // 依赖工具：默认只**报**状态，绝不擅自下载（下载必须由显式 action 触发）
 const depsStatusOut = await deps.execute({}, {})
 const depsText = depsStatusOut.content[0].text
-check('code_index_deps 默认只报状态', /嵌入依赖目录/.test(depsText) && /状态：/.test(depsText), depsText.split('\n')[0])
-check('code_index_deps 给出可执行的下一步', /code_index_deps action=install/.test(depsText), depsText.split('\n').slice(-1)[0])
+check('code_index_deps 默认只报状态', /依赖目录/.test(depsText) && /各组状态/.test(depsText), depsText.split('\n')[0])
+check('code_index_deps 列出两个依赖组', /\[embed\]/.test(depsText) && /\[parser\]/.test(depsText))
+check('code_index_deps 给出可执行的下一步', /code_index_deps action=install group=/.test(depsText), depsText.split('\n').slice(-1)[0])
 check('code_index_deps 默认不动手（没创建 node_modules）', !fs.existsSync(path.join(testDepsDir, 'node_modules')))
+check(
+  'code_index_deps 的 group 只允许已登记的组',
+  JSON.stringify(deps?.parameters?.properties?.group?.enum) === JSON.stringify(['embed', 'parser', 'all']),
+  JSON.stringify(deps?.parameters?.properties?.group?.enum),
+)
+const badGroup = await deps.execute({ action: 'install', group: 'nope' }, {})
+check('未知 group 被拒绝且不下载', /未知依赖组/.test(badGroup.content[0].text), badGroup.content[0].text.slice(0, 60))
 const depsPruneOut = await deps.execute({ action: 'prune' }, {})
 check('code_index_deps prune 在空目录上安全', /已移除 0 个/.test(depsPruneOut.content[0].text), depsPruneOut.content[0].text.split('\n')[1])
 
