@@ -151,6 +151,8 @@ verify-install.mjs    装后验证：从已安装包跑通模块加载、工具�
 tools/fetch-model.mjs 模型下载器（**默认走 ModelScope**；逐文件校验 HTTP/字节数/下限，绝不把 0 字节当成功）
 tools/migrate-embedding-tag.mjs  升级 0.4.6 后一次性迁移历史向量缓存的 key 前缀
 tools/ab-embedding-models.mjs  嵌入模型对照（同一批块+同一批问题只换模型；--reuse 零成本重排）
+tools/rerank-eval.mjs          重排评测（固定候选池上量交叉编码器的净收益与延迟）
+tools/cases/oss-mall-30.json   103 题中文自然语言题库（每题含期望文件与依据，均已核验）
 ```
 
 ## 测试
