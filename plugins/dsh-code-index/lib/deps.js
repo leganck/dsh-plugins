@@ -197,12 +197,18 @@ export function depsStatus({ depsDir, alsoDirs = [], group = 'embed' } = {}) {
       } catch {
         resolvable = false
       }
-      return { name, wanted: version, installedInManagedDir: pkgVersion(dir, name), resolvable }
+      const actual = pkgVersion(dir, name)
+      // **必须比对版本**。只判"在不在"会漏掉最要命的情况：受管目录里是别的版本。
+      // 对 tree-sitter 尤其致命——运行时与语法包是 ABI 配对的，版本错位不会在
+      // setLanguage/parse 时报错，而是读取节点时才炸（见本文件顶部注释）。
+      const versionMatches = actual === version
+      return { name, wanted: version, installedInManagedDir: actual, versionMatches, resolvable, ready: Boolean(actual) && versionMatches && resolvable }
     })
     groups[g] = {
-      installed: packages.every((p) => p.installedInManagedDir && p.resolvable),
+      installed: packages.every((p) => p.ready),
       missing: packages.filter((p) => !p.installedInManagedDir).map((p) => p.name),
-      broken: packages.filter((p) => p.installedInManagedDir && !p.resolvable).map((p) => p.name),
+      mismatched: packages.filter((p) => p.installedInManagedDir && !p.versionMatches).map((p) => `${p.name}（装了 ${p.installedInManagedDir}，需要 ${p.wanted}）`),
+      broken: packages.filter((p) => p.installedInManagedDir && p.versionMatches && !p.resolvable).map((p) => p.name),
       packages,
     }
   }
@@ -214,6 +220,7 @@ export function depsStatus({ depsDir, alsoDirs = [], group = 'embed' } = {}) {
     group,
     installed: g.installed,
     missing: g.missing,
+    mismatched: g.mismatched,
     broken: g.broken,
     packages: g.packages,
     groups,

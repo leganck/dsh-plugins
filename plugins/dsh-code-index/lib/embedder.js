@@ -109,9 +109,13 @@ export async function createEmbedder({
     // 区分两种失败：**缺包**（要按需安装）vs **包在但加载失败**（多半是传递依赖缺失或版本不匹配）。
     // 早前把后者也说成"缺 xxx"，会把人指错方向。
     const hint =
-      st.missing.length > 0
-        ? `缺：${st.missing.join(' / ')}——按需安装请用 code_index_deps action=install` +
-          `（约 240 MB，不执行任何依赖脚本）`
+      st.missing.length > 0 || st.mismatched.length > 0
+        ? [
+            st.missing.length ? `缺：${st.missing.join(' / ')}` : '',
+            st.mismatched.length ? `版本不符：${st.mismatched.join('；')}` : '',
+          ]
+            .filter(Boolean)
+            .join('；') + `——按需安装请用 code_index_deps action=install group=embed（约 240 MB，不执行任何依赖脚本）`
         : `包已在受管目录（${st.dir}）但加载失败：${String(e?.message ?? e).slice(0, 160)}` +
           `——多为传递依赖缺失或版本不匹配，可试 code_index_deps action=repair`
     return { ok: false, reason: `嵌入依赖不可用：${hint}`, deps: st, cause: String(e?.message ?? e).slice(0, 160) }
