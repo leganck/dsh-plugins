@@ -277,6 +277,18 @@ console.log('\n[7] 嵌入依赖按需安装层')
   const st2 = depsStatus({ depsDir: fakeDeps })
   check('假包计入"受管目录已有"', st2.packages.find((p) => p.name === 'onnxruntime-node')?.installedInManagedDir === '0.0.0-fake')
 
+  // (c2) **版本比对**：装了别的版本必须算"未就绪"。
+  //     这条很要命——tree-sitter 的运行时与语法包是 ABI 配对的，版本错位不会在
+  //     setLanguage/parse 时报错，而是读取节点时才炸（'reading 138'）。
+  const mism = st2.packages.find((p) => p.name === 'onnxruntime-node')
+  check('装了别的版本 → 标记为版本不符', mism?.versionMatches === false && mism?.ready === false, `${mism?.installedInManagedDir} vs 需要 ${mism?.wanted}`)
+  check('版本不符时不误报"已就绪"', st2.installed === false && st2.mismatched.length === 1, st2.mismatched.join(','))
+  // 把假包改成"版本正确"→ 应当变成就绪（证明判定链路是活的，不是永远报错）
+  fs.writeFileSync(path.join(fakePkg, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: EMBED_PACKAGES[0].version, main: 'i.js' }))
+  const st2b = depsStatus({ depsDir: fakeDeps })
+  check('版本正确后 onnxruntime-node 变为就绪', st2b.packages.find((p) => p.name === 'onnxruntime-node')?.ready === true)
+  check('但该组整体仍未就绪（transformers 还没装）', st2b.installed === false && st2b.missing.join(',') === '@huggingface/transformers', st2b.missing.join(','))
+
   // (d) 修剪：只删非本平台的 napi-v* 目录，其它一律不动
   const ortRoot = fakeDeps
   for (const plat of ['win32', 'linux', 'darwin']) {

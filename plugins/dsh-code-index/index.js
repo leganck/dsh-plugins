@@ -27,7 +27,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.7'
+export const BUILD = '2026-10-16.8'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -582,9 +582,18 @@ function applyInner(ctx, rawConfig = {}) {
         const st = depsStatus({ depsDir, alsoDirs: [PLUGIN_DIR], group })
         lines.push(`\n各组状态（体积合计 ${(st.sizeBytes / 1048576).toFixed(1)} MB）：`)
         for (const [g, gs] of Object.entries(st.groups)) {
-          lines.push(`  [${g}] ${gs.installed ? '就绪' : `未就绪（缺 ${gs.missing.join(', ')}${gs.broken.length ? '；加载失败 ' + gs.broken.join(', ') : ''}）`}`)
+          const why = [
+            gs.missing.length ? `缺 ${gs.missing.join(', ')}` : '',
+            gs.mismatched.length ? `版本不符：${gs.mismatched.join('；')}` : '',
+            gs.broken.length ? `加载失败 ${gs.broken.join(', ')}` : '',
+          ]
+            .filter(Boolean)
+            .join('；')
+          lines.push(`  [${g}] ${gs.installed ? '就绪' : `未就绪（${why}）`}`)
           for (const p of gs.packages) {
-            lines.push(`      ${p.name}@${p.wanted}：受管目录 ${p.installedInManagedDir ?? '无'}；可解析 ${p.resolvable ? '是' : '否'}`)
+            lines.push(
+              `      ${p.name}@${p.wanted}：受管目录 ${p.installedInManagedDir ?? '无'}${p.installedInManagedDir && !p.versionMatches ? ' ⚠️ 版本不符' : ''}；可解析 ${p.resolvable ? '是' : '否'}`,
+            )
           }
         }
         const missing = GROUP_NAMES.filter((g) => !st.groups[g]?.installed)
