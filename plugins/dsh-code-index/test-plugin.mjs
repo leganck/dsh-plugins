@@ -47,8 +47,10 @@ function cordisLikeCtx(mod) {
   const declared = new Set(mod.inject ?? [])
   const registry = new Map()
   const logs = []
-  // 需要 inject 才能访问的服务名（cordis 内建的 logger 不在其中）
+  const effects = []
+  // 需要 inject 才能访问的服务名（cordis 内建的 logger / effect / on 不在其中）
   const SERVICES = ['tools']
+  const BUILTINS = ['logger', 'effect', 'on', 'inject', 'scope', 'isolate']
   const impl = {
     tools: {
       register(def) {
@@ -57,12 +59,26 @@ function cordisLikeCtx(mod) {
         return () => registry.delete(def.name)
       },
     },
+    // cordis 内建：立即执行回调，把它的返回值当作该 effect 的清理函数
+    effect(callback, label) {
+      const dispose = callback()
+      effects.push({ label, dispose, disposed: false })
+      return () => {
+        const entry = effects.find((e) => e.dispose === dispose)
+        if (entry && !entry.disposed) {
+          entry.disposed = true
+          if (typeof dispose === 'function') dispose()
+        }
+      }
+    },
   }
   const ctx = new Proxy(impl, {
     get(target, prop) {
-      // ctx.logger 是 cordis 内建，不需要 inject
-      if (prop === 'logger') {
-        return { info: (m) => logs.push(String(m)), warn: (m) => logs.push(String(m)) }
+      if (typeof prop === 'string' && BUILTINS.includes(prop)) {
+        if (prop === 'logger') {
+          return { info: (m) => logs.push(String(m)), warn: (m) => logs.push(String(m)) }
+        }
+        return target[prop]
       }
       // 关键：按【是否声明】判定，而不是按"实现里有没有"——
       // 之前写成 !(prop in target) 导致夹具其实很宽容，测不出缺 inject 的插件
@@ -72,11 +88,11 @@ function cordisLikeCtx(mod) {
       return target[prop]
     },
   })
-  return { ctx, registry, logs, declared }
+  return { ctx, registry, logs, effects, declared }
 }
 
 const indexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-plugin-'))
-const { ctx, registry, logs, declared } = cordisLikeCtx(plugin)
+const { ctx, registry, logs, effects, declared } = cordisLikeCtx(plugin)
 plugin.apply(ctx, {
   indexDir,
   roots: [repo],
@@ -86,8 +102,60 @@ plugin.apply(ctx, {
 
 console.log(`仓库: ${repo}\n索引目录: ${indexDir}\n`)
 
+// ---------- bundle 契约（按 skill cordis-plugin-development）----------
+console.log('[0] bundle 契约（cordis-plugin-development）')
+const pkgDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
+check('manifest 声明 dsh.bundle.patch', pkg.dsh?.bundle?.patch === './cordis.patch.yml', JSON.stringify(pkg.dsh))
+check('导出 name', plugin.name === 'code-index', String(plugin.name))
+check('导出 inject 含 tools', plugin.inject?.includes('tools') === true, JSON.stringify(plugin.inject))
+
+const patchText = fs.readFileSync(path.join(pkgDir, 'cordis.patch.yml'), 'utf8')
+check('bundle 补丁插入 id=code-index 的行', /-\s*id:\s*code-index/.test(patchText))
+check('补丁的 name 用包名（而非 file:// 路径）', patchText.includes(`name: '${pkg.name}'`), patchText.match(/name:.*/)?.[0] ?? '')
+
+check('exports 暴露 package.json 与 locale', Boolean(pkg.exports?.['./package.json'] && pkg.exports?.['./locale/*.json']))
+check('files 白名单含 cordis.patch.yml 与 locale', (pkg.files ?? []).includes('cordis.patch.yml') && (pkg.files ?? []).includes('locale/*.json'))
+
+const zh = JSON.parse(fs.readFileSync(path.join(pkgDir, 'locale/zh.json'), 'utf8'))
+const en = JSON.parse(fs.readFileSync(path.join(pkgDir, 'locale/en.json'), 'utf8'))
+check('locale/zh.json 与 en.json 均含 meta.title/description', Boolean(zh.meta?.title && zh.meta?.description && en.meta?.title && en.meta?.description))
+const icon = fs.statSync(path.join(pkgDir, pkg.icon ?? 'icon.svg'))
+check('icon 存在且 ≤ 256 KiB', icon.size > 0 && icon.size <= 256 * 1024, `${icon.size} B`)
+
+// dsh-ops 的硬教训：宿主这一半不能 import 任何 @deepseek-ai/* 值——
+// 那些名字由 profile 加载器提供，每多一个就多一条加载期失败的路。
+const SOURCE_FILES = ['index.js', ...fs.readdirSync(path.join(pkgDir, 'lib')).filter((f) => f.endsWith('.js')).map((f) => `lib/${f}`)]
+const dshImports = SOURCE_FILES.flatMap((rel) => {
+  const text = fs.readFileSync(path.join(pkgDir, rel), 'utf8')
+  return [...text.matchAll(/from\s+['"](@deepseek-ai\/[^'"]+)['"]/g)].map((m) => `${rel}: ${m[1]}`)
+})
+check('源码不 import 任何 @deepseek-ai/* 值', dshImports.length === 0, dshImports.join(', '))
+
+check('注册落在 ctx.effect 里', effects.length >= 1, `${effects.length} 个 effect`)
+check('effect 带可读标签', effects.every((e) => typeof e.label === 'string' && e.label.startsWith('dsh-code-index')), effects.map((e) => e.label).join(','))
+
+// ---------- 配置校验（fail loud，与 dsh-ops 同策略）----------
+console.log('\n[0b] 配置校验')
+const cases = [
+  ['未知顶层键', { nope: 1 }, /未知配置项/],
+  ['未知 embedding 键', { embedding: { nope: 1 } }, /未知配置项/],
+  ['非法 backend', { embedding: { backend: 'quantum' } }, /backend/],
+  ['非法 maxEmbedPerRun', { maxEmbedPerRun: 0 }, /maxEmbedPerRun/],
+  ['非法 roots', { roots: 'D:/Code' }, /roots/],
+]
+for (const [label, cfg, pattern] of cases) {
+  let msg = ''
+  try {
+    plugin.apply(cordisLikeCtx({ inject: ['tools'] }).ctx, cfg)
+  } catch (e) {
+    msg = String(e.message)
+  }
+  check(`拒绝${label}并指明原因`, pattern.test(msg), msg.slice(0, 90))
+}
+
 // ---------- 注册面 ----------
-console.log('[1] 工具注册面')
+console.log('\n[1] 工具注册面')
 check('声明了 inject: tools（否则 cordis 上读不到 ctx.tools）', plugin.inject?.includes('tools') === true, JSON.stringify(plugin.inject))
 check('测试夹具自身会拒绝未声明的服务访问', (() => {
   try {
@@ -163,6 +231,12 @@ check('报告库文件大小', /\d+(\.\d+)?\s*MB[)）]/.test(s2Text), s2Text.sli
 check('报告覆盖情况', /覆盖 \d+ 文件/.test(s2Text))
 check('报告嵌入器状态', /嵌入器：/.test(s2Text))
 console.log(s2Text.split('\n').map((l) => '    ' + l).join('\n'))
+
+// ---------- 卸载契约 ----------
+console.log('\n[7] 卸载契约（effect 清理）')
+const beforeSize = registry.size
+for (const e of effects) e.dispose?.()
+check('effect 清理会摘掉注册的工具', registry.size === 0, `before=${beforeSize} after=${registry.size}`)
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 if (fail) process.exitCode = 1

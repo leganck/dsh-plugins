@@ -100,14 +100,44 @@ test-plugin.mjs     插件接口自测：注册面/错误路径/三工具真实�
 
 ```console
 node test.mjs --repo D:\Code\your-repo              # 核心：32/32
-node test-plugin.mjs --repo D:\Code\your-repo       # 接口：24/24
+node test-plugin.mjs --repo D:\Code\your-repo       # 契约与接口：45/45
 ```
+
+## 按官方 skill 的合规性（cordis-plugin-development）
+
+DSH 自带技能 `cordis-plugin-development`（位于 asar 内 `dsh-agent-preset/skills/`）规定了插件契约。
+本包逐条对照如下，可执行断言都在 `test-plugin.mjs` 的 `[0] bundle 契约` 段里：
+
+| 要求 | 本包做法 |
+|---|---|
+| `package.json` 声明 `dsh.bundle.patch` | ✅ `./cordis.patch.yml` |
+| 包内补丁插入插件行，`name` 用**包名** | ✅ `name: '@local/dsh-code-index'` |
+| `export function apply(ctx, config)` | ✅ 单一导出形式，不混用 |
+| 服务依赖必须声明 | ✅ `export const inject = ['tools']` |
+| 导出 `name` | ✅ `code-index` |
+| 注册用 `ctx.effect` 并返回清理 | ✅ 三个工具注册在一个带标签的 effect 里，卸载即回收 |
+| 显示元数据 + 图标 | ✅ `locale/{zh,en}.json` 的 `meta.title/description` + `icon.svg` |
+| `exports` / `files` 白名单 | ✅ 含 `./package.json`、`./locale/*.json` |
+| 不要 import `@deepseek-ai/*` 值 | ✅ 源码零 DSH 内部导入（有断言守着） |
+| 配置放 `Config` 以便用户在补丁层改 | ⚠️ **故意不导出 Schemastery `Config`**，理由见下 |
+
+### 两个刻意的设计取舍
+
+**① 不导出 Schemastery `Config`。** 同 `dsh-ops` 的选择：宿主这一半必须做到不 import 任何
+`@deepseek-ai/*` 值——那些名字由 profile 加载器提供，每多一个就多一条让插件加载失败的路。
+本插件就曾因缺少 `inject` 而**整行静默不生效**（见下）。改为显式校验并大声失败：
+键名写错/取值非法时抛出 `ConfigError`，指明是哪个键、允许什么。
+
+**② 加载记录仪。** `~/.dsh/code-index/_boot.log` 记录模块导入、`apply()` 进入/结束/抛错
+（含堆栈）。这不是装饰：插件的失败模式是"什么都不发生"，而应用的报错去向不可靠
+（宿主 stdout 无人接收、日志目录为空）。这套记录仪上线后**第一次重启就抓到了根因**：
+`cannot get property "tools" without inject`。
 
 ## 已知边界
 
 1. **中文中间词命中依赖向量通道**。FTS5 的 unicode61 分词会把连续中文切成一个整词（`退款超限校验` 是一个 token），所以中文词项用前缀查询只能命中开头；中间词要靠向量补。
-2. **40 行窗口不是 AST 边界**，跨函数的块可能混在一起；换成语法感知切块需要重建索引。
+2. **40 行窗口不是 AST 边界**，跨函数的块可能混在一起；换成语法感知切块需要重建索引。跨版本共享率实测受此拖累（固定窗口 53.6% vs 内容定义边界 98.7%）。
 3. **依赖体积 661 MB**（`onnxruntime-node` 含全平台二进制）。
-4. **需要 Node ≥ 23.4**（`node:sqlite` 免 flag 可用）。
+4. **需要 Node ≥ 22.19 或 ≥ 24**（`node:sqlite` 免 flag 可用）。
 5. **@1 精度**：实测 RRF 在 rank 1 上不如纯通道（向量 18% > FTS5 15% > RRF 5%），所以默认返回 top-10；若你要"最可能的那一个"，用 `mode="vector"`。
-6. 插入新插件行后**需要重启 app** 才生效（补丁层的热加载对已存在的行生效，新行不生效——实测）。
+6. 改动插件代码后**需要重启 app**：cordis 不会重新 import 已加载的模块，配置热加载只对已存在的行生效。
