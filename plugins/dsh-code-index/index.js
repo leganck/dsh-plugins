@@ -1,24 +1,27 @@
 /**
  * @local/dsh-code-index —— 本地代码库混合检索插件（纯 JS）
  *
- * 三个工具：
+ * 四个工具：
  *   code_index         建库 / 增量刷新（写操作，串行）
  *   code_search        混合检索：FTS5(BM25) + 向量 → RRF（只读，可并行）
  *   code_index_status  索引覆盖与新鲜度（只读，可并行）
+ *   code_index_deps    可选嵌入依赖的按需安装/修剪（默认只报状态）
  *
  * 为什么值得做（本机 40 个真实检索事件 + 14 个仓库实测口径）：
  *   grep 循环（4KB 预算）10% → 纯 FTS5 32.5% → 纯向量 37.5% → **混合 55%（@10）**
  *   建索引成本：FTS5 0.84 s / 仓库；向量 17 分钟（GPU/fp16，14 个仓库全量）
  *   查询成本：分词后 1 ms（FTS5）+ 嵌入 ~10 ms + kNN ~1 ms
  *
- * 依赖是可选的：缺 onnxruntime-node / 缺模型文件时自动退化为纯关键词检索，
- * 并在结果里说明原因，不会让插件加载失败。
+ * 依赖是可选的**且是按需的**：装插件不下载任何重依赖（纯 JS 即可加载），
+ * 需要向量时才用 code_index_deps action=install 下到自管目录；
+ * 缺依赖/缺模型文件时自动退化为纯关键词检索并说明原因，不会让插件加载失败。
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { Store } from './lib/store.js'
 import { createEmbedder } from './lib/embedder.js'
+import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms, defaultDepsDir, EMBED_PACKAGES } from './lib/deps.js'
 import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
@@ -75,6 +78,9 @@ export function bootLog(phase, detail) {
 
 bootLog('module-imported', { build: BUILD })
 
+/** 本插件自己的目录（用于把"包内 node_modules"作为依赖解析的兜底位置） */
+const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+
 const DEFAULTS = {
   /** 索引基目录：<base>/<仓库名>-<路径哈希>/index.db，每仓库一库且不落在代码仓库里 */
   indexDirBase: null,
@@ -83,7 +89,14 @@ const DEFAULTS = {
   roots: [],
   maxFileBytes: 2 * 1024 * 1024,
   windowLines: 40,
-  embedding: { backend: 'auto', modelDir: null, threads: 6, batch: null, cachePath: null },
+  /**
+   * 嵌入依赖（onnxruntime-node + @huggingface/transformers）**不写在 package.json 里**，
+   * 而是在真正需要向量时才按需安装到 `embedding.depsDir`（默认 %LOCALAPPDATA%/dsh-code-index/embed-deps）。
+   *
+   * 理由见 lib/deps.js：实测那两包解压 463 MB、会触发构建脚本审批、还可能撞上安装超时；
+   * 而 onnxruntime-node 的 npm 包自带各平台二进制，`--ignore-scripts` 装完照样可用（dml 后端也在）。
+   */
+  embedding: { backend: 'auto', modelDir: null, threads: 6, batch: null, cachePath: null, depsDir: null },
   defaultTopK: 10,
   /**
    * 单次最多补算多少块的向量。**默认 0 = 不自动补算**：建库只做 FTS5（秒级）。
@@ -160,6 +173,15 @@ function normalizeConfig(raw = {}) {
   }
   if (cfg.indexDir !== null && typeof cfg.indexDir !== 'string') {
     throw new ConfigError(`config.indexDir 必须是字符串或 null，收到 ${typeof cfg.indexDir}`)
+  }
+  if (cfg.embedding.depsDir !== null && cfg.embedding.depsDir !== undefined && typeof cfg.embedding.depsDir !== 'string') {
+    throw new ConfigError(`config.embedding.depsDir 必须是字符串或 null，收到 ${typeof cfg.embedding.depsDir}`)
+  }
+  if (cfg.embedding.modelDir !== null && cfg.embedding.modelDir !== undefined && typeof cfg.embedding.modelDir !== 'string') {
+    throw new ConfigError(`config.embedding.modelDir 必须是字符串或 null，收到 ${typeof cfg.embedding.modelDir}`)
+  }
+  if (cfg.embedding.cachePath !== null && cfg.embedding.cachePath !== undefined && typeof cfg.embedding.cachePath !== 'string') {
+    throw new ConfigError(`config.embedding.cachePath 必须是字符串或 null，收到 ${typeof cfg.embedding.cachePath}`)
   }
   if (!Array.isArray(cfg.roots)) throw new ConfigError(`config.roots 必须是数组，收到 ${typeof cfg.roots}`)
   if (!BACKENDS.includes(cfg.embedding.backend)) {
@@ -288,6 +310,9 @@ function applyInner(ctx, rawConfig = {}) {
         threads: config.embedding.threads,
         batch: config.embedding.batch,
         cachePath: expandPath(config.embedding.cachePath) ?? undefined,
+        // 依赖按需安装在受管目录；插件自身目录作为兜底（兼容把依赖装在包内的旧形态）
+        depsDir: expandPath(config.embedding.depsDir) ?? undefined,
+        depsFallbackDirs: [PLUGIN_DIR],
         log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
       })
     }
@@ -469,8 +494,70 @@ function applyInner(ctx, rawConfig = {}) {
     },
   })
 
+  registerTool({
+    name: 'code_index_deps',
+    description:
+      '管理代码索引插件的**可选嵌入依赖**（onnxruntime-node + @huggingface/transformers；解压约 240–460 MB）。'
+      + '这两个依赖**不随插件安装**——插件装好即可用（纯关键词检索），只有真正需要向量检索时才用本工具按需下载。'
+      + 'action：status（默认，只看状态）/ install（下载安装；用 --ignore-scripts，**不执行任何依赖脚本**，因此不需要构建审批）/ '
+      + 'prune（修剪非本平台的二进制，实测省约 223 MB）/ repair（删掉重装）/ remove（删除）。'
+      + '只安装到插件自管的受管目录，不改 profile、不改 package.json。install/repair 需要网络，可能耗时数分钟。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'install', 'prune', 'repair', 'remove'], description: '默认 status。' },
+        registry: { type: 'string', description: '可选的 npm registry（省略则沿用本机 npm 配置）。' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => [{ type: 'text', text: v.content?.[0]?.text ?? '' }] },
+    async execute(args) {
+      try {
+        const action = args.action ?? 'status'
+        const depsDir = expandPath(config.embedding.depsDir) ?? defaultDepsDir()
+        const lines = [`嵌入依赖目录：${depsDir}`]
+        let detail = {}
+        if (action === 'install' || action === 'repair') {
+          const log = (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`)
+          const fn = action === 'install' ? installDeps : repairDeps
+          const r = await fn({ depsDir, registry: args.registry, log })
+          lines.push(r.note)
+          if (r.stdout) {
+            const tail = String(r.stdout).trim().split('\n').filter(Boolean).slice(-3)
+            if (tail.length) lines.push(`npm 输出尾部：${tail.join(' | ')}`)
+          }
+          detail = { action, ok: r.ok }
+        } else if (action === 'prune') {
+          const p = pruneForeignPlatforms(depsDir)
+          lines.push(
+            `已移除 ${p.removed.length} 个非本平台目录（保留 ${p.kept}），回收 ${(p.freedBytes / 1048576).toFixed(1)} MB`,
+          )
+          detail = { action, removed: p.removed.length, freedBytes: p.freedBytes }
+        } else if (action === 'remove') {
+          const r = removeDeps(depsDir)
+          lines.push(r.note)
+          detail = { action, removed: r.removed }
+        }
+        const st = depsStatus({ depsDir, alsoDirs: [PLUGIN_DIR] })
+        lines.push(`状态：${st.installed ? '受管目录内已就绪' : `受管目录内缺 ${st.missing.join(', ')}`}；体积 ${(st.sizeBytes / 1048576).toFixed(1)} MB`)
+        for (const p of st.packages) {
+          lines.push(`  ${p.name}@${p.wanted}：受管目录 ${p.installedInManagedDir ?? '无'}；可解析 ${p.resolvable ? '是' : '否'}`)
+        }
+        lines.push(
+          st.installed
+            ? '下一步：code_index 传 max_embed=<正整数> 即可补算向量（默认 0 = 不自动补算）'
+            : `下一步：code_index_deps action=install 下载依赖（${EMBED_PACKAGES.map((p) => `${p.name}@${p.version}`).join(', ')}）`,
+        )
+        return textResult({ depsDir, ...detail, status: st }, lines.join('\n'))
+      } catch (e) {
+        return fail(String(e.message))
+      }
+    },
+  })
+
   ctx.logger?.info?.(
-    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}）`,
+    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}，deps=${expandPath(config.embedding.depsDir) ?? defaultDepsDir()}）`,
   )
-  bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_index_status'] })
+  bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_index_status', 'code_index_deps'] })
 }

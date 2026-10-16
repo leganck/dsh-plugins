@@ -48,7 +48,7 @@ pwsh -File install.ps1 -DryRun
 | 改已加载插件的**代码** | 必须重启（cordis 不会重新 import 已加载模块） |
 | 改 profile 补丁层（加/改行） | 补丁层本身热加载；**新增行**的插件通常要重启 |
 
-### 本机踩过的两个坑（写在这里省时间）
+### 本机踩过的三个坑（写在这里省时间）
 
 1. **`approvedBuilds` 只在"待决定"时传。** 授权按包名**持久**保存在 profile 的
    `pnpm-workspace.yaml`（`allowBuilds`）。已经批准过的名字再传一次 → 服务端直接拒绝
@@ -59,8 +59,22 @@ pwsh -File install.ps1 -DryRun
    manifest 与 lockfile。带生命周期脚本的重依赖包会撞上它——`onnxruntime-node` 的
    `postinstall` 会 bootstrap `global-agent` 走代理，脚本结束后 pnpm 迟迟不退出，于是
    pnpm 自己打印 `Done in 2s` 却仍被判超时。**缓解**：让它先跑一次，把构建产物落进 pnpm store；
-   命中缓存的脚本不再执行，第二次重试通常 2 秒内干净退出（code-index 就是这样装成的）。
+   命中缓存的脚本不再执行，第二次重试通常 2 秒内干净退出。
    该值可在补丁层给 `plugin-manager` 行调大。
+3. **重依赖不该写进 `package.json`（前两条的根治办法）。** 上面 1、2 两条都是"插件带着
+   几百 MB 原生依赖"派生出来的。`dsh-code-index` 从 **0.3.0** 起把
+   `onnxruntime-node` / `@huggingface/transformers` 改成**运行时按需安装**到自管目录
+   （`code_index_deps` 工具，`npm install --ignore-scripts`），于是：
+   装插件 **1.6 秒、`pendingBuilds` 无此键、零审批**；需要向量时再下 46 秒 / 661 MB，
+   修剪非本平台二进制后 264 MB。**新增重依赖时请先问"它能不能按需装"。**
+
+   实测对照（同一次安装动作）：
+
+   | | 0.2.1（把依赖写进 package.json） | 0.3.0（按需安装） |
+   |---|---|---|
+   | `pendingBuilds` | `["onnxruntime-node","protobufjs","sharp"]` → 需人类批准 | **无此键** |
+   | 安装耗时 | 287+208 MB 下载；曾撞 10 分钟超时并回滚两次 | **`Done in 1.6s`** |
+   | 包变动 | `+61` | **`+1 -85`**（顺带清掉旧依赖树） |
 
 装完**用返回字段判定**，不要只看插件自己的标记：
 

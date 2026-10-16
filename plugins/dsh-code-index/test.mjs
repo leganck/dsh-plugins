@@ -14,6 +14,16 @@ import path from 'node:path'
 import { Store } from './lib/store.js'
 import { buildIndex, scanStatus, dropIndex } from './lib/indexer.js'
 import { createEmbedder } from './lib/embedder.js'
+import {
+  depsStatus,
+  makeResolvers,
+  loadFrom,
+  buildInstallArgs,
+  npmInvocation,
+  pruneForeignPlatforms,
+  readManifest,
+  EMBED_PACKAGES,
+} from './lib/deps.js'
 import { search } from './lib/search.js'
 import { walkRepo } from './lib/scan.js'
 
@@ -211,8 +221,109 @@ const r8d = await buildIndex({
 })
 check('默认（不传预算）不调用嵌入器', !embedCalled && /预算为 0/.test(r8d.embedNote), r8d.embedNote)
 
-// ---------- 7. 清理 ----------
-console.log('\n[7] 清空索引')
+// ---------- 7. 可选嵌入依赖：按需安装层 ----------
+// 这一节全部**离线**：不下载、不联网、不跑模型。验证的是"缺依赖时如实降级 + 修剪只动该动的东西"。
+console.log('\n[7] 嵌入依赖按需安装层')
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-deps-test-'))
+  const fakeDeps = path.join(tmp, 'embed-deps')
+
+  // (a) 目录不存在时 status 必须"可回答而不抛错"
+  const st0 = depsStatus({ depsDir: fakeDeps })
+  check('缺依赖时 status 不抛错', typeof st0 === 'object' && st0.installed === false)
+  check('缺依赖时列出缺哪些包', st0.missing.length === 2 && st0.missing.includes('onnxruntime-node'), st0.missing.join(','))
+  check('缺依赖时不创建目录', !fs.existsSync(fakeDeps))
+
+  // (b) 空目录也不能误报"已就绪"
+  fs.mkdirSync(fakeDeps, { recursive: true })
+  const st1 = depsStatus({ depsDir: fakeDeps })
+  check('空目录不算已安装', st1.installed === false && st1.dirExists === true)
+
+  // (c) 假包 → 解析器必须能解析出来（验证 createRequire 锚点是对的）
+  const fakePkg = path.join(fakeDeps, 'node_modules', 'onnxruntime-node')
+  fs.mkdirSync(fakePkg, { recursive: true })
+  fs.writeFileSync(path.join(fakePkg, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: '0.0.0-fake', main: 'i.js' }))
+  fs.writeFileSync(path.join(fakePkg, 'i.js'), 'module.exports = { fake: true }\n')
+  const resolvers = makeResolvers({ depsDir: fakeDeps })
+  let resolved = null
+  try {
+    resolved = loadFrom(resolvers, 'onnxruntime-node')
+  } catch (e) {
+    resolved = { err: String(e.message) }
+  }
+  check('受管目录内的包可被解析', resolved?.fake === true, JSON.stringify(resolved).slice(0, 80))
+  const st2 = depsStatus({ depsDir: fakeDeps })
+  check('假包计入"受管目录已有"', st2.packages.find((p) => p.name === 'onnxruntime-node')?.installedInManagedDir === '0.0.0-fake')
+
+  // (d) 修剪：只删非本平台的 napi-v* 目录，其它一律不动
+  const ortRoot = fakeDeps
+  for (const plat of ['win32', 'linux', 'darwin']) {
+    for (const arch of ['x64', 'arm64']) {
+      const d = path.join(ortRoot, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', plat, arch)
+      fs.mkdirSync(d, { recursive: true })
+      fs.writeFileSync(path.join(d, 'onnxruntime.dll'), 'x'.repeat(2048))
+    }
+  }
+  // 放一个"不该被动"的目录，验证修剪有边界
+  const untouch = path.join(fakeDeps, 'node_modules', 'unrelated', 'bin', 'napi-v6', 'linux')
+  fs.mkdirSync(untouch, { recursive: true })
+  fs.writeFileSync(path.join(untouch, 'keep.txt'), 'keep')
+  const pruned = pruneForeignPlatforms(fakeDeps)
+  const kept = path.join(ortRoot, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', process.platform, process.arch)
+  const goneLinux = path.join(ortRoot, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', 'linux')
+  check('修剪后本平台/本架构仍在', fs.existsSync(kept))
+  check('修剪移除了 foreign 平台', !fs.existsSync(goneLinux))
+  check(
+    '修剪只动 onnxruntime-node 底下的东西',
+    // 夹具是 3 平台 × 2 架构 = 6 个目录。removed 记的是"被删的目录项"：
+    // 非本平台各删 1 个平台目录（win32 上 = linux + darwin = 2），本平台内再删 1 个非本架构（arm64）= 1，
+    // 合计恒为 3（换平台同理）。关键断言是"每一项都在 onnxruntime-node 底下"。
+    pruned.removed.length === 3 && pruned.removed.every((p) => p.includes('onnxruntime-node')) && pruned.freedBytes > 0,
+    `移除 ${pruned.removed.length} 个，回收 ${(pruned.freedBytes / 1024).toFixed(1)} KB；${pruned.removed.map((p) => p.split(/[\\/]/).slice(-2).join('/')).join(', ')}`,
+  )
+  check('修剪写入 manifest 便于追溯', (readManifest(fakeDeps) ?? {}).prunedFor === `${process.platform}-${process.arch}`)
+  check('修剪不动无关目录', fs.existsSync(path.join(untouch, 'keep.txt')))
+
+  // (e) 安装参数构造（不真跑网络）：必须带 --ignore-scripts，且版本是固定的
+  const args = buildInstallArgs({ dir: fakeDeps })
+  check('安装参数含 --ignore-scripts', args.includes('--ignore-scripts'))
+  check('安装参数逐个钉版本', args.includes(`onnxruntime-node@${EMBED_PACKAGES[0].version}`) && args.includes(`@huggingface/transformers@${EMBED_PACKAGES[1].version}`))
+  check('显式 registry 才会被传', !args.includes('--registry') && buildInstallArgs({ dir: fakeDeps, registry: 'https://example.invalid' }).includes('--registry'))
+  const inv = npmInvocation(['install', 'x'])
+  if (process.platform === 'win32') {
+    check('Windows 走 cmd.exe 而非直接 spawn npm.cmd', String(inv.file).toLowerCase().endsWith('cmd.exe'), inv.file)
+  } else {
+    check('POSIX 直接用 npm', inv.file === 'npm')
+  }
+
+  // (f) embedder 在缺依赖时必须给出"可执行下一步"，而不是一句泛泛的失败
+  // 注意：要给一个**存在 tokenizer.json 的假模型目录**，否则会先在"缺分词器"那一步返回，
+  // 测不到依赖这一层（这个顺序是真实的：先查模型文件，再加载依赖）。
+  const fakeModel = path.join(tmp, 'fake-model')
+  fs.mkdirSync(fakeModel, { recursive: true })
+  fs.writeFileSync(path.join(fakeModel, 'tokenizer.json'), '{}')
+  const emb = await createEmbedder({ modelDir: fakeModel, depsDir: fakeDeps, backend: 'cpu', log: () => {} })
+  const reason = emb.ok ? '（embedder 竟然成功——说明本机全局装了依赖）' : emb.reason
+  check('embedder 在缺依赖时返回 ok:false 且不抛错', typeof emb.ok === 'boolean')
+  check(
+    '降级原因指向 code_index_deps action=install',
+    /code_index_deps action=install/.test(String(reason)),
+    String(reason).slice(0, 120),
+  )
+  // 这里受管目录里有一个"假 onnxruntime-node"，所以缺的应当是 @huggingface/transformers；
+  // 断言"列出真正缺的那个"，而不是写死某个包名
+  const missingNow = depsStatus({ depsDir: fakeDeps }).missing
+  check(
+    '降级原因列出真正缺的包',
+    missingNow.length > 0 && missingNow.some((n) => String(reason).includes(n)),
+    `缺 ${missingNow.join(',')}；原因里提到的是上面这个 → ${missingNow.some((n) => String(reason).includes(n))}`,
+  )
+
+  fs.rmSync(tmp, { recursive: true, force: true })
+}
+
+// ---------- 8. 清理 ----------
+console.log('\n[8] 清空索引')
 dropIndex(store)
 check('清空后块数为 0', store.stats().chunks === 0)
 check('清空后向量为 0', store.stats().vectors === 0)
