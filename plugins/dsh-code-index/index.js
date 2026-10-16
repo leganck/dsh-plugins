@@ -23,8 +23,22 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-15.2'
+export const BUILD = '2026-10-16.1'
 export const SCHEMA_VERSION = 1
+
+/**
+ * cordis 依赖注入声明 —— **没有它，`ctx.tools` 根本读不到**。
+ *
+ * 2026-10-16 实测报错（由下面的记录仪抓到，这是它上线后第一次派上用场）：
+ *   Error: cannot get property "tools" without inject
+ *     at applyInner (.../index.js:185)   ← 第一处 ctx.tools.register
+ *
+ * cordis 只在插件声明了 inject 之后才把服务挂到 ctx 上；未声明就访问会抛出上述错误，
+ * 表现为**插件行整行不生效**（工具不出现、无日志）。`ctx.logger` 是 cordis 内建，
+ * 不需要声明。官方参考：dsh-tool-todo → `const inject = ["tools", "sessionProjections"]`；
+ * 契约见技能 cordis-plugin-development/references/host-plugin.md。
+ */
+export const inject = ['tools']
 
 // ------------------------------------------------------------------ 加载记录仪
 /**
