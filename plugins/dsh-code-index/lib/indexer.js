@@ -53,7 +53,11 @@ export function scanStatus(store, repoRoot, opts = {}) {
 export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, budget = {} }) {
   const t0 = Date.now()
   const mode = budget.mode ?? 'incremental'
-  const maxEmbed = budget.maxEmbedPerRun ?? 20000
+  // 默认 0：**不自动补算向量**。建库只做 FTS5（秒级）；要向量必须显式给 max_embed。
+  // 理由（2026-10-16 实测）：默认 20000 意味着任何人建任何新仓库的索引都会自动跑一次
+  // 可能数十分钟的重负载，且事前不打招呼；用显示 GPU 跑推理时整机会卡。
+  // 重活要先说出来、由调用方决定，不能默认替人做。
+  const maxEmbed = budget.maxEmbedPerRun ?? 0
 
   if (mode === 'full') {
     store.db.exec('delete from chunks; delete from chunks_fts; delete from vectors; delete from files;')
@@ -87,8 +91,9 @@ export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, 
   if (!embedder?.ok) {
     embedNote = `向量未生成：${embedder?.reason ?? 'embedder 未配置'}`
   } else if (maxEmbed <= 0) {
-    // 预算为 0 时此前会说"向量已是最新"，把"压根没尝试"说成"已经完整" —— 如实报告
-    embedNote = `本轮向量补算预算为 0（max_embed=0），未做补算；仍有 ${pendingTotal} 块待补（不传 max_embed 即可按默认上限补算）`
+    // 预算为 0 时此前会说"向量已是最新"，把"压根没尝试"说成"已经完整" —— 如实报告，
+    // 并给出可执行的下一步（默认值就是 0，所以要显式传参，不能只说"再跑一次"）
+    embedNote = `本轮向量补算预算为 0（默认不补算），未做补算；仍有 ${pendingTotal} 块待补（要补算请显式传 max_embed=<正整数>）`
   } else {
     const pending = store.chunksWithoutVectors(maxEmbed)
     if (pending.length) {
