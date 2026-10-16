@@ -63,6 +63,33 @@ export class VectorCache {
   }
 }
 
+/** 模型文件指纹的进程内记忆化（读 45 MB 模型文件只做一次） */
+const fingerprintMemo = new Map()
+
+/**
+ * 模型指纹 = 模型文件 + 分词器 + 分词器配置的**内容哈希**（前 8 位十六进制）。
+ *
+ * 为什么用内容哈希而不是文件名/mtime/size：
+ *  - 跨机器时 mtime 必然不同（复制会改），size 也可能巧合相同 → 只有内容哈希能证明"同一份模型"
+ *  - 分词器换了同样会改变向量 → 必须一起纳入
+ * 代价：每个进程读一次模型文件（约 45 MB，几十毫秒），结果记忆化。
+ */
+export function modelFingerprint(modelDir, modelFile) {
+  const key = `${modelDir}|${modelFile}`
+  if (fingerprintMemo.has(key)) return fingerprintMemo.get(key)
+  const h = crypto.createHash('sha256')
+  for (const f of [modelFile, 'tokenizer.json', 'tokenizer_config.json']) {
+    try {
+      h.update(fs.readFileSync(path.join(modelDir, f)))
+    } catch {
+      /* 文件缺失则跳过（例如没有 tokenizer_config.json） */
+    }
+  }
+  const out = h.digest('hex').slice(0, 8)
+  fingerprintMemo.set(key, out)
+  return out
+}
+
 function l2(v) {
   let s = 0
   for (let i = 0; i < v.length; i++) s += v[i] * v[i]
@@ -192,7 +219,18 @@ export async function createEmbedder({
     ok: true,
     backend: usedBackend,
     modelFile,
-    modelTag: `bge-small-zh-v1.5-${usedBackend === 'gpu' ? 'fp16' : 'int8'}`,
+    /**
+     * 模型标签 = 名字 + **模型文件内容的哈希** + 精度。
+     *
+     * 为什么必须含内容哈希（而不只是名字+精度）：
+     *  - **跨机器共享**：两台机器都自称 "bge-small-zh-v1.5"，但模型文件是被替换过/微调过的不同版本时，
+     *    只按名字分 tag 会让两边的向量混进同一个 key 空间，检索结果悄悄变差且无任何信号。
+     *  - **本机换代**：模型文件换了但 tag 不变，则旧向量被当成有效向量继续使用。
+     * 内容哈希让"同 tag ⇔ 同一份模型（含分词器）"，是跨机器一致性的唯一可靠依据。
+     * （不能用 mtime/size 代替：文件在机器之间复制时 mtime 必然变。）
+     */
+    modelTag: `bge-small-zh-v1.5-${modelFingerprint(dir, modelFile)}-${usedBackend === 'gpu' ? 'fp16' : 'int8'}`,
+    dim: DIM,
     batch: batch ?? (usedBackend === 'gpu' ? 12 : 48),
     cache,
     cacheEntries: cache ? cache.count() : 0,

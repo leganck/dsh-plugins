@@ -61,28 +61,41 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
   const { vectors } = store.stats()
   const wantVector = mode === 'vector' || (mode === 'auto' && embedder?.ok && vectors > 0)
   if (wantVector) {
+    // ---- 一致性闸门 ①：索引里的向量必须与当前模型**同源** ----
+    // 没有这道闸门时，换模型后会拿新模型的查询向量去和旧模型的存量向量做点积：
+    // 维度不同 → NaN；维度相同（fp16↔int8）→ **完全静默的垃圾排名**。
+    const storedTag = store.getMeta('embedding_tag')
     if (!embedder?.ok) {
       vecNote = `向量通道未启用：${embedder?.reason ?? '嵌入器不可用'}`
     } else if (vectors === 0) {
       vecNote = '向量通道未启用：索引里还没有向量（code_index 建库时未嵌入）'
+    } else if (storedTag !== embedder.modelTag) {
+      vecNote = storedTag
+        ? `向量通道未启用：索引里的向量由「${storedTag}」产出，与当前模型「${embedder.modelTag}」不一致 —— 跑 code_index 会自动全量重嵌`
+        : '向量通道未启用：索引没有记录产出向量的模型（旧版本建的库）—— 跑 code_index 重建即可启用'
     } else {
       try {
         const [qv] = await embedder.embed([question], { isQuery: true })
         const { ids, mat, dim } = loadMatrix(store)
-        const n = ids.length
-        const scored = new Float32Array(n)
-        for (let i = 0; i < n; i++) {
-          let s = 0
-          const base = i * dim
-          for (let d = 0; d < dim; d++) s += mat[base + d] * qv[d]
-          scored[i] = s
+        // ---- 一致性闸门 ②：维度兜底（即使 tag 相同，配置漂移也可能造成维度不一致）----
+        if (qv.length !== dim) {
+          vecNote = `向量通道未启用：查询向量维度 ${qv.length} 与索引里的 ${dim} 不一致 —— 跑 code_index 重建`
+        } else {
+          const n = ids.length
+          const scored = new Float32Array(n)
+          for (let i = 0; i < n; i++) {
+            let s = 0
+            const base = i * dim
+            for (let d = 0; d < dim; d++) s += mat[base + d] * qv[d]
+            scored[i] = s
+          }
+          const order = Array.from({ length: n }, (_, i) => i)
+            .sort((a, b) => scored[b] - scored[a])
+            .slice(0, VEC_CANDIDATES)
+          const chunkIds = order.map((i) => ids[i])
+          const meta = new Map(store.chunksByIds(chunkIds).map((c) => [c.id, c]))
+          vec = chunkIds.map((id, i) => ({ ...meta.get(id), score: scored[order[i]] })).filter((r) => r.path)
         }
-        const order = Array.from({ length: n }, (_, i) => i)
-          .sort((a, b) => scored[b] - scored[a])
-          .slice(0, VEC_CANDIDATES)
-        const chunkIds = order.map((i) => ids[i])
-        const meta = new Map(store.chunksByIds(chunkIds).map((c) => [c.id, c]))
-        vec = chunkIds.map((id, i) => ({ ...meta.get(id), score: scored[order[i]] })).filter((r) => r.path)
       } catch (e) {
         vecNote = `向量检索失败：${String(e.message).slice(0, 120)}`
       }
