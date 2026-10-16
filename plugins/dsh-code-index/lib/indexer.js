@@ -81,9 +81,14 @@ export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, 
   // ---- 向量补算（只算缺的）----
   let embedded = 0
   let embedNote = ''
-  const { vectors } = store.stats()
+  const stats0 = store.stats()
+  // 待补总量用 stats 差分算出（O(1)），不复用 chunksWithoutVectors —— 后者要按 limit 取行
+  const pendingTotal = Math.max(0, stats0.chunks - stats0.vectors)
   if (!embedder?.ok) {
     embedNote = `向量未生成：${embedder?.reason ?? 'embedder 未配置'}`
+  } else if (maxEmbed <= 0) {
+    // 预算为 0 时此前会说"向量已是最新"，把"压根没尝试"说成"已经完整" —— 如实报告
+    embedNote = `本轮向量补算预算为 0（max_embed=0），未做补算；仍有 ${pendingTotal} 块待补（不传 max_embed 即可按默认上限补算）`
   } else {
     const pending = store.chunksWithoutVectors(maxEmbed)
     if (pending.length) {
@@ -101,7 +106,10 @@ export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, 
           break
         }
       }
-      embedNote = embedNote || `本轮补算 ${embedded} 块，用时 ${((Date.now() - tEmbed) / 1000).toFixed(1)}s`
+      if (!embedNote) {
+        embedNote = `本轮补算 ${embedded} 块，用时 ${((Date.now() - tEmbed) / 1000).toFixed(1)}s`
+        if (embedded < pendingTotal) embedNote += `；仍有 ${pendingTotal - embedded} 块待补（再跑一次即可续算）`
+      }
     } else {
       embedNote = '向量已是最新，无需补算'
     }
@@ -120,7 +128,7 @@ export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, 
     removed: removed.length,
     chunksWritten,
     embedded,
-    vectorsBefore: vectors,
+    vectorsBefore: stats0.vectors,
     vectorsAfter: s.vectors,
     cacheEntries: embedder?.cache ? embedder.cache.count() : null,
     embedNote,

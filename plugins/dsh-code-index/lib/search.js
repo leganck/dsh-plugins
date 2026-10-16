@@ -88,7 +88,16 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
       }
     }
   } else if (mode !== 'vector') {
-    vecNote = '向量通道未启用（配置 embedding.backend = off）'
+    // 如实反映"为什么没走向量"。此前这里硬编码成「配置 embedding.backend = off」，
+    // 而这条分支其实覆盖三种不同状态——实测曾把「索引里 0 向量」误报成配置问题，
+    // 把人引去改一个本来就是 auto 的配置。原因必须由状态推导，不能预设。
+    if (!embedder?.ok) {
+      vecNote = `向量通道未启用：${embedder?.reason ?? '嵌入器不可用'}`
+    } else if (vectors === 0) {
+      vecNote = '向量通道未启用：索引里还没有向量（建库时未嵌入）——重跑 code_index 即可补算'
+    } else {
+      vecNote = `向量通道未启用：当前 mode=${mode}`
+    }
   }
 
   // RRF 融合
