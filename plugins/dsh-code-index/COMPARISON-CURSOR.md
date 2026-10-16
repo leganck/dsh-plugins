@@ -109,6 +109,45 @@ CDC 修不了这个（它是**成本**工具：改善跨版本缓存命中，与
 
 ---
 
+## 五之后补：tree-sitter 到底可不可用（2026-10-16 实测跑通）
+
+结论：**可用，而且我已经在本机把 Java 跑通了**（原生，非 WASM）。代价与收益都是实测的：
+
+| 项 | 实测值 |
+|---|---|
+| 解析吞吐 | **2,235 文件/秒、6.7 MB/秒**（342 个 Java 文件 153 ms） |
+| 端到端（含读盘） | 342 文件 **392 ms** |
+| 解析失败 | **0/342**（修掉 `bufferSize` 之后） |
+| 块数 | **627**（同仓库现行固定 40 行 ≈ 880 → **少约 29%**，即少 29% 的嵌入） |
+| 块大小 | 平均 40 / 中位 46 / p90 59 行 |
+| **块切在成员内部** | **3.5%**（仅超长成员的强制拆分）；其余是完整成员或小成员打包 |
+| 结构信息 | 可直接产出 `SaasRpcAutoConfiguration.configurations`、`Errors.FAILED`、`WechatDemoBillJob.triggerKey` 这类**自解释坐标** |
+| 对照：现行固定 40 行 | 73% 的块括号不平衡（同一个仓库） |
+
+**但三条代价全部实测撞上**：
+
+1. **版本配对是硬约束（最麻烦的一条）。** `tree-sitter-java@0.23.5` 声明 `peerOptional tree-sitter@^0.21.1`，
+   但它的预构建与 0.21.1 运行时不兼容 → **0.21.1 崩、0.25.1 崩、0.22.4 直接 ERESOLVE 装不上**。
+   最后能跑通的组合是**同年代配对**：运行时 `tree-sitter@0.21.1` + 语法 `tree-sitter-java@0.21.0`，
+   且需要 `--legacy-peer-deps`。
+2. **一个 API 陷阱**：JS 包装层默认 `bufferSize` 是 **32 KB**，字符串输入超过它就抛
+   `Invalid argument`（二分实测：32,767 字符通过、32,768 失败）。必须显式传
+   `parse(text, undefined, { bufferSize: text.length + 1024 })`。这个坑只在**大文件**上暴露
+   （小仓库全过、大仓库第一个大文件就崩）。
+3. **本机没有 MSVC**（`vswhere` 不存在、`cl.exe` 不在 PATH）：prebuilds 在就没事，
+   但一旦某个语法包在目标平台/ABI 上没有预构建，**本机无法兜底编译**。
+
+另外两条实测：**npm 与 pnpm 都拦 install 脚本**（`not covered by allowScripts` / pnpm 的
+`approvedBuilds`），但 tree-sitter 的 prebuild **是在 `require` 时由 `node-gyp-build` 解析的**
+（`index.js` 第一行），所以**脚本被拦也能用**——这点与 `onnxruntime-node` 完全不同（后者脚本真在下载）。
+
+**因此建议的形态**：做成**可选增强 + 降级**（有 tree-sitter 就用，缺失或解析失败回落现行切块器），
+复用插件已有的"可选依赖 + 如实报告降级原因"设计；语言先只上 Java，语法包按需加；
+并且在切换前用 `ground-truth.json` 的 1,964 个真实事件做一次 A/B（嵌入成本可控：
+小仓库 1,022 块 ≈ 半分钟量级）。
+
+---
+
 ## 六、遗留的两个真实问题（当时发现，今天仍未解决）
 
 1. `.cursor/rules/codegraph.mdc` 是 `alwaysApply: true`，写着 *"Trust codegraph results … Do NOT
