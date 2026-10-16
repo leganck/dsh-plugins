@@ -69,7 +69,7 @@ export const MODELS = {
     repo: 'onnx-community/Qwen3-Embedding-0.6B-ONNX',
     role: '候选升级的嵌入模型（1024 维，多语+代码；查询需 Instruct 前缀、last-token pooling）',
     files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'added_tokens.json', 'vocab.json', 'merges.txt'],
-    onnx: { int8: 'onnx/model_int8.onnx', fp16: 'onnx/model_fp16.onnx', q4f16: 'onnx/model_q4f16.onnx' },
+    onnx: { int8: 'onnx/model_int8.onnx', fp16: ['onnx/model_fp16.onnx', 'onnx/model_fp16.onnx_data'], q4f16: 'onnx/model_q4f16.onnx' },
     required: ['int8'],
     /** transformers.js 的 pipeline 只认 `<dir>/onnx/`，而我们把 ONNX 放根目录 → 下载后补硬链接 */
     linkOnnxSubdir: true,
@@ -82,7 +82,9 @@ export const MODELS = {
       'vocab.json': 500_000,
       'merges.txt': 500_000,
       'onnx/model_int8.onnx': 500_000_000,
-      'onnx/model_fp16.onnx': 1_000_000_000,
+      // fp16 是 external data 格式：图 ~570 KB + 权重 ~1.1 GB，**两个都要下**
+      'onnx/model_fp16.onnx': 200_000,
+      'onnx/model_fp16.onnx_data': 1_000_000_000,
       'onnx/model_q4f16.onnx': 450_000_000,
     },
   },
@@ -102,6 +104,36 @@ export const MODELS = {
       'onnx/model_fp16.onnx': 900_000_000,
     },
   },
+  'bge-base-zh-v1.5': {
+    repo: 'Xenova/bge-base-zh-v1.5',
+    role: '候选升级的嵌入模型（1024→768 维，中文同族更大一档；无指令、CLS pooling；**单文件 ONNX，可走 DirectML**）',
+    files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json'],
+    onnx: { fp16: 'onnx/model_fp16.onnx', int8: 'onnx/model_int8.onnx' },
+    required: ['fp16', 'int8'],
+    minBytes: {
+      'config.json': 200,
+      'tokenizer.json': 100_000,
+      'tokenizer_config.json': 200,
+      'special_tokens_map.json': 50,
+      'onnx/model_fp16.onnx': 150_000_000,
+      'onnx/model_int8.onnx': 80_000_000,
+    },
+  },
+  'bge-large-zh-v1.5': {
+    repo: 'Xenova/bge-large-zh-v1.5',
+    role: '候选升级的嵌入模型（1024 维，中文同族最大档；无指令、CLS pooling；单文件 ONNX，可走 DirectML）',
+    files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json'],
+    onnx: { fp16: 'onnx/model_fp16.onnx', int8: 'onnx/model_int8.onnx' },
+    required: ['fp16', 'int8'],
+    minBytes: {
+      'config.json': 200,
+      'tokenizer.json': 100_000,
+      'tokenizer_config.json': 200,
+      'special_tokens_map.json': 50,
+      'onnx/model_fp16.onnx': 500_000_000,
+      'onnx/model_int8.onnx': 250_000_000,
+    },
+  },
 }
 
 export const SOURCES = {
@@ -113,16 +145,22 @@ export const SOURCES = {
 /** 该模型默认要拉哪些文件。
  *  - `quant='all'`：清单里所有量化版本（下载用默认，保证换 backend 不用再下）
  *  - `quant='required'`：该机器**必需**的那几个（校验用；否则会把故意没下的变体报成失败）
+ *
+ * 值是**数组**表示该量化版本由多个文件组成 —— 例如 ONNX 的 `external data` 格式：
+ * `model_fp16.onnx` 只是图（几百 KB），权重在同目录的 `model_fp16.onnx_data`（GB 级）。
+ * 少下一个就会加载失败，所以必须一起下、一起校验。
  */
 export function defaultFilesOf(name, quant = 'all') {
   const m = MODELS[name]
   if (!m) throw new Error(`未知模型：${name}（可用：${Object.keys(MODELS).join(', ')}）`)
+  // 值为数组 → 该变体由多个文件组成（ONNX external data）；null/undefined → 空（会被下面的校验拦住）
+  const pick = (v) => (v == null ? [] : Array.isArray(v) ? v : [v])
   const onnx =
     quant === 'all'
-      ? Object.values(m.onnx)
+      ? Object.values(m.onnx).flatMap(pick)
       : quant === 'required'
-        ? (m.required ?? Object.keys(m.onnx)).map((q) => m.onnx[q])
-        : [m.onnx[quant]].filter(Boolean)
+        ? (m.required ?? Object.keys(m.onnx)).flatMap((q) => pick(m.onnx[q]))
+        : pick(m.onnx[quant])
   if (!onnx.length) throw new Error(`模型 ${name} 没有量化版本 ${quant}（可用：${Object.keys(m.onnx).join(', ') || '无'}）`)
   return [...m.files, ...onnx]
 }

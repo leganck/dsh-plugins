@@ -755,7 +755,8 @@ console.log('\n[11] 模型下载器')
   check('未知量化版本报错', /没有量化版本/.test(throwMsg(() => defaultFilesOf('bge-small-zh-v1.5', 'fp8'))))
   check(
     '每个模型的每个量化版本都配了 minBytes（漏配 = 不校验，就会重演 0 字节）',
-    Object.values(MODELS).every((m) => Object.values(m.onnx).every((f) => Number(m.minBytes?.[f]) > 0)),
+    // 量化版本的值可能是数组：ONNX external data 格式下"图 + _data 权重"两个文件都要校验
+    Object.values(MODELS).every((m) => Object.values(m.onnx).flat().every((f) => Number(m.minBytes?.[f]) > 0)),
   )
   check('必需文件也都有 minBytes', Object.values(MODELS).every((m) => m.files.every((f) => Number(m.minBytes?.[f]) > 0)))
   check(
