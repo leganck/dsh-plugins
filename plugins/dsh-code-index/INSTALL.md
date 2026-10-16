@@ -116,8 +116,31 @@ tree-sitter 同理：四个包都带 `prebuilds/win32-x64`，无需编译。
 
 **模型**（可选；缺失则退化为纯关键词检索）：`bge-small-zh-v1.5` 的 ONNX 版放到
 `~/.dsh/models/bge-small-zh-v1.5/`，需要 `model_fp16.onnx`(GPU) / `model_int8.onnx`(CPU) /
-`tokenizer.json` / `tokenizer_config.json`。官方 `BAAI/...` 仓库**没有 onnx**，用
-`Xenova/bge-small-zh-v1.5`（ModelScope 国内镜像最快）。
+`tokenizer.json` / `tokenizer_config.json`。官方 `BAAI/...` 仓库**没有 onnx**。
+
+### 2'''. 下载模型：用 `tools/fetch-model.mjs`，**默认走 ModelScope**
+
+```powershell
+node tools\fetch-model.mjs --list        # 有哪些模型、各需哪些文件
+node tools\fetch-model.mjs --check       # 校验本地已有文件（该机器必需的量化版本）
+node tools\fetch-model.mjs --model bge-small-zh-v1.5          # 下载（默认 fp16+int8 都拉）
+node tools\fetch-model.mjs --model bge-reranker-base --quant int8   # 实验用的交叉编码器
+```
+
+**为什么固定用 ModelScope —— 同一台机器、同一时段的实测对比：**
+
+| 源 | 实测 | 结论 |
+|---|---|---|
+| `hf-mirror.com` | **308 重定向后 0 字节**；更早一次 2.9–26 KB/s（151 s 才 429 KB） | ❌ **不可用** |
+| `huggingface.co` 直连 | 小文件能通；CDN（`us.aws.cdn.hf.co`）大文件 **20 秒 0 字节** | ⚠️ 不可靠 |
+| **`modelscope.cn`** | **4.9–6.9 MB/s**（266 MB 用 54 秒、22.8 MB 用 3.8 秒） | ✅ **唯一可用** |
+
+**为什么要用脚本而不是两条 curl**：这件事已经踩过两次同一个坑 ——
+**把"0 字节"当成下载成功**。脚本对每个文件校验 ① HTTP 状态 ② 实际字节数
+③ 与 `content-length` 是否一致 ④ 是否达到该文件的最小合理体积（`minBytes`），
+任一不满足就报错并非零退出，且不会留下半个文件当成品。
+
+> 校验里 `model_fp16.onnx` 显示 ❌ 只代表"**GPU 路径不可用**"，CPU 的 int8 路径仍然可用。
 
 ### 2''. 模型身份与"换模型 / 多机器"的一致性（0.4.6 起）
 
