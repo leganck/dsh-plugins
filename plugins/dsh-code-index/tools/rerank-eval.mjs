@@ -41,8 +41,17 @@ const CASES_FILE = arg('--cases')
 const EMB = arg('--emb')
 const EMB_FILE = arg('--emb-file', 'model_fp16.onnx')
 const RERANK = arg('--rerank')
+const RERANK_FILE = arg('--rerank-file', 'model_int8.onnx')
+const RERANK_DEVICE = arg('--rerank-device', 'cpu')
 const TOPN = Number(arg('--topn', 20))
 const MAXLEN = Number(arg('--maxlen', 512))
+/**
+ * 嵌入侧的截断长度，**与重排侧分开**（默认跟 `--maxlen` 一致）。
+ * 为什么必须分开：`--maxlen` 同时影响两侧会让结论没法归因 ——
+ * 实测把嵌入也截到 256 会让候选池的 hit@3 从 42.7% 涨到 51.5%（更短 = 噪声更少 ✓），
+ * 那是**嵌入侧**的收益，和"重排器用 256 更快"是两件事。
+ */
+const EMB_MAXLEN = Number(arg('--emb-maxlen', MAXLEN))
 const DEVICE = arg('--device', 'cpu')
 if (!INDEX || !CASES_FILE || !EMB) {
   console.error('用法：node tools/rerank-eval.mjs --index <index.db> --cases <题库.json> --emb <模型目录> [--emb-file f.onnx] [--dim 512] [--rerank <模型目录>] [--topn 20] [--maxlen 512] [--device dml|cpu]')
@@ -75,13 +84,13 @@ function prefixFor(dir) {
   return ''
 }
 
-async function encodeWith(dir, file, texts, batch) {
+async function encodeWith(dir, file, texts, batch, maxlen = EMB_MAXLEN) {
   const s = await ort.InferenceSession.create(path.join(dir, file), { executionProviders: [DEVICE, 'cpu'] })
   const tk = await tf.AutoTokenizer.from_pretrained(dir)
   const out = []
   for (let i = 0; i < texts.length; i += batch) {
     const part = texts.slice(i, i + batch)
-    const enc = tk(part, { padding: true, truncation: true, max_length: MAXLEN })
+    const enc = tk(part, { padding: true, truncation: true, max_length: maxlen })
     const feeds = {}
     for (const n of s.inputNames) if (enc[n]) feeds[n] = new ort.Tensor('int64', BigInt64Array.from(Array.from(enc[n].data, (x) => BigInt(x))), enc[n].dims)
     const h = (await s.run(feeds))[s.outputNames[0]]
@@ -136,7 +145,9 @@ if (!RERANK) {
 }
 
 // ---- 3) 交叉编码器重排 ----
-const rr = await ort.InferenceSession.create(path.join(RERANK, 'model_int8.onnx'), { executionProviders: ['cpu'] })
+// int8 的量化算子在 DML 上支持差 → 只能 CPU（每候选 250 ms ✗）；fp16 + DML 是把它压下来的希望
+const rr = await ort.InferenceSession.create(path.join(RERANK, RERANK_FILE), { executionProviders: [RERANK_DEVICE, 'cpu'] })
+console.log(`重排器：${RERANK_FILE} @ ${RERANK_DEVICE}`)
 const rrTok = await tf.AutoTokenizer.from_pretrained(RERANK)
 const after = { 1: 0, 3: 0, 5: 0, 10: 0 }
 const lat = []

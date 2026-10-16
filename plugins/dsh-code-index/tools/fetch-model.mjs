@@ -47,9 +47,10 @@ export const MODELS = {
   },
   'bge-reranker-base': {
     repo: 'Xenova/bge-reranker-base',
-    role: '交叉编码器（**实验性**：重排实测为净负收益，见 COMPARISON-CURSOR.md 第五节；插件不引用它）',
+    role: '交叉编码器（**实验性**：103 题实测 hit@3 +19.4pt，但 int8/CPU 下每查询 +5 秒太贵 → 用它验证 fp16/DirectML 能否把延迟压下来；插件不引用它）',
     files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json'],
-    onnx: { int8: 'onnx/model_int8.onnx' },
+    // fp16 用于 DirectML：int8 的量化算子在 DML 上支持差，只能 CPU（每候选 250 ms ✗）
+    onnx: { int8: 'onnx/model_int8.onnx', fp16: 'onnx/model_fp16.onnx' },
     required: ['int8'],
     minBytes: {
       'config.json': 200,
@@ -57,6 +58,7 @@ export const MODELS = {
       'tokenizer_config.json': 200,
       'special_tokens_map.json': 50,
       'onnx/model_int8.onnx': 200_000_000,
+      'onnx/model_fp16.onnx': 400_000_000,
     },
   },
   /**
@@ -181,6 +183,9 @@ export async function fetchOne(url, dest, minBytes) {
   if (declared && buf.length !== declared) throw new Error(`字节数不符：收到 ${buf.length}，声明 ${declared}`)
   if (minBytes && buf.length < minBytes) throw new Error(`体积过小：${buf.length} < 期望至少 ${minBytes}（可能被截断或是错误页面）`)
   fs.writeFileSync(tmp, buf)
+  // Windows 上 `rename` 覆盖**已存在**的文件会 EPERM（POSIX 允许）→ 必须先把目标删掉。
+  // 这个坑在"重下已存在的文件"时才暴露：曾报 `EPERM: operation not permitted, rename '…tokenizer.json.part' -> '…tokenizer.json'`
+  fs.rmSync(dest, { force: true })
   fs.renameSync(tmp, dest)
   return { bytes: buf.length, declared, secs, speed: buf.length / 1048576 / Math.max(secs, 0.001) }
 }
