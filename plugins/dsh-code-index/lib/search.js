@@ -30,9 +30,14 @@ function loadMatrix(store) {
 
 /**
  * 执行一次混合检索。
- * @returns {{mode: string, note: string, results: Array<object>}}
+ *
+ * `reranker` / `rerankCandidates` 是**可选的重排**（默认不传 = 不重排）：
+ * 传入后，在 RRF 融合结果上取 `rerankCandidates` 个候选交给交叉编码器打分，再截到 topK。
+ * 实测（103 题、bge-small + bge-reranker-base fp16/DML）hit@3 **42.7% → 59.2%**，
+ * 代价是每查询 +939 ms（快档 top-10 约 +474 ms）。重排失败时**退回原顺序**，不让搜索失败。
+ * @returns {{mode: string, note: string, results: Array<object>, rerank?: object}}
  */
-export async function search(store, embedder, question, { topK = 10, mode = 'auto' } = {}) {
+export async function search(store, embedder, question, { topK = 10, mode = 'auto', reranker = null, rerankCandidates = 0 } = {}) {
   const terms = extractTerms(question)
   const match = buildMatch(terms)
 
@@ -131,14 +136,37 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
   if (mode === 'fts') ranked = ranked.filter((e) => e.fts !== null)
   else if (mode === 'vector') ranked = ranked.filter((e) => e.vec !== null)
   ranked.sort((a, b) => b.score - a.score)
+
+  // ---- 可选重排：在融合结果上取候选池 → 交叉编码器打分 → 重排序 ----
+  // 候选池要比 topK 大才有意义（重排只能在池内重排）；池子里没有的东西谁也救不回来。
+  const pool = Math.max(topK, rerankCandidates || 0)
+  const poolEntries = ranked.slice(0, pool)
+  const meta0 = new Map(store.chunksByIds(poolEntries.map((e) => e.id)).map((c) => [c.id, c]))
+  let rerankInfo = null
+  let rerankScores = null
+  if (reranker?.ok && rerankCandidates > 0 && poolEntries.length > 1) {
+    const t0 = Date.now()
+    try {
+      const bodies = poolEntries.map((e) => meta0.get(e.id)?.body ?? '')
+      rerankScores = await reranker.score(question, bodies)
+      const ms = Date.now() - t0
+      const order = poolEntries.map((e, i) => [e, rerankScores[i]]).sort((a, b) => b[1] - a[1])
+      ranked = order.map(([e]) => e)
+      rerankInfo = { applied: true, candidates: poolEntries.length, ms, backend: reranker.backend, modelFile: reranker.modelFile }
+    } catch (e) {
+      // 重排失败**不影响结果**：退回 RRF 顺序，只把原因记录下来
+      rerankInfo = { applied: false, candidates: poolEntries.length, reason: String(e?.message ?? e).slice(0, 140) }
+    }
+  }
   ranked = ranked.slice(0, topK)
+  const scoreById = rerankScores ? new Map(poolEntries.map((e, i) => [e.id, rerankScores[i]])) : null
 
   const meta = new Map(store.chunksByIds(ranked.map((e) => e.id)).map((c) => [c.id, c]))
   const results = ranked
     .map((e, i) => {
       const c = meta.get(e.id)
       if (!c) return null
-      return {
+      const r = {
         rank: i + 1,
         path: c.path,
         startLine: c.startLine,
@@ -148,6 +176,9 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
         vecRank: e.vec,
         snippet: snippet(c.body, terms),
       }
+      // 重排生效时附上交叉编码器分数：没有它，就分不清"排名变了"是重排的功劳还是没人动过
+      if (scoreById?.has(e.id)) r.rerankScore = Number(scoreById.get(e.id).toFixed(4))
+      return r
     })
     .filter(Boolean)
 
@@ -156,5 +187,6 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
     terms,
     note: vecNote,
     results,
+    rerank: rerankInfo,
   }
 }

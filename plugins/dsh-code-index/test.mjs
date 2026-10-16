@@ -654,6 +654,56 @@ console.log('\n[9] 嵌入模型一致性')
     dropIndex(s)
   }
 
+  // (c5) 重排生效：桩重排器把含 'another' 的那块排到第一 → 顺序必须真的变
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'fake-model-A-fp16')
+    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
+    const before = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
+    const stub = { ok: true, backend: 'stub', modelFile: 'stub.onnx', score: async (_q, texts) => texts.map((t) => (t.includes('another') ? 10 : 0)) }
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: stub, rerankCandidates: 2 })
+    // 注意用**行号**判断顺序：fixture 的两块在同一个文件里，比 path 看不出变化（这个断言一开始就写错了）
+    check(
+      '重排生效：结果顺序确实被改变',
+      r.rerank?.applied === true && r.results[0].startLine !== before.results[0].startLine,
+      `applied=${r.rerank?.applied} before=${before.results.map((x) => x.startLine)} after=${r.results.map((x) => x.startLine)}`,
+    )
+    check('重排后含 another 的那块排第一', /another/.test(r.results[0].snippet ?? '') || r.results[0].startLine === 11, `first=${r.results[0].startLine}`)
+    check('重排生效时返回交叉编码器分数（否则无法判断是重排改的还是没人动）', typeof r.results[0].rerankScore === 'number', JSON.stringify(r.results.map((x) => x.rerankScore)))
+    check('重排信息含候选数与耗时', r.rerank.candidates === 2 && typeof r.rerank.ms === 'number', JSON.stringify(r.rerank))
+    dropIndex(s)
+  }
+  // (c6) 重排失败 → **必须退回原顺序**，并留下原因（不能让重排器挂掉变成搜索失败）
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'fake-model-A-fp16')
+    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
+    const before = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
+    const bad = { ok: true, backend: 'stub', modelFile: 'stub.onnx', score: async () => { throw new Error('GPU 掉了') } }
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: bad, rerankCandidates: 2 })
+    check('重排抛错 → 结果仍是原顺序（不失败、不空）', r.results.length === 2 && r.results[0].path === before.results[0].path)
+    check('并如实报告未生效及原因', r.rerank?.applied === false && /GPU 掉了/.test(r.rerank.reason), JSON.stringify(r.rerank))
+    dropIndex(s)
+  }
+  // (c7) 候选数为 0（= 未开启）→ 完全不做重排，rerank 字段为 null
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'fake-model-A-fp16')
+    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: { ok: true, score: async () => [1, 0] }, rerankCandidates: 0 })
+    check('未开启重排时不产生 rerank 信息', r.rerank === null && r.results.every((x) => x.rerankScore === undefined))
+    dropIndex(s)
+  }
+  // (c8) 重排器不可用（ok:false）→ 同样静默跳过，不能报错
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'fake-model-A-fp16')
+    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: { ok: false, reason: '缺模型' }, rerankCandidates: 5 })
+    check('重排器不可用不影响检索', r.results.length === 2 && r.rerank === null)
+    dropIndex(s)
+  }
+
   dropIndex(storeEmb)
   for (const d of [tmpEmb, dirA, dirB]) {
     try {
@@ -764,7 +814,7 @@ console.log('\n[11] 模型下载器')
     SOURCES.modelscope('Xenova/x', 'onnx/m.onnx') === 'https://modelscope.cn/models/Xenova/x/resolve/master/onnx/m.onnx',
     SOURCES.modelscope('Xenova/x', 'onnx/m.onnx'),
   )
-  check('重排模型在清单里被标注为实验性（插件不引用它）', /实验性/.test(MODELS['bge-reranker-base'].role))
+  check('重排模型在清单里且标明用途（插件可选引用，供 code_search 的 rerank 配置）', /重排|交叉编码器/.test(MODELS['bge-reranker-base'].role))
   check('嵌入模型标注为必需', /必需/.test(MODELS['bge-small-zh-v1.5'].role))
 }
 

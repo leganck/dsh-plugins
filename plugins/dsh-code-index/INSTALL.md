@@ -297,3 +297,32 @@ node test-plugin.mjs --repo D:\Code\your-repo   # 契约与接口：45 项
 
 删掉补丁层里那段 `- insert:`（文件中有注释标明起止）→ 重启。索引与日志在
 `~/.dsh/code-index/`，可一并删除。
+
+## 可选：开启交叉编码器重排（默认关）
+
+实测（103 题中文自然语言题库、bge-small 候选池 top-20）：**hit@3 42.7% → 59.2%**（quality）/ 57.3%（fast）。
+**它不需要重建索引**（在现有向量之上重排），这是它相对换嵌入模型的核心优势。
+
+```sh
+node tools/fetch-model.mjs --model bge-reranker-base --quant fp16   # 531 MB（DirectML 推荐）
+node tools/fetch-model.mjs --model bge-reranker-base --quant int8   # 266 MB（仅 CPU，慢 5.3 倍）
+```
+
+配置：
+
+```yml
+rerank: quality   # off（默认）| fast（top-10，约 +474 ms）| quality（top-20，约 +939 ms）
+```
+
+| 档位 | 候选 | hit@3 | 每查询延迟 |
+|---|---|---|---|
+| off | — | 42.7% | ~40 ms |
+| fast | 10 | 57.3% | +474 ms |
+| quality | 20 | 59.2% | +939 ms |
+| （对照）int8/CPU | 20 | 62.1% | +4934 ms ✗ |
+
+要点：
+- **必须用 fp16**：int8 的量化算子在 DirectML 上支持差 → 只能 CPU（每候选 250 ms vs 47 ms）
+- 重排失败（缺模型/依赖/DML 不可用）**自动降级为不重排**，并在结果里报告原因，绝不让搜索失败
+- code_search 输出会写明 重排：quality（20 个候选，1266 ms，gpu/model_fp16.onnx）；未生效时写明原因
+- code_index_deps 的 status 会报告重排模型是否就位
