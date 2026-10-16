@@ -27,6 +27,7 @@ import {
 } from './lib/deps.js'
 import { search } from './lib/search.js'
 import { walkRepo, normalizeRelPrefix } from './lib/scan.js'
+import { MODELS, SOURCES, defaultFilesOf } from './tools/fetch-model.mjs'
 import { chunkText, chunkFile, sha256 } from './lib/chunker.js'
 import { braceDepths, heuristicChunks } from './lib/chunk-heuristic.js'
 import { getParser } from './lib/chunk-ast.js'
@@ -734,8 +735,40 @@ console.log('\n[10] 扫描排除')
   }
 }
 
-// ---------- 11. 清理 ----------
-console.log('\n[11] 清空索引')
+// ---------- 11. 模型下载器（只测纯函数，不联网） ----------
+// 这一段守的是"把 0 字节当下载成功"那个坑：体积校验必须每个文件都有，且清单与实现一致。
+console.log('\n[11] 模型下载器')
+{
+  const throwMsg = (fn) => {
+    try {
+      fn()
+      return ''
+    } catch (e) {
+      return String(e.message)
+    }
+  }
+  const names = Object.keys(MODELS)
+  check('清单含嵌入模型与重排模型', names.includes('bge-small-zh-v1.5') && names.includes('bge-reranker-base'), names.join(', '))
+  check('嵌入模型默认拉全部量化版本（换 backend 不用再下）', defaultFilesOf('bge-small-zh-v1.5').filter((f) => f.startsWith('onnx/')).length === Object.keys(MODELS['bge-small-zh-v1.5'].onnx).length)
+  check('required 只含该机器必需要的两档（fp16 GPU / int8 CPU）', defaultFilesOf('bge-small-zh-v1.5', 'required').filter((f) => f.startsWith('onnx/')).length === 2)
+  check('未知模型报错并列出可用项', /未知模型/.test(throwMsg(() => defaultFilesOf('nope'))), throwMsg(() => defaultFilesOf('nope')).slice(0, 60))
+  check('未知量化版本报错', /没有量化版本/.test(throwMsg(() => defaultFilesOf('bge-small-zh-v1.5', 'fp8'))))
+  check(
+    '每个模型的每个量化版本都配了 minBytes（漏配 = 不校验，就会重演 0 字节）',
+    Object.values(MODELS).every((m) => Object.values(m.onnx).every((f) => Number(m.minBytes?.[f]) > 0)),
+  )
+  check('必需文件也都有 minBytes', Object.values(MODELS).every((m) => m.files.every((f) => Number(m.minBytes?.[f]) > 0)))
+  check(
+    'ModelScope resolve 直链形式正确（本机唯一可用的源）',
+    SOURCES.modelscope('Xenova/x', 'onnx/m.onnx') === 'https://modelscope.cn/models/Xenova/x/resolve/master/onnx/m.onnx',
+    SOURCES.modelscope('Xenova/x', 'onnx/m.onnx'),
+  )
+  check('重排模型在清单里被标注为实验性（插件不引用它）', /实验性/.test(MODELS['bge-reranker-base'].role))
+  check('嵌入模型标注为必需', /必需/.test(MODELS['bge-small-zh-v1.5'].role))
+}
+
+// ---------- 12. 清理 ----------
+console.log('\n[12] 清空索引')
 dropIndex(store)
 check('清空后块数为 0', store.stats().chunks === 0)
 check('清空后向量为 0', store.stats().vectors === 0)
