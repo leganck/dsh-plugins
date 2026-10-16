@@ -1,14 +1,25 @@
 /**
  * 插件接口层测试：不启动 DSH，用假 ctx 验证 apply() 注册了哪些工具、
- * 参数声明是否正确、三个工具能否真的跑通，以及错误路径是否给出可读信息。
+ * 参数声明是否正确、四个工具能否真的跑通，以及错误路径是否给出可读信息。
  *
  * 用法：node test-plugin.mjs [--repo <path>] [--no-embed]
+ *
+ * ⚠️ 第一条语句必须是**隔离 DSH_HOME**：插件在"模块导入"时就往
+ * `<DSH_HOME>/code-index/{_boot.log,_loaded.json}` 写加载标记，而 `_loaded.json` 是
+ * **当前加载状态**的标记文件。测试若写进真实 HOME，会把线上进程的标记覆盖成测试数据
+ * （实测踩过：`_loaded.json` 指向源码目录、`backend: off`、只列 3 个工具），
+ * 于是"重启后到底加载了哪个版本"就无从判断。
+ *
+ * 注意 ESM 的 import 会被提升，所以这里**必须用动态 import** —— 静态 import 会在
+ * 下面这行赋值之前就执行插件模块，标志就白写了。
  */
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import * as plugin from './index.js'
-import { walkRepo } from './lib/scan.js'
+
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-home-'))
+const plugin = await import('./index.js')
+const { walkRepo } = await import('./lib/scan.js')
 
 const argv = process.argv.slice(2)
 const arg = (k, d) => {
@@ -201,6 +212,12 @@ check('四个工具都提供了 render', [search, index, status, deps].every((t)
 check('code_index_deps 只允许固定的 action 枚举', JSON.stringify(deps?.parameters?.properties?.action?.enum) === JSON.stringify(['status', 'install', 'prune', 'repair', 'remove']), JSON.stringify(deps?.parameters?.properties?.action?.enum))
 check('code_index_deps 描述里说明"不随插件安装"', /不随插件安装/.test(String(deps?.description ?? '')))
 check('插件写入了加载日志', logs.some((l) => l.includes('dsh-code-index')), JSON.stringify(logs))
+// 加载标记必须落在**隔离的** DSH_HOME 里，否则会覆盖线上进程的标记（见文件头注释）
+check(
+  '加载标记写在隔离的 DSH_HOME（不污染真实 _loaded.json）',
+  fs.existsSync(path.join(process.env.DSH_HOME, 'code-index', '_loaded.json')),
+  `${process.env.DSH_HOME}\\code-index\\_loaded.json`,
+)
 
 // 依赖工具：默认只**报**状态，绝不擅自下载（下载必须由显式 action 触发）
 const depsStatusOut = await deps.execute({}, {})

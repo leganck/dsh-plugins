@@ -27,7 +27,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.9'
+export const BUILD = '2026-10-16.10'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -241,11 +241,16 @@ function applyInner(ctx, rawConfig = {}) {
 
   // 加载标记：尽早写。写在这里而不是函数末尾 —— 之后任何一步（尤其工具注册）
   // 抛错时，标记仍能证明"apply() 确实被调用过"，从而把故障范围一分为二。
-  // 位置取 indexDirBase（配置给的是 ~/.dsh/code-index），没配就退回同一处。
+  //
+  // **位置必须与 _boot.log 一致（都走 bootDir() = <DSH_HOME>/code-index）**。
+  // 早前这里是从 indexDirBase/indexDir 推导的，于是同一个进程的不同 apply 调用会
+  // 写到不同位置；更要命的是没给 indexDir 的调用会回落到**真实** ~/.dsh/code-index，
+  // 使得 `DSH_HOME` 隔离对它无效——实测就是"跑一次测试，线上加载标记被测试数据覆盖"
+  // （标记显示源码目录、backend: off、只列 3 个工具），而"重启后到底加载了哪个版本"
+  // 就再也说不清了。标记回答的是"这个进程加载了哪个构建"，这是 DSH 层面的事实，
+  // 与索引放哪里无关。
   try {
-    const markerDir = path.resolve(
-      expandPath(config.indexDirBase) ?? (expandPath(config.indexDir) ?? path.join(os.homedir(), '.dsh', 'code-index')),
-    )
+    const markerDir = bootDir()
     fs.mkdirSync(markerDir, { recursive: true })
     fs.writeFileSync(
       path.join(markerDir, '_loaded.json'),
@@ -257,11 +262,12 @@ function applyInner(ctx, rawConfig = {}) {
           pid: process.pid,
           node: process.version,
           pluginDir: path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
-          tools: ['code_index', 'code_search', 'code_index_status'],
+          tools: ['code_index', 'code_search', 'code_index_status', 'code_index_deps'],
           config: {
             indexDirBase: config.indexDirBase,
             roots: config.allowedRoots,
             embedding: { backend: config.embedding.backend, modelDir: expandPath(config.embedding.modelDir) ?? null },
+            chunking: { strategy: config.chunking?.strategy ?? 'auto', byExt: Object.keys(config.chunking?.byExt ?? {}) },
           },
           markerFile: path.join(markerDir, '_loaded.json'),
         },
