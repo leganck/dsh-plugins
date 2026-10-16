@@ -53,6 +53,24 @@ if (!fs.existsSync(pkgDir)) {
 check('含 index.js', fs.existsSync(path.join(pkgDir, 'index.js')))
 check('含 cordis.patch.yml（bundle 必备）', fs.existsSync(path.join(pkgDir, 'cordis.patch.yml')))
 check('含 lib/ 与 locale/ 与 icon', fs.existsSync(path.join(pkgDir, 'lib')) && fs.existsSync(path.join(pkgDir, 'locale')))
+check('含 tools/fetch-model.mjs（模型下载器）', fs.existsSync(path.join(pkgDir, 'tools', 'fetch-model.mjs')))
+check('含 tools/migrate-embedding-tag.mjs（缓存 key 迁移）', fs.existsSync(path.join(pkgDir, 'tools', 'migrate-embedding-tag.mjs')))
+{
+  // 工具脚本要能真的被加载（打包漏文件时这里立刻暴露），且清单里两个模型都在
+  const toolUrl = 'file:///' + pkgDir.replace(/\\/g, '/') + '/tools/fetch-model.mjs'
+  try {
+    const t = await import(toolUrl)
+    const names = Object.keys(t.MODELS ?? {})
+    check('fetch-model 可加载且清单完整', names.includes('bge-small-zh-v1.5') && names.includes('bge-reranker-base'), names.join(','))
+    check(
+      'fetch-model 的每个文件都配了体积下限（防"0 字节当成功"）',
+      Object.values(t.MODELS).every((m) => Object.values(m.onnx).every((f) => Number(m.minBytes?.[f]) > 0)),
+    )
+  } catch (e) {
+    check('fetch-model 可加载且清单完整', false, String(e.message).slice(0, 100))
+    check('fetch-model 的每个文件都配了体积下限（防"0 字节当成功"）', false, '未加载')
+  }
+}
 
 // ---- 1. 模块可加载 ----
 console.log('\n[1] 模块加载（真实宿主运行时路径）')
