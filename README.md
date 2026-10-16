@@ -18,9 +18,11 @@
 
 ## 快速开始
 
-安装按官方技能 `cordis-plugin-development` 的路径走：`plugin_manager` 的
-`install_bundle`，target 传**包目录的绝对路径**。`install.ps1` 默认就是这个流程——
-它检查前置条件并打印应当交给 agent 执行的调用（脚本无法调用工具）：
+安装按官方技能 `cordis-plugin-development` 的路径走：`plugin_manager` 的 `install_bundle`。
+**target 优先传 `release/` 里的 `.tgz`**（tarball 形式）而不是包目录——pnpm 对**目录**用
+`link:`（软链），源码目录会成为**运行时依赖**，删/移/`git clean` 就静默失效；对 `.tgz` 则解包成
+**实体安装**，源码目录与运行时解耦。`install.ps1` 默认就是这个流程——它检查前置条件并打印
+应当交给 agent 执行的调用（脚本无法调用工具）：
 
 ```powershell
 # 官方路径（默认）：前置检查 + 打印 install_bundle 调用
@@ -37,16 +39,50 @@ pwsh -File install.ps1 -DryRun
 需要在 profile 补丁层按 id 覆盖成 `disabled: false` 并重启应用，`plugin_manager` 才可用。
 另外本 profile 由应用独占管理，`dsh plugin --profile …` CLI 那条路不可用。
 
-装完**需要重启 DSH 应用**（cordis 不会重新 import 已加载的模块）。
+### 生效时机（实测，别搞混）
 
-验证：
+| 动作 | 结果 |
+|---|---|
+| 装**新** bundle | `application: "applied"` —— **HMR 热生效，不用重启** |
+| **替换**已安装包（换 target 路径 / 目录↔tarball） | `application: "restart-required"` —— 要重启才加载新一代模块 |
+| 改已加载插件的**代码** | 必须重启（cordis 不会重新 import 已加载模块） |
+| 改 profile 补丁层（加/改行） | 补丁层本身热加载；**新增行**的插件通常要重启 |
+
+### 本机踩过的两个坑（写在这里省时间）
+
+1. **`approvedBuilds` 只在"待决定"时传。** 授权按包名**持久**保存在 profile 的
+   `pnpm-workspace.yaml`（`allowBuilds`）。已经批准过的名字再传一次 → 服务端直接拒绝
+   `<1s` 返回 `error.code: "stale-approval"`（`packageResult` 键整体缺失，pnpm 根本没跑）。
+   正确做法：**重试时不带 `approvedBuilds`**。
+2. **service 侧安装有空闲超时上界。** `plugin-manager` 的 `idleTimeoutMs` 默认 **600000 ms**：
+   600 秒内没有任何捕获输出即被终止，`kind: "timeout"`、`application: "failed"`，并回滚
+   manifest 与 lockfile。带生命周期脚本的重依赖包会撞上它——`onnxruntime-node` 的
+   `postinstall` 会 bootstrap `global-agent` 走代理，脚本结束后 pnpm 迟迟不退出，于是
+   pnpm 自己打印 `Done in 2s` 却仍被判超时。**缓解**：让它先跑一次，把构建产物落进 pnpm store；
+   命中缓存的脚本不再执行，第二次重试通常 2 秒内干净退出（code-index 就是这样装成的）。
+   该值可在补丁层给 `plugin-manager` 行调大。
+
+装完**用返回字段判定**，不要只看插件自己的标记：
+
+```
+install_bundle → application / warnings / pendingBuilds   （机器可读回执）
+```
+
+补充验证（本 profile **没有** `cordis_*` 工具，所以拿不到 `cordis_inspect_query`）：
 
 ```powershell
-# 官方路径：读 install_bundle 返回的 application / warnings，并用 cordis_inspect_query 确认
-# 退路（手写行）：看插件自己写的加载标记
+# 装载与激活状态
+plugin_manager(action: "list_bundles")   # installed / enabled / version
+plugin_manager(action: "list_plugins")   # moduleName 是包名还是 file:// ；fiberPhase 是否 active
+
+# 插件自己写的加载记录（含宿主 pid 与 node 版本，用来区分 app 与测试进程）
+Get-Content "$env:USERPROFILE\.dsh\code-index\_boot.log"           # 索引插件
 Get-Content "$env:USERPROFILE\.dsh\archive\_loaded.json" -Raw      # 记忆插件
-Get-Content "$env:USERPROFILE\.dsh\code-index\_loaded.json" -Raw   # 索引插件
+
+# 索引插件的端到端验证（从安装后的包路径跑，含 roots 白名单断言，不跑模型）
+node plugins/dsh-code-index/verify-install.mjs
 ```
+
 
 ## 目录结构
 
@@ -62,8 +98,10 @@ plugins/
   dsh-code-index/
     index.js                    插件入口 + 三个工具
     lib/                        store / chunker / scan / query / search / indexer / embedder
-    test.mjs                    核心自测（32 项）
-    test-plugin.mjs             插件接口自测（24 项）
+    release/                    随 tag 分发的静态产物（.tgz + SHA256SUMS.txt）
+    verify-install.mjs          装后验证：从**安装后的包路径**加载 + roots 白名单断言 + 依赖解析
+    test.mjs                    核心自测（35 项；带模型 38 项）
+    test-plugin.mjs             插件接口自测（46 项；带模型 45 项）
 ```
 
 ## 自测
