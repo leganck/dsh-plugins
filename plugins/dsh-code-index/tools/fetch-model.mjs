@@ -59,6 +59,49 @@ export const MODELS = {
       'onnx/model_int8.onnx': 200_000_000,
     },
   },
+  /**
+   * 候选升级模型（**实验性**，插件不引用）：用于对照"换更强的中文/代码嵌入模型值不值"。
+   * 两者约定不同，弄错就没法比：
+   *   Qwen3-Embedding → 查询加 `Instruct: {任务}\nQuery:{问题}`、文档不加、**last_token pooling**
+   *   bge-m3          → 查询与文档都不加指令、**CLS pooling**
+   */
+  'qwen3-embedding-0.6b': {
+    repo: 'onnx-community/Qwen3-Embedding-0.6B-ONNX',
+    role: '候选升级的嵌入模型（1024 维，多语+代码；查询需 Instruct 前缀、last-token pooling）',
+    files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'added_tokens.json', 'vocab.json', 'merges.txt'],
+    onnx: { int8: 'onnx/model_int8.onnx', fp16: 'onnx/model_fp16.onnx', q4f16: 'onnx/model_q4f16.onnx' },
+    required: ['int8'],
+    /** transformers.js 的 pipeline 只认 `<dir>/onnx/`，而我们把 ONNX 放根目录 → 下载后补硬链接 */
+    linkOnnxSubdir: true,
+    minBytes: {
+      'config.json': 200,
+      'tokenizer.json': 1_000_000,
+      'tokenizer_config.json': 200,
+      'special_tokens_map.json': 50,
+      'added_tokens.json': 50,
+      'vocab.json': 500_000,
+      'merges.txt': 500_000,
+      'onnx/model_int8.onnx': 500_000_000,
+      'onnx/model_fp16.onnx': 1_000_000_000,
+      'onnx/model_q4f16.onnx': 450_000_000,
+    },
+  },
+  'bge-m3': {
+    repo: 'Xenova/bge-m3',
+    role: '候选升级的嵌入模型（1024 维，多语，长文本强；无指令、CLS pooling）',
+    files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json'],
+    onnx: { int8: 'onnx/model_int8.onnx', fp16: 'onnx/model_fp16.onnx' },
+    required: ['int8'],
+    linkOnnxSubdir: true,
+    minBytes: {
+      'config.json': 200,
+      'tokenizer.json': 1_000_000,
+      'tokenizer_config.json': 200,
+      'special_tokens_map.json': 50,
+      'onnx/model_int8.onnx': 450_000_000,
+      'onnx/model_fp16.onnx': 900_000_000,
+    },
+  },
 }
 
 export const SOURCES = {
@@ -161,6 +204,32 @@ async function main() {
         console.log(`  ❌ ${path.basename(dest).padEnd(24)} ${String(e.message).slice(0, 120)}`)
         bad++
       }
+    }
+    // 有些模型的加载器只认 `<dir>/onnx/<file>.onnx`（例如 transformers.js 的 pipeline），
+    // 而我们把 ONNX 放在根目录（与 lib/embedder.js 的约定一致）。需要时用**硬链接**补齐：
+    // 瞬时、不占额外磁盘、删一边不影响另一边。
+    if (m.linkOnnxSubdir && !checkOnly && !dryRun) {
+      const onnxDir = path.join(dir, 'onnx')
+      fs.mkdirSync(onnxDir, { recursive: true })
+      const linked = []
+      for (const f of files.filter((x) => x.startsWith('onnx/'))) {
+        const src = path.join(dir, path.basename(f))
+        const dst = path.join(onnxDir, path.basename(f))
+        if (fs.existsSync(src) && !fs.existsSync(dst)) {
+          try {
+            fs.linkSync(src, dst)
+            linked.push(path.basename(f))
+          } catch {
+            try {
+              fs.copyFileSync(src, dst)
+              linked.push(`${path.basename(f)}(copy)`)
+            } catch {
+              /* 两项都失败就算了，不影响根目录那份 */
+            }
+          }
+        }
+      }
+      if (linked.length) console.log(`  ← 已为 transformers.js 路径补 onnx/ 硬链接：${linked.join(', ')}`)
     }
     console.log('')
   }
