@@ -160,47 +160,46 @@ export function astChunks(text, { parser, minLines = 8, maxLines = 120, targetLi
 
   const out = []
   let cur = null
+  const cut = () => {
+    if (cur) out.push(cur)
+    cur = null
+  }
   for (const u of units) {
     const s = u.startPosition.row
     const e = u.endPosition.row
     const len = e - s + 1
-    if (len < minLines) {
-      // 太短的单元并入当前块（不要为一行 import 单独建块）
-      if (cur) {
-        cur.end = e
-        cur.units += 1
-        cur.kind = 'packed'
-        cur.symbol = null // 打包块没有单一符号，不假装有
-      } else {
-        cur = { start: s, end: e, units: 1, kind: 'member', symbol: nameOf(u), type: u.type }
-      }
-      continue
-    }
+
+    // 单元本身超过上限 → 强制拆分（唯一会产生"半截成员"的情况）
     if (len > maxLines) {
-      if (cur) {
-        out.push(cur)
-        cur = null
-      }
+      cut()
       for (let a = s; a <= e; a += maxLines) {
         out.push({ start: a, end: Math.min(a + maxLines - 1, e), units: 1, kind: 'forced', symbol: nameOf(u), type: u.type })
       }
       continue
     }
-    // 到了目标量级 + 当前在成员边界 → 收口，而不是硬塞到 maxLines
-    if (cur && cur.end - cur.start + 1 >= targetLines) {
-      out.push(cur)
-      cur = null
-    }
+
+    /**
+     * 收口条件（两个都要看）：
+     *   ① 已经够到目标量级 → 在成员边界收口，而不是硬塞到 maxLines；
+     *   ② **并进来会超过 maxLines** → 必须先切。
+     *
+     * ② 曾经漏掉，后果实测到过：一长串"短单元"（各自 < minLines 的小成员）
+     * 会无限制地并进同一个块，跑出 1214 行的块（上限本应 120）——
+     * 这种块的向量毫无意义、FTS5 命中也被稀释。
+     * 注意"首行是否对齐成员"这种指标**抓不到**它（只看起头，不看结尾）。
+     */
+    if (cur && (cur.end - cur.start + 1 >= targetLines || e - cur.start + 1 > maxLines)) cut()
+
     if (!cur) {
       cur = { start: s, end: e, units: 1, kind: 'member', symbol: nameOf(u), type: u.type }
     } else {
       cur.end = e
       cur.units += 1
       cur.kind = 'packed'
-      cur.symbol = null
+      cur.symbol = null // 打包块没有单一符号，不假装有
     }
   }
-  if (cur) out.push(cur)
+  cut()
 
   return out
     .filter((c) => lines.slice(c.start, c.end + 1).join('\n').trim())

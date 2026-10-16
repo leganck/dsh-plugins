@@ -487,6 +487,23 @@ console.log('\n[8] 切块策略')
     }
   }
 
+  // (e3) **块尺寸不变量**：任何块都不得超过 maxLines。
+  //      曾漏掉这条（短单元并入分支没查上限）→ 实测跑出 1214 行的块（上限本应 120）：
+  //      一长串各自 < minLines 的小成员会无限并进同一块。而"首行是否对齐成员"那种指标
+  //      只看起头、看不到结尾，抓不到它——所以要单独断言尺寸。
+  {
+    const rows = ['class Tiny {']
+    for (let i = 0; i < 300; i++) rows.push(`    int f${i} = ${i};`) // 每个仅 1 行（< minLines 8）
+    rows.push('}')
+    const tiny = rows.join('\n')
+    const rt = chunkFile({ relPath: 'Tiny.java', text: tiny, chunking: {}, depsDir: D })
+    const lens = rt.chunks.map((c) => c.endLine - c.startLine + 1)
+    const maxLen = Math.max(...lens)
+    check(`AST 块不超过 maxLines（小成员连成一串也要切）`, maxLen <= 120, `最大 ${maxLen} 行；共 ${rt.chunks.length} 块`)
+    check('AST 没有把 300 个字段并成一块', rt.chunks.length >= 3, `${rt.chunks.length} 块，长度 ${lens.slice(0, 6).join(',')}…`)
+    check('AST 块首尾自洽', rt.chunks.every((c) => c.startLine >= 1 && c.endLine >= c.startLine))
+  }
+
   // (f) 策略分发：window / heuristic / 无语法文件
   check('window 策略可强制（.java 也走固定窗口）', chunkFile({ relPath: 'A.java', text: java, chunking: { strategy: 'window', windowLines: 40 } }).strategy === 'window')
   check('heuristic 策略可强制', chunkFile({ relPath: 'A.java', text: java, chunking: { strategy: 'heuristic' } }).strategy === 'heuristic')
@@ -502,6 +519,14 @@ console.log('\n[8] 切块策略')
   const r3 = await buildIndex({ store: storeFp, repoRoot: repo, chunking: { strategy: 'heuristic' }, opts: { maxFileBytes: 256 * 1024 } })
   check('换策略自动全量重建（并如实标记）', r3.mode === 'full' && r3.strategyChanged === true, `mode=${r3.mode} strategyChanged=${r3.strategyChanged}`)
   check('全量重建后策略统计是启发式', Object.keys(r3.strategies ?? {}).includes('heuristic'), JSON.stringify(r3.strategies))
+  // **库里没有指纹记录**（= 指纹机制引入之前建的索引）也必须触发重建。
+  // 早期写成 `Boolean(prev) && prev !== fp`，于是这类库被判成"没变化"→ 只重切少数变动文件 →
+  // 直接落进"新旧两种粒度的块混在一起"的状态。实测踩过：迁移重建时最大的库只重切了 14 个文件。
+  storeFp.db.exec("delete from meta where k = 'chunk_fingerprint'")
+  const r4 = await buildIndex({ store: storeFp, repoRoot: repo, chunking: { strategy: 'heuristic' }, opts: { maxFileBytes: 256 * 1024 } })
+  check('库里没有指纹记录 → 同样强制全量重建', r4.mode === 'full' && r4.strategyChanged === true, `mode=${r4.mode} strategyChanged=${r4.strategyChanged}`)
+  const r5 = await buildIndex({ store: storeFp, repoRoot: repo, chunking: { strategy: 'heuristic' }, opts: { maxFileBytes: 256 * 1024 } })
+  check('重建后指纹已记录 → 回到增量', r5.mode === 'incremental' && r5.strategyChanged === false, `mode=${r5.mode}`)
   dropIndex(storeFp)
   // Windows 上 SQLite 句柄未必立刻释放，清理临时目录是**尽力而为**（不该让清理失败掩盖测试结果）
   try {

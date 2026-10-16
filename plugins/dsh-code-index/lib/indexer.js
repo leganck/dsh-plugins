@@ -73,16 +73,21 @@ export async function buildIndex({
   const maxEmbed = budget.maxEmbedPerRun ?? 0
 
   /**
-   * 切块策略指纹 → 变了就必须**全量重建**。
+   * 切块策略指纹 → 不一致就必须**全量重建**。
    *
    * 不这么做的后果：换策略（例如默认从固定窗口切到 AST）后跑增量，
    * 只有**变动过的文件**会被重新切块，于是库里同时存在"旧的窗口块"和"新的 AST 块"——
    * 检索结果里两种粒度的块混在一起，而且**没有任何信号提示这件事发生了**。
-   * 这是典型的"悄悄改变检索质量"，必须挡住。
+   *
+   * **"库里没有指纹记录"也必须算不一致**：在指纹机制引入之前建的索引就是这个状态，
+   * 它们的切块策略未知。早期写成 `Boolean(prev) && prev !== fp`，于是这类库被判成
+   * "没变化"→ 只重切少数变动文件 → 直接落进上面那个混合状态。
+   * 这是实测踩到的：对三个既有索引做迁移重建时，最大的那个只重切了 14 个文件。
    */
   const fingerprint = sha256(JSON.stringify(chunking ?? {}))
   const prevFingerprint = store.getMeta('chunk_fingerprint')
-  const strategyChanged = Boolean(prevFingerprint) && prevFingerprint !== fingerprint
+  const hasIndexedFiles = store.stats().files > 0
+  const strategyChanged = hasIndexedFiles && prevFingerprint !== fingerprint
   const mode = strategyChanged ? 'full' : requestedMode
 
   if (mode === 'full') {
