@@ -23,7 +23,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.2'
+export const BUILD = '2026-10-16.3'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -337,6 +337,13 @@ function applyInner(ctx, rawConfig = {}) {
         ]
         if (r.fileErrors.length) lines.push(`  读取失败 ${r.fileErrors.length} 个：${r.fileErrors.join('; ')}`)
         if (!embedder.ok) lines.push(`  ⚠️ 向量通道未启用，当前是纯关键词检索：${embedder.reason}`)
+        else if (r.stats.vectors < r.stats.chunks) {
+          // 让"向量没补完"显式可见：8227 块 / 0 向量这种人眼容易划过去，
+          // 而它直接决定语义召回是否存在（实测曾有会话因此以为配置关了向量）
+          lines.push(
+            `  ⚠️ 向量不完整：${r.stats.vectors}/${r.stats.chunks} 块有向量 —— 语义召回只覆盖一部分，再跑一次 code_index 可续算`,
+          )
+        }
         return textResult({ repoRoot, dbPath, ...r }, lines.join('\n'))
       } catch (e) {
         return fail(String(e.message))
@@ -432,6 +439,12 @@ function applyInner(ctx, rawConfig = {}) {
         if (args.scan !== false) {
           st = scanStatus(store, repoRoot, { windowLines: config.windowLines, maxFileBytes: config.maxFileBytes })
           lines.push(`  新鲜度：${st.stale ? `过期（${st.changed} 改 / ${st.removed} 删）` : '最新'}；候选文件 ${st.scanned}`)
+        }
+        // 向量完整性显式提示：这一行决定了"语义召回到底有没有在工作"
+        if (embedder.ok && s.chunks > 0 && s.vectors < s.chunks) {
+          lines.push(
+            `  ⚠️ 向量不完整：${s.vectors}/${s.chunks} 块有向量（${((s.vectors / s.chunks) * 100).toFixed(0)}%）—— 当前检索只有关键词 + 部分语义，跑一次 code_index 可补算`,
+          )
         }
         return textResult({ repoRoot, dbPath, stats: s, scan: st, embedder: embedder.ok ? { backend: embedder.backend, model: embedder.modelFile, cacheEntries: embedder.cacheEntries } : { ok: false, reason: embedder.reason } }, lines.join('\n'))
       } catch (e) {

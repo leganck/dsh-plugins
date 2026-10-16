@@ -165,12 +165,41 @@ if (!modelDir) {
   }
 }
 
+// ---------- 8. 诊断信息不得预设原因 ----------
+// 实测事故：某会话的索引里 0 向量，检索提示却写成「配置 embedding.backend = off」，
+// 把排查引向一个本来就是 auto 的配置。原因必须由状态推导。
+console.log('\n[8] 诊断信息不得预设原因')
+
+// (a) 嵌入器不可用 → 用它的真实 reason，且不得声称是配置关了
+const r8a = await search(store, { ok: false, reason: '缺少可选依赖 XYZ' }, 'anything', { topK: 1 })
+check('嵌入器失败时 note 用真实 reason', r8a.note.includes('缺少可选依赖 XYZ'), r8a.note)
+check('嵌入器失败时不得误报 backend=off', !r8a.note.includes('backend = off'), r8a.note)
+
+// (b) 索引里 0 向量但嵌入器可用 → 应指出"没有向量"，而不是配置
+const tmpFts = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-fts-'))
+const storeFts = Store.open(path.join(tmpFts, 'index.db'))
+await buildIndex({ store: storeFts, repoRoot: repo, embedder: null, budget: {} })
+check('(b) 前置：该库确实只有 FTS', storeFts.stats().vectors === 0 && storeFts.stats().chunks > 0, JSON.stringify(storeFts.stats()))
+const r8b = await search(storeFts, { ok: true }, 'refund', { topK: 1 })
+check('0 向量时指出"还没有向量"', /还没有向量/.test(r8b.note), r8b.note)
+check('0 向量时不得误报 backend=off', !r8b.note.includes('backend = off'), r8b.note)
+
+// (c) 预算为 0 → 不得谎称"向量已是最新"
+const r8c = await buildIndex({
+  store: storeFts,
+  repoRoot: repo,
+  embedder: { ok: true, embed: async () => [], cache: null },
+  budget: { maxEmbedPerRun: 0 },
+})
+check('预算为 0 时不谎称"已是最新"', /预算为 0/.test(r8c.embedNote), r8c.embedNote)
+
 // ---------- 7. 清理 ----------
 console.log('\n[7] 清空索引')
 dropIndex(store)
 check('清空后块数为 0', store.stats().chunks === 0)
 check('清空后向量为 0', store.stats().vectors === 0)
 check('清空后文件数为 0', store.stats().files === 0)
+dropIndex(storeFts)
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 if (fail) process.exitCode = 1
