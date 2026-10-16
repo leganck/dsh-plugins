@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status / code_index_deps. Embedding deps are installed on demand, not at plugin install time.",

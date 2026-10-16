@@ -223,6 +223,16 @@ check(
   fs.existsSync(path.join(process.env.DSH_HOME, 'code-index', '_loaded.json')),
   `${process.env.DSH_HOME}\\code-index\\_loaded.json`,
 )
+// 标记必须能回答"加载时到底用了哪些配置" —— 尤其是排除规则。
+// 这个坑真踩过：profile 的 config 覆盖条目**替换整份 config**，写漏了不报错、只是静默失效；
+// 如果标记里看不到 excludePaths，就无法确认它到底生效没有。
+{
+  const marker = JSON.parse(fs.readFileSync(path.join(process.env.DSH_HOME, 'code-index', '_loaded.json'), 'utf8'))
+  check('标记记录了扫描相关配置（scan 段）', typeof marker.config?.scan === 'object' && marker.config.scan !== null, JSON.stringify(marker.config?.scan))
+  check('标记记录了 excludePaths（能确认排除是否真的生效）', Array.isArray(marker.config?.scan?.excludePaths), JSON.stringify(marker.config?.scan?.excludePaths))
+  check('标记记录了 excludeDirs', Array.isArray(marker.config?.scan?.excludeDirs), JSON.stringify(marker.config?.scan?.excludeDirs))
+  check('标记记录了 maxFileBytes / windowLines / maxEmbedPerRun', [marker.config?.scan?.maxFileBytes, marker.config?.scan?.windowLines, marker.config?.scan?.maxEmbedPerRun].every((v) => typeof v === 'number'))
+}
 
 // 依赖工具：默认只**报**状态，绝不擅自下载（下载必须由显式 action 触发）
 const depsStatusOut = await deps.execute({}, {})
