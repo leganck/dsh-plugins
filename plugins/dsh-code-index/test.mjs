@@ -26,7 +26,7 @@ import {
   EMBED_PACKAGES,
 } from './lib/deps.js'
 import { search } from './lib/search.js'
-import { walkRepo } from './lib/scan.js'
+import { walkRepo, normalizeRelPrefix } from './lib/scan.js'
 import { chunkText, chunkFile, sha256 } from './lib/chunker.js'
 import { braceDepths, heuristicChunks } from './lib/chunk-heuristic.js'
 import { getParser } from './lib/chunk-ast.js'
@@ -663,8 +663,79 @@ console.log('\n[9] 嵌入模型一致性')
   }
 }
 
-// ---------- 10. 清理 ----------
-console.log('\n[10] 清空索引')
+// ---------- 10. 扫描排除（excludeDirs / excludePaths） ----------
+// 这一段守的是"中文语义检索被遗留目录带偏"那个真实问题：仓库里常有名字正常、
+// 但在本仓库里是遗留/生成物的目录（例：legacy-grails-service 与 billing-service 只差 svc-）。
+console.log('\n[10] 扫描排除')
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-excl-'))
+  const JAVA = 'class A {\n  void m() {\n    int x = 1;\n  }\n}\n'
+  const put = (rel) => {
+    const abs = path.join(root, rel)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, JAVA)
+  }
+  put('legacy-grails-service/Legacy.java') // 遗留目录（按路径排除）
+  put('sub/legacy-grails-service/Normal.java') // 子目录里的同名目录 → 不该被路径规则误伤
+  put('custom_bin/A.java') // 按目录名排除
+  put('node_modules/B.java') // 内置默认排除
+  put('src/Keep.java')
+  put('src/Drop.java')
+
+  const rels = (opts) => walkRepo(root, opts).map((f) => f.rel)
+  const base = rels({})
+  check('默认扫描：内置排除生效（node_modules 不在）', !base.includes('node_modules/B.java'))
+  check('默认扫描：遗留目录会被索引（正是问题来源）', base.includes('legacy-grails-service/Legacy.java'), base.join(', '))
+
+  const byPath = rels({ excludePaths: ['legacy-grails-service'] })
+  check('excludePaths 排除顶层遗留目录', !byPath.includes('legacy-grails-service/Legacy.java'))
+  check('excludePaths 不误伤子目录里的同名目录（比按名排除精确）', byPath.includes('sub/legacy-grails-service/Normal.java'))
+
+  const byName = rels({ excludeDirs: ['legacy-grails-service'] })
+  check(
+    'excludeDirs 按目录名排除（两处同名都排掉）',
+    !byName.includes('legacy-grails-service/Legacy.java') && !byName.includes('sub/legacy-grails-service/Normal.java'),
+  )
+  check('excludeDirs 与内置默认**合并**而非替换（node_modules 仍被排除）', !byName.includes('node_modules/B.java'))
+
+  const custom = rels({ excludeDirs: ['custom_bin'] })
+  check('自定义目录名可排除', !custom.includes('custom_bin/A.java'))
+  check('未排除的正常文件保留', custom.includes('src/Keep.java'))
+
+  check('excludePaths 可排除单个文件', !rels({ excludePaths: ['src/Drop.java'] }).includes('src/Drop.java'))
+  check('excludePaths 容忍反斜杠与结尾斜杠', !rels({ excludePaths: ['legacy-grails-service\\'] }).includes('legacy-grails-service/Legacy.java'))
+  check('excludePaths 前缀语义（a/b 也排除 a/b/c）', !rels({ excludePaths: ['legacy-grails-service'] }).some((r) => r.startsWith('legacy-grails-service/')))
+  check('normalizeRelPrefix 归一化 .\\ 结尾/ 反斜杠', normalizeRelPrefix('.\\a\\b\\') === 'a/b', normalizeRelPrefix('.\\a\\b\\'))
+
+  // 索引层：加上排除后重跑，旧块应被移除（diffFiles 的 removed 路径），无需全量重建
+  const tmpEx = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-excl-db-'))
+  const sEx = Store.open(path.join(tmpEx, 'index.db'))
+  const scanOpts = { maxFileBytes: 256 * 1024 }
+  await buildIndex({ store: sEx, repoRoot: root, opts: scanOpts })
+  check('建库时包含遗留目录的文件', sEx.fileState().has('legacy-grails-service/Legacy.java'))
+  const chunksBefore = sEx.stats().chunks
+  const b2 = await buildIndex({ store: sEx, repoRoot: root, opts: { ...scanOpts, excludePaths: ['legacy-grails-service'] } })
+  check(
+    '加排除后重跑：该文件被移除，且没有触发全量重建',
+    !sEx.fileState().has('legacy-grails-service/Legacy.java') && b2.removed === 1 && b2.mode === 'incremental',
+    `removed=${b2.removed} mode=${b2.mode}`,
+  )
+  check('库中对应块也被删除（不是只删了文件记录）', sEx.stats().chunks === chunksBefore - 1, `${chunksBefore} → ${sEx.stats().chunks} 块`)
+  // 状态检查必须用同一份排除规则，否则会把被排除的文件永远报成"缺失/过期"
+  const stEx = scanStatus(sEx, root, { ...scanOpts, excludePaths: ['legacy-grails-service'] })
+  check('状态检查共用排除规则 → 报"最新"而不是"过期"', stEx.stale === false, `stale=${stEx.stale} removed=${stEx.removed}`)
+  const stBad = scanStatus(sEx, root, scanOpts)
+  check('对照：不传排除规则时会误报过期（证明这条链必须一致）', stBad.stale === true, `stale=${stBad.stale}`)
+  dropIndex(sEx)
+  try {
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch {
+    /* Windows 句柄 */
+  }
+}
+
+// ---------- 11. 清理 ----------
+console.log('\n[11] 清空索引')
 dropIndex(store)
 check('清空后块数为 0', store.stats().chunks === 0)
 check('清空后向量为 0', store.stats().vectors === 0)

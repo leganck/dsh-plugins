@@ -25,9 +25,10 @@ import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms,
 import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strategies.js'
 import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
+import { normalizeRelPrefix } from './lib/scan.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-17.1'
+export const BUILD = '2026-10-17.2'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -82,6 +83,19 @@ bootLog('module-imported', { build: BUILD })
 /** 本插件自己的目录（用于把"包内 node_modules"作为依赖解析的兜底位置） */
 const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 
+/**
+ * 扫描选项。**建库与状态检查必须用同一份**——否则 `code_index_status` 会把被排除的文件
+ * 当成"库里缺失的文件"而永远报告"过期"。
+ */
+function scanOptsOf(config) {
+  return {
+    windowLines: config.windowLines,
+    maxFileBytes: config.maxFileBytes,
+    excludeDirs: config.excludeDirs,
+    excludePaths: config.excludePaths.map(normalizeRelPrefix).filter(Boolean),
+  }
+}
+
 const DEFAULTS = {
   /** 索引基目录：<base>/<仓库名>-<路径哈希>/index.db，每仓库一库且不落在代码仓库里 */
   indexDirBase: null,
@@ -90,6 +104,22 @@ const DEFAULTS = {
   roots: [],
   maxFileBytes: 2 * 1024 * 1024,
   windowLines: 40,
+  /**
+   * 排除**目录名**（任意深度），与内置默认（node_modules/build/.git…）**合并**而非法替换。
+   * 例如 `excludeDirs: ['tools-bin']`。
+   */
+  excludeDirs: [],
+  /**
+   * 排除**仓库相对路径**（或其前缀），用于"名字正常、但在本仓库里是遗留/生成物"的目录。
+   * 只靠排除目录名做不到 —— 会误伤别处同名的正常目录。
+   *
+   * 典型场景：仓库里并存 `legacy-grails-service`（遗留 Grails，876 文件）与
+   * `billing-service`（现役 Java 模块），两者只差 `svc-`，必须按路径精确排除，
+   * 否则遗留目录的中文界面文案会把中文语义检索的结果整体带偏（实测命中 0/4 → 2/4）。
+   *
+   * 例：`excludePaths: ['legacy-grails-service', 'docs/2-technical']`
+   */
+  excludePaths: [],
   /**
    * 嵌入依赖（onnxruntime-node + @huggingface/transformers）**不写在 package.json 里**，
    * 而是在真正需要向量时才按需安装到 `embedding.depsDir`（默认 %LOCALAPPDATA%/dsh-code-index/embed-deps）。
@@ -171,6 +201,26 @@ function normalizeConfig(raw = {}) {
   }
   if (typeof cfg.maxFileBytes !== 'number' || cfg.maxFileBytes <= 0) {
     throw new ConfigError(`config.maxFileBytes 必须是正数，收到 ${JSON.stringify(cfg.maxFileBytes)}`)
+  }
+  // ---- 扫描排除（两种语义不同，都要校验）----
+  for (const key of ['excludeDirs', 'excludePaths']) {
+    if (!Array.isArray(cfg[key])) {
+      throw new ConfigError(`config.${key} 必须是字符串数组，收到 ${Array.isArray(cfg[key]) ? 'array' : typeof cfg[key]}`)
+    }
+    for (const item of cfg[key]) {
+      if (typeof item !== 'string' || !item.trim()) {
+        throw new ConfigError(`config.${key} 的元素必须是非空字符串，收到 ${JSON.stringify(item)}`)
+      }
+      if (path.isAbsolute(item)) {
+        throw new ConfigError(`config.${key} 只能是仓库相对路径/目录名，不能是绝对路径：${JSON.stringify(item)}`)
+      }
+    }
+  }
+  // excludePaths 里出现 `..` 会指到仓库外，属于配置意图不明 → 直接拒绝（避免"以为排除了其实没排除"）
+  for (const item of cfg.excludePaths) {
+    if (normalizeRelPrefix(item).split('/').includes('..')) {
+      throw new ConfigError(`config.excludePaths 不能包含 '..'：${JSON.stringify(item)}`)
+    }
   }
   if (cfg.embedding.batch !== undefined && cfg.embedding.batch !== null && !Number.isInteger(cfg.embedding.batch)) {
     // null 表示自动挑 batch
@@ -379,7 +429,7 @@ function applyInner(ctx, rawConfig = {}) {
         const { store, dbPath } = storeFor(repoRoot)
 
         if (args.status_only) {
-          const st = scanStatus(store, repoRoot, { windowLines: config.windowLines, maxFileBytes: config.maxFileBytes })
+          const st = scanStatus(store, repoRoot, scanOptsOf(config))
           const s = store.stats()
           return textResult(
             { repoRoot, dbPath, status: st, stats: s },
@@ -395,7 +445,7 @@ function applyInner(ctx, rawConfig = {}) {
         const r = await buildIndex({
           store,
           repoRoot,
-          opts: { windowLines: config.windowLines, maxFileBytes: config.maxFileBytes },
+          opts: scanOptsOf(config),
           embedder,
           budget: { maxEmbedPerRun: args.max_embed ?? config.maxEmbedPerRun, mode: args.mode ?? 'incremental' },
           chunking: { ...config.chunking, windowLines: config.windowLines },
@@ -523,9 +573,12 @@ function applyInner(ctx, rawConfig = {}) {
         ]
         let st = null
         if (args.scan !== false) {
-          st = scanStatus(store, repoRoot, { windowLines: config.windowLines, maxFileBytes: config.maxFileBytes })
+          st = scanStatus(store, repoRoot, scanOptsOf(config))
           lines.push(`  新鲜度：${st.stale ? `过期（${st.changed} 改 / ${st.removed} 删）` : '最新'}；候选文件 ${st.scanned}`)
         }
+        // 排除规则要可见：用户改完配置最需要确认的就是"到底排掉了没有"
+        const excl = [...config.excludePaths.map((p) => `路径 ${normalizeRelPrefix(p)}`), ...config.excludeDirs.map((d) => `目录名 ${d}`)]
+        if (excl.length) lines.push(`  已排除：${excl.join('、')}（另有内置 ${'node_modules/build/.git 等'}）`)
         // 向量完整性显式提示：这一行决定了"语义召回到底有没有在工作"
         if (embedder.ok && s.chunks > 0 && s.vectors < s.chunks) {
           lines.push(

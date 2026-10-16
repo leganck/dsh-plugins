@@ -216,6 +216,8 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 | `indexDir` | `null` | 单仓库模式（多仓库共用一个库，慎用） |
 | `roots` | `[]` | 路径白名单；空数组 = 允许任意路径。**校验发生在创建索引库之前** |
 | `maxFileBytes` | 2 MiB | 单文件上限 |
+| `excludeDirs` | `[]` | 排除**目录名**（任意深度）。与内置默认（`node_modules`/`build`/`.git`…）**合并**而非替换 |
+| `excludePaths` | `[]` | 排除**仓库相对路径**（或其前缀），如 `"legacy-grails-service"`、`"docs/2-technical"`；也可精确排除单个文件。**遗留/生成物目录用这个**——按名排除会误伤别处同名目录。必须相对路径，不可是绝对路径、不可含 `..` |
 | `windowLines` | 40 | 切块窗口行数 |
 | `defaultTopK` | 10 | `code_search` 默认返回条数 |
 | `maxEmbedPerRun` | **0** | 单次最多补算多少块向量。**0 = 建库时不补算**（只做 FTS5，秒级）；>0 会在每次 `code_index` 时自动跑重负载。要向量建议用工具参数 `max_embed` 按需分批传，而不是把这个配置调大 |
