@@ -193,6 +193,24 @@ const r8c = await buildIndex({
 })
 check('预算为 0 时不谎称"已是最新"', /预算为 0/.test(r8c.embedNote), r8c.embedNote)
 
+// (d) 安全默认：不显式给预算时**不得调用嵌入器**
+// 用"一被调用就抛错"的假嵌入器来证明它压根没被碰过 —— 这是"默认不卡机器"的可执行断言
+let embedCalled = false
+const r8d = await buildIndex({
+  store: storeFts,
+  repoRoot: repo,
+  embedder: {
+    ok: true,
+    embed: async () => {
+      embedCalled = true
+      throw new Error('默认预算不该走到这里')
+    },
+    cache: null,
+  },
+  budget: {},
+})
+check('默认（不传预算）不调用嵌入器', !embedCalled && /预算为 0/.test(r8d.embedNote), r8d.embedNote)
+
 // ---------- 7. 清理 ----------
 console.log('\n[7] 清空索引')
 dropIndex(store)

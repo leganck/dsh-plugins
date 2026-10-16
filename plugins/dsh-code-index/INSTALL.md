@@ -98,7 +98,7 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 | `maxFileBytes` | 2 MiB | 单文件上限 |
 | `windowLines` | 40 | 切块窗口行数 |
 | `defaultTopK` | 10 | `code_search` 默认返回条数 |
-| `maxEmbedPerRun` | 20000 | 单次补算向量上限（可多次跑，支持续算） |
+| `maxEmbedPerRun` | **0** | 单次最多补算多少块向量。**0 = 建库时不补算**（只做 FTS5，秒级）；>0 会在每次 `code_index` 时自动跑重负载。要向量建议用工具参数 `max_embed` 按需分批传，而不是把这个配置调大 |
 | `embedding.backend` | `auto` | `auto` \| `cpu` \| `gpu` \| `off` |
 | `embedding.modelDir` | `~/.dsh/models/bge-small-zh-v1.5` | 模型目录 |
 | `embedding.threads` | 6 | CPU 线程数 |

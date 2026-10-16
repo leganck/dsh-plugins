@@ -141,7 +141,7 @@ const cases = [
   ['未知顶层键', { nope: 1 }, /未知配置项/],
   ['未知 embedding 键', { embedding: { nope: 1 } }, /未知配置项/],
   ['非法 backend', { embedding: { backend: 'quantum' } }, /backend/],
-  ['非法 maxEmbedPerRun', { maxEmbedPerRun: 0 }, /maxEmbedPerRun/],
+  ['负数 maxEmbedPerRun', { maxEmbedPerRun: -1 }, /maxEmbedPerRun/],
   ['非法 roots', { roots: 'D:/Code' }, /roots/],
 ]
 for (const [label, cfg, pattern] of cases) {
@@ -153,6 +153,14 @@ for (const [label, cfg, pattern] of cases) {
   }
   check(`拒绝${label}并指明原因`, pattern.test(msg), msg.slice(0, 90))
 }
+// maxEmbedPerRun = 0 是**默认值**（建库不自动补算向量），必须被接受
+let zeroAccepted = true
+try {
+  plugin.apply(cordisLikeCtx({ inject: ['tools'] }).ctx, { maxEmbedPerRun: 0, embedding: { backend: 'off' } })
+} catch {
+  zeroAccepted = false
+}
+check('接受 maxEmbedPerRun = 0（默认不补算向量）', zeroAccepted)
 
 // ---------- 注册面 ----------
 console.log('\n[1] 工具注册面')

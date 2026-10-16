@@ -94,7 +94,7 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
     if (!embedder?.ok) {
       vecNote = `向量通道未启用：${embedder?.reason ?? '嵌入器不可用'}`
     } else if (vectors === 0) {
-      vecNote = '向量通道未启用：索引里还没有向量（建库时未嵌入）——重跑 code_index 即可补算'
+      vecNote = '向量通道未启用：索引里还没有向量（建库默认不补算）——跑 code_index 并传 max_embed=<正整数> 可补算'
     } else {
       vecNote = `向量通道未启用：当前 mode=${mode}`
     }

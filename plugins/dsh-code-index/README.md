@@ -34,11 +34,20 @@ DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 ## 典型用法
 
 ```
-code_index(path="D:/Code/demo/erp/demo-erp-pos-5.2.0")     # 首次建库（向量部分按仓库大小）
-code_search(query="退款超单校验在哪里做的")                          # 混合检索，默认返回 10 条
-code_search(query="refundOverLimit", mode="fts")                    # 只走关键词
-code_index_status()                                                 # 看覆盖与新鲜度
+code_index(path="D:/Code/your-repo")                       # 建库：只做全文索引，秒级完成
+code_search(query="退款超单校验在哪里做的")            # 关键词检索，默认返回 10 条
+code_index_status()                                  # 看覆盖、新鲜度、向量完成度
+
+# 想要语义检索（可选，重负载）：显式给预算，分批跑
+code_index(path="D:/Code/your-repo", max_embed=500)         # 本轮最多补算 500 块向量
+code_index(path="D:/Code/your-repo", max_embed=500)         # 再跑，接着补（可续算）
+code_search(query="订单状态机的实现在哪")               # 向量补齐后自动变成 hybrid
 ```
+
+> ⚠️ **向量补算是重负载**：实测 GPU 约 47 块/s，而它抢占的正是驱动显示的那块显卡——
+> 8227 块曾把整机卡住数分钟（2026-10-16 实测）。所以**默认不自动补算**（`maxEmbedPerRun: 0`），
+> 要向量必须显式传 `max_embed`，建议每次 500~2000 块。没有向量时检索依然可用，
+> 只是退化为纯关键词——`code_search` 会明确告诉你原因与补算方法，不会误报成"配置关了向量"。
 
 `code_search` 输出形如：
 
@@ -73,7 +82,7 @@ code_index_status()                                                 # 看覆盖�
         windowLines: 40                                     # 切块窗口行数
         maxFileBytes: 2097152                               # 单文件上限（默认 2 MB）
         defaultTopK: 10
-        maxEmbedPerRun: 20000                               # 单次补算向量的上限（可多次跑，支持续算）
+        maxEmbedPerRun: 0                                   # 默认 0 = 建库不补算向量；>0 才自动补算（重负载，见上）
         embedding:
           backend: "auto"                                   # auto | cpu | gpu | off
           modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"

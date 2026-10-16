@@ -23,7 +23,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.3'
+export const BUILD = '2026-10-16.4'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -85,7 +85,14 @@ const DEFAULTS = {
   windowLines: 40,
   embedding: { backend: 'auto', modelDir: null, threads: 6, batch: null, cachePath: null },
   defaultTopK: 10,
-  maxEmbedPerRun: 20000,
+  /**
+   * 单次最多补算多少块的向量。**默认 0 = 不自动补算**：建库只做 FTS5（秒级）。
+   *
+   * 改成 0 的理由（2026-10-16 实测）：原先默认 20000，任何人建任何新仓库的索引都会
+   * 自动跑一次可能数十分钟的重负载且事前不打招呼；用显示 GPU 跑推理时会整机卡顿
+   * （实测 8227 块把机器卡了数分钟）。重活必须先说出来、由调用方显式决定。
+   */
+  maxEmbedPerRun: 0,
 }
 
 /**
@@ -132,10 +139,15 @@ function normalizeConfig(raw = {}) {
       throw new ConfigError(`config.${key} 必须是 >= 1 的整数，收到 ${JSON.stringify(value)}`)
     }
   }
-  intAtLeast1(cfg.maxEmbedPerRun, 'maxEmbedPerRun')
   intAtLeast1(cfg.defaultTopK, 'defaultTopK')
   intAtLeast1(cfg.windowLines, 'windowLines')
   intAtLeast1(cfg.embedding.threads, 'embedding.threads')
+  // maxEmbedPerRun 允许 0（= 不自动补算向量），这是默认值；只拒绝负数与小数
+  if (!Number.isInteger(cfg.maxEmbedPerRun) || cfg.maxEmbedPerRun < 0) {
+    throw new ConfigError(
+      `config.maxEmbedPerRun 必须是 >= 0 的整数（0 = 建库时不补算向量），收到 ${JSON.stringify(cfg.maxEmbedPerRun)}`,
+    )
+  }
   if (typeof cfg.maxFileBytes !== 'number' || cfg.maxFileBytes <= 0) {
     throw new ConfigError(`config.maxFileBytes 必须是正数，收到 ${JSON.stringify(cfg.maxFileBytes)}`)
   }
@@ -294,7 +306,11 @@ function applyInner(ctx, rawConfig = {}) {
         path: { type: 'string', description: '仓库根目录（绝对路径）。省略则用当前会话工作目录。' },
         mode: { type: 'string', enum: ['incremental', 'full'], description: 'full = 先清空再重建；默认 incremental。' },
         status_only: { type: 'boolean', description: '只统计变化数量，不写入索引。' },
-        max_embed: { type: 'integer', description: '本轮最多补算多少块的向量（默认 20000）。向量量大时可分多次跑。' },
+        max_embed: {
+          type: 'integer',
+          description:
+            '本轮最多补算多少块的向量。**默认 0 = 不补算**，建库只做全文索引（秒级）。要启用语义检索就显式给一个正整数（建议 500~2000 分批跑，可续算）；补算是重负载，可能占满 GPU/CPU 数分钟并让整机变卡。',
+        },
       },
       required: [],
       additionalProperties: false,
@@ -341,7 +357,7 @@ function applyInner(ctx, rawConfig = {}) {
           // 让"向量没补完"显式可见：8227 块 / 0 向量这种人眼容易划过去，
           // 而它直接决定语义召回是否存在（实测曾有会话因此以为配置关了向量）
           lines.push(
-            `  ⚠️ 向量不完整：${r.stats.vectors}/${r.stats.chunks} 块有向量 —— 语义召回只覆盖一部分，再跑一次 code_index 可续算`,
+            `  ⚠️ 向量不完整：${r.stats.vectors}/${r.stats.chunks} 块有向量 —— 语义召回只覆盖一部分；传 max_embed 再跑一次可续算`,
           )
         }
         return textResult({ repoRoot, dbPath, ...r }, lines.join('\n'))
@@ -443,7 +459,7 @@ function applyInner(ctx, rawConfig = {}) {
         // 向量完整性显式提示：这一行决定了"语义召回到底有没有在工作"
         if (embedder.ok && s.chunks > 0 && s.vectors < s.chunks) {
           lines.push(
-            `  ⚠️ 向量不完整：${s.vectors}/${s.chunks} 块有向量（${((s.vectors / s.chunks) * 100).toFixed(0)}%）—— 当前检索只有关键词 + 部分语义，跑一次 code_index 可补算`,
+            `  ⚠️ 向量不完整：${s.vectors}/${s.chunks} 块有向量（${((s.vectors / s.chunks) * 100).toFixed(0)}%）—— 当前检索只有关键词 + 部分语义，传 max_embed=<正整数> 跑 code_index 可补算`,
           )
         }
         return textResult({ repoRoot, dbPath, stats: s, scan: st, embedder: embedder.ok ? { backend: embedder.backend, model: embedder.modelFile, cacheEntries: embedder.cacheEntries } : { ok: false, reason: embedder.reason } }, lines.join('\n'))
