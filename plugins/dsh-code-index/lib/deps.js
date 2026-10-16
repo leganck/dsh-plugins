@@ -57,6 +57,10 @@ export const DEP_GROUPS = {
     { name: 'tree-sitter-java', version: '0.21.0' },
     { name: 'tree-sitter-javascript', version: '0.21.4' },
     { name: 'tree-sitter-typescript', version: '0.21.2' },
+    // Groovy：本机 Grails 项目的主力语言（实测 legacy-java-service 里 .groovy 144 个 > .java 94 个）。
+    // 该包 peer 正是 ^0.21.1 且带 win32-x64 预构建；导出形状是 {language, nodeTypeInfo}（**没有 name**），
+    // 按我们的教训"整个元数据对象传给 setLanguage"实测可用（识别出 class_declaration / method_declaration）。
+    { name: 'tree-sitter-groovy', version: '0.1.2' },
   ],
 }
 

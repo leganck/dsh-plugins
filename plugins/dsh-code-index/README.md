@@ -65,9 +65,11 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 1. **不做 Merkle 树**。实测全量遍历只要 120 ms（2088 文件），Merkle 的价值（十万级文件 + 跨网）在这里不存在。改用两级指纹：`mtime+size` 快扫 → 变了才读文件算 sha256。
 2. **块内容哈希是跨版本复用的钥匙**。同一段代码在你的 5 个 crm 版本里内容相同 → 同一哈希 → 向量缓存直接命中。
 3. **切块策略可配置（默认按文件类型查表）**。对应 Cursor 的 `GetAvailableChunkingStrategies`：
-   内置策略表 + 配置覆盖 + 依赖缺失自动降级。实测"块首行落在成员内部"（=从方法中间开始）：
+   内置策略表 + 配置覆盖 + 依赖缺失自动降级。语法包覆盖 java / javascript / typescript(+tsx) / **groovy**。
+   实测"块首行落在成员内部"（=从方法中间开始）：
    `window` 29.4% → `heuristic`（纯 JS，零依赖）7.5% → **`ast`（tree-sitter）0.1%**
-   （`saas`，8,777 个 Java 文件）。详见 INSTALL.md §2'。
+   （`saas`，8,777 个 Java 文件）；Grails 的 Groovy（144 文件）`heuristic` 31.6% → **`ast` 7.5%**。
+   详见 INSTALL.md §2'。
 4. **依赖可选、优雅降级**。缺 `onnxruntime-node` / 缺模型文件 → 自动退化为纯 FTS5，并在结果里说明原因，不会让插件加载失败。
 5. **GPU 批量的坑已处理**。DirectML 在 batch 8~16 最快，32 会掉到 10.8 块/s、更大直接崩 → 失败自动减半拆批，单条仍失败才回退 CPU。
 6. **截断策略对齐**。transformers.js 截断时把 512 位全填内容 token，Rust `tokenizers` 会给结尾 `[SEP]` 留位 —— 差 1 个 token 会让向量与 Python 版不一致（余弦 0.9986 → 0.999999）。已在推理层对齐。

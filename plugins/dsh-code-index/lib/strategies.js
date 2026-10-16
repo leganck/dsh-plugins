@@ -27,6 +27,7 @@ export const GRAMMARS = {
   javascript: { pkg: 'tree-sitter-javascript', pick: null },
   typescript: { pkg: 'tree-sitter-typescript', pick: 'typescript' },
   tsx: { pkg: 'tree-sitter-typescript', pick: 'tsx' },
+  groovy: { pkg: 'tree-sitter-groovy', pick: null },
 }
 
 /** 默认参数（可被配置逐项覆盖）
@@ -53,6 +54,16 @@ export const DEFAULT_BY_EXT = {
   '.jsx': { strategy: 'ast', grammar: 'javascript', ...P },
   '.ts': { strategy: 'ast', grammar: 'typescript', ...P },
   '.tsx': { strategy: 'ast', grammar: 'tsx', ...P },
+  /**
+   * Groovy 单独给更大的 `maxLines`：Grails 的 domain/controller 里成员本身很长，
+   * 实测 legacy-java-service（144 个 .groovy）：
+   *   heuristic        块首行落在成员内部 31.6%（160/506）
+   *   ast maxLines=120 12.2%，但**非强制块是 0/313**（即残差 100% 来自超长成员）
+   *   ast maxLines=200  7.5%，强制拆分从 56 降到 33，非强制块仍是 0/315
+   * 结论：AST 的对齐是完备的，残差只反映"成员比阈值长"，所以这里把阈值调大而不是接受半截。
+   */
+  '.groovy': { strategy: 'ast', grammar: 'groovy', ...P, maxLines: 200 },
+  '.gradle': { strategy: 'ast', grammar: 'groovy', ...P, maxLines: 200 },
 
   // ── 语言内部混排 / 非括号语言：固定窗口（保守） ──
   '.vue': { strategy: 'window', windowLines: 60 },

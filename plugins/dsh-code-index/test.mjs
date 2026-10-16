@@ -49,6 +49,18 @@ function mkJavaFixture(methods = 3, bodyLines = 28) {
   return lines.join('\n')
 }
 
+/** Groovy 夹具（Grails 项目的主力语言；Groovy 不需要分号） */
+function mkGroovyFixture(methods = 3, bodyLines = 20) {
+  const lines = ['class Fixture {', '    String payNo', '']
+  for (let m = 0; m < methods; m++) {
+    lines.push(`    def m${m}() {`)
+    for (let i = 0; i < bodyLines; i++) lines.push(`        def v${i} = ${i}`)
+    lines.push('    }', '')
+  }
+  lines.push('}')
+  return lines.join('\n')
+}
+
 const argv = process.argv.slice(2)
 const arg = (k, d) => {
   const i = argv.indexOf(k)
@@ -387,12 +399,15 @@ console.log('\n[8] 切块策略')
     ['a.xml', 'window'],
     ['a.sql', 'window'],
     ['a.md', 'window'],
+    ['a.groovy', 'ast'],
+    ['a.gradle', 'ast'],
     ['a.kt', 'heuristic'],
     ['no-extension', 'heuristic'],
   ]) {
     const c = resolveChunkConfig(f, {})
     check(`${f.padEnd(14)} → ${want}`, c.strategy === want, `实际 ${c.strategy}`)
   }
+  check('Groovy 用 groovy 语法且 maxLines 调大到 200', resolveChunkConfig('a.groovy', {}).grammar === 'groovy' && resolveChunkConfig('a.groovy', {}).maxLines === 200, `grammar=${resolveChunkConfig('a.groovy', {}).grammar} maxLines=${resolveChunkConfig('a.groovy', {}).maxLines}`)
   check('TS 取 typescript 变体', resolveChunkConfig('a.ts', {}).grammar === 'typescript')
   check('TSX 取 tsx 变体（实测该包导出 {typescript,tsx}，没有 .language）', resolveChunkConfig('a.tsx', {}).grammar === 'tsx')
   check('策略表有内容且含兜底默认', Object.keys(DEFAULT_BY_EXT).length >= 10 && DEFAULT_FALLBACK.strategy === 'heuristic')
@@ -451,6 +466,25 @@ console.log('\n[8] 切块策略')
       r.strategy === 'heuristic' && r.fellBack === true && /code_index_deps action=install group=parser/.test(String(r.reason)),
       String(r.reason).slice(0, 120),
     )
+  }
+
+  // (e2) Groovy（Grails 项目主力语言）：真值口径实测 heuristic 31.6% → ast 12.2%，且
+  //      ast 的**非强制块**是 0/313（残差全来自超长成员，故 groovy 的 maxLines 设为 200）
+  {
+    const groovy = mkGroovyFixture()
+    const rg = chunkFile({ relPath: 'Fixture.groovy', text: groovy, chunking: {}, depsDir: D })
+    const groovyReady = getParser({ depsDir: D, grammar: 'groovy' }).ok
+    if (groovyReady) {
+      check('Groovy 走 ast 且无降级', rg.strategy === 'ast' && rg.fellBack === false, rg.reason ?? `策略 ${rg.strategy}`)
+      check(
+        'Groovy 块是完整方法（首行 def、末行闭括号）',
+        rg.chunks.some((c) => /^\s*def m\d\(\) \{/.test(c.body.split('\n')[0]) && c.body.trim().endsWith('}')),
+        rg.chunks.map((c) => c.body.split('\n')[0].trim()).join(' | ').slice(0, 80),
+      )
+      check('Groovy 无强制拆分（普通长度方法）', rg.chunks.every((c) => c.kind !== 'forced'), rg.chunks.map((c) => c.kind).join(','))
+    } else {
+      check('缺 groovy 语法包时降级并给出原因', rg.strategy === 'heuristic' && rg.fellBack === true && /group=parser/.test(String(rg.reason)), String(rg.reason).slice(0, 110))
+    }
   }
 
   // (f) 策略分发：window / heuristic / 无语法文件
