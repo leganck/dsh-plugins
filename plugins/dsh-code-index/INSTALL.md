@@ -73,14 +73,14 @@ dsh plugin --profile desktop ...  →  error: profile "desktop" is managed exclu
 从 0.3.0 起，重依赖**不写在 package.json 里**，装插件只装纯 JS 部分（tarball 约 50 KB）：
 **不下载任何重依赖、不触发构建脚本审批、秒级完成**。依赖分两组，按需安装到同一个受管目录：
 
-| 组 | 内容 | 体积 | 用途 |
+| 组 | 内容 | 体积（实测） | 用途 |
 |---|---|---|---|
-| `embed` | `onnxruntime-node@1.30.0`、`@huggingface/transformers@3.8.1` | 661 MB（修剪后 264 MB） | 向量嵌入（语义检索） |
-| `parser` | `tree-sitter@0.21.1` + java 0.21.0 / javascript 0.21.4 / typescript 0.21.2 | 41 MB（修剪后更小） | AST 切块（语法树） |
+| `embed` | `onnxruntime-node@1.30.0`、`@huggingface/transformers@3.8.1` | 661 MB（修剪后 **264 MB**） | 向量嵌入（语义检索） |
+| `parser` | `tree-sitter@0.21.1` + java 0.21.0 / javascript 0.21.4 / typescript 0.21.2 / **groovy 0.1.2** | **60.3 MB**（ts 29.3 + groovy 19.3 + 其它） | AST 切块（语法树） |
 
 ```text
 code_index_deps action=status                        # 默认：只看状态与缺什么
-code_index_deps action=install group=parser          # 装语法解析（41 MB，3 秒）
+code_index_deps action=install group=parser          # 装语法解析（60 MB，2 秒）
 code_index_deps action=install group=embed           # 装向量嵌入（约 46 秒）
 code_index_deps action=install group=all             # 两组都装
 code_index_deps action=prune                         # 修剪非本平台二进制
@@ -130,7 +130,7 @@ Cursor 那套是"**服务端按文件类型下发**切块策略"；我们本地�
 | `heuristic` | 纯 JS：括号深度 + 成员边界 + 引号/注释感知 | **无**（永远可用） | 兜底与表里未列语言 |
 | `window` | 固定行窗口 | 无 | **不是"旧代码没删"**，而是明确指定给 Vue/XML/SQL/Markdown 这类"括号深度无意义"的文件 |
 
-内置表（节选）：`.java/.js/.mjs/.cjs/.jsx/.ts/.tsx` → `ast`；
+内置表（节选）：`.java/.js/.mjs/.cjs/.jsx/.ts/.tsx/.groovy/.gradle` → `ast`；
 `.vue/.xml/.html/.sql/.md/.json/.yml/.yaml/.properties` → `window`；其它 → `heuristic`。
 
 **实测（真值来自语法树，不是"括号深度"这种代理）**：
@@ -143,9 +143,17 @@ Cursor 那套是"**服务端按文件类型下发**切块策略"；我们本地�
 | `legacy-java-service`（94 个 Java 文件） | `window` | 207 | 32.3 | **15.0%** |
 | | `heuristic` | 179 | 37.4 | **6.1%** |
 | | **`ast`** | 122 | 43.4 | **0.0%** |
+| `legacy-java-service`（**144 个 Groovy 文件**，Grails） | `heuristic` | 506 | 49.5 | **31.6%**（160/506） |
+| | `ast`（maxLines 120） | 369 | 63.0 | **12.2%**，其中非强制块 **0/313** |
+| | **`ast`（maxLines 200）** | 348 | 66.8 | **7.5%**，其中非强制块 **0/315** |
 
 "块首行落在成员内部"= 块从方法/字段**中间**开始，也就是"半截方法"——
 它的向量表达的是半截语义，检索匹配会被稀释。`ast` 把 29.4% 压到 0.1%。
+
+**Groovy 那一行揭示了一条重要性质**：AST 切出的**非强制块是与成员边界 100% 对齐的**
+（0/313、0/315），残差完全来自"成员本身比 `maxLines` 长"。所以遇到长成员语言，
+正确做法是**调大该语言的 `maxLines`**（表里 `.groovy`/`.gradle` 就设成了 200），
+而不是接受半截块。`heuristic` 的 31.6% 则全来自它本身的判断误差（没有一个强制拆分）。
 
 > 早前用"块内大括号是否平衡"当质量指标，**那个指标是错的**：AST 切出的块是"类里的一个方法"，
 > 天然不带类的那个 `{`，所以整块计数必然不为 0——它把正确切法判成异常（`ast` 66.8% 反而"差于"
