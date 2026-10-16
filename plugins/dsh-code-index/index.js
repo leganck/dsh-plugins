@@ -21,12 +21,13 @@ import path from 'node:path'
 import os from 'node:os'
 import { Store } from './lib/store.js'
 import { createEmbedder } from './lib/embedder.js'
-import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms, defaultDepsDir, EMBED_PACKAGES } from './lib/deps.js'
+import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms, defaultDepsDir, EMBED_PACKAGES, GROUP_NAMES, DEP_GROUPS } from './lib/deps.js'
+import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strategies.js'
 import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.6'
+export const BUILD = '2026-10-16.7'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -97,6 +98,13 @@ const DEFAULTS = {
    * 而 onnxruntime-node 的 npm 包自带各平台二进制，`--ignore-scripts` 装完照样可用（dml 后端也在）。
    */
   embedding: { backend: 'auto', modelDir: null, threads: 6, batch: null, cachePath: null, depsDir: null },
+  /**
+   * 切块策略（表见 lib/strategies.js，对应 Cursor 的 `GetAvailableChunkingStrategies`）：
+   *   `strategy`：`auto`（按扩展名查内置表）| `ast` | `heuristic` | `window`
+   *   `byExt`：按扩展名覆盖内置表的字段，例如 `{ ".vue": { "strategy": "heuristic" } }`
+   * 缺 parser 依赖、或某文件解析失败时会**降级**并在建库结果里报告原因，绝不静默换策略。
+   */
+  chunking: { strategy: 'auto', byExt: {} },
   defaultTopK: 10,
   /**
    * 单次最多补算多少块的向量。**默认 0 = 不自动补算**：建库只做 FTS5（秒级）。
@@ -182,6 +190,22 @@ function normalizeConfig(raw = {}) {
   }
   if (cfg.embedding.cachePath !== null && cfg.embedding.cachePath !== undefined && typeof cfg.embedding.cachePath !== 'string') {
     throw new ConfigError(`config.embedding.cachePath 必须是字符串或 null，收到 ${typeof cfg.embedding.cachePath}`)
+  }
+  // ---- 切块策略 ----
+  const ch = cfg.chunking ?? {}
+  if (typeof ch !== 'object' || Array.isArray(ch)) throw new ConfigError(`config.chunking 必须是对象，收到 ${Array.isArray(ch) ? 'array' : typeof ch}`)
+  if (!isValidStrategy(ch.strategy ?? 'auto')) {
+    throw new ConfigError(`config.chunking.strategy 必须是 auto|ast|heuristic|window 之一，收到 ${JSON.stringify(ch.strategy)}`)
+  }
+  if (ch.byExt !== undefined && (ch.byExt === null || typeof ch.byExt !== 'object' || Array.isArray(ch.byExt))) {
+    throw new ConfigError(`config.chunking.byExt 必须是对象（扩展名 → 覆盖项），收到 ${JSON.stringify(ch.byExt)}`)
+  }
+  for (const [ext, ov] of Object.entries(ch.byExt ?? {})) {
+    if (!/^\.[A-Za-z0-9._-]+$/.test(ext)) throw new ConfigError(`config.chunking.byExt 的键必须是扩展名（如 ".java"），收到 ${JSON.stringify(ext)}`)
+    if (ov === null || typeof ov !== 'object' || Array.isArray(ov)) throw new ConfigError(`config.chunking.byExt["${ext}"] 必须是对象`)
+    if (ov.strategy !== undefined && !isValidStrategy(ov.strategy)) {
+      throw new ConfigError(`config.chunking.byExt["${ext}"].strategy 非法：${JSON.stringify(ov.strategy)}（可用 auto|ast|heuristic|window）`)
+    }
   }
   if (!Array.isArray(cfg.roots)) throw new ConfigError(`config.roots 必须是数组，收到 ${typeof cfg.roots}`)
   if (!BACKENDS.includes(cfg.embedding.backend)) {
@@ -368,14 +392,23 @@ function applyInner(ctx, rawConfig = {}) {
           opts: { windowLines: config.windowLines, maxFileBytes: config.maxFileBytes },
           embedder,
           budget: { maxEmbedPerRun: args.max_embed ?? config.maxEmbedPerRun, mode: args.mode ?? 'incremental' },
+          chunking: { ...config.chunking, windowLines: config.windowLines },
+          depsDir: expandPath(config.embedding.depsDir) ?? undefined,
+          depsFallbackDirs: [PLUGIN_DIR],
         })
         const lines = [
           `索引完成（${r.mode}）${repoRoot}`,
           `  扫描 ${r.scanned} 文件；变更 ${r.changed} / 删除 ${r.removed}；写入 ${r.chunksWritten} 块`,
+          `  切块策略：${Object.entries(r.strategies ?? {}).map(([s, n]) => `${s} ${n} 文件`).join('；') || '（本轮无变更文件）'}`,
           `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,
           `  ${r.embedNote}`,
           `  用时 ${(r.elapsedMs / 1000).toFixed(1)}s；库 ${dbPath}`,
         ]
+        // 降级必须显式可见：以为在用 AST、实际在跑启发式，是"检索质量悄悄变化"的典型来源
+        if (r.strategyChanged) {
+          lines.push('  ⚠️ 切块策略指纹变了 → 已自动全量重建（否则库里会混着新旧两种粒度的块）')
+        }
+        for (const why of r.chunkFallbacks ?? []) lines.push(`  ⚠️ ${why}`)
         if (r.fileErrors.length) lines.push(`  读取失败 ${r.fileErrors.length} 个：${r.fileErrors.join('; ')}`)
         if (!embedder.ok) lines.push(`  ⚠️ 向量通道未启用，当前是纯关键词检索：${embedder.reason}`)
         else if (r.stats.vectors < r.stats.chunks) {
@@ -506,6 +539,11 @@ function applyInner(ctx, rawConfig = {}) {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['status', 'install', 'prune', 'repair', 'remove'], description: '默认 status。' },
+        group: {
+          type: 'string',
+          enum: [...GROUP_NAMES, 'all'],
+          description: `依赖组：embed（向量嵌入，约 661 MB 未修剪 / 264 MB 修剪后）| parser（tree-sitter 语法解析，约 41 MB）| all。默认 embed。`,
+        },
         registry: { type: 'string', description: '可选的 npm registry（省略则沿用本机 npm 配置）。' },
       },
       required: [],
@@ -515,39 +553,47 @@ function applyInner(ctx, rawConfig = {}) {
     async execute(args) {
       try {
         const action = args.action ?? 'status'
+        const group = args.group ?? 'embed'
+        if (group !== 'all' && !GROUP_NAMES.includes(group)) {
+          return fail(`未知依赖组：${group}（可用：${GROUP_NAMES.join(', ')}, all）`)
+        }
         const depsDir = expandPath(config.embedding.depsDir) ?? defaultDepsDir()
-        const lines = [`嵌入依赖目录：${depsDir}`]
+        const lines = [`依赖目录：${depsDir}`, `依赖组：${Object.entries(DEP_GROUPS).map(([g, l]) => `${g}(${l.length} 包)`).join('、')}`]
         let detail = {}
         if (action === 'install' || action === 'repair') {
           const log = (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`)
           const fn = action === 'install' ? installDeps : repairDeps
-          const r = await fn({ depsDir, registry: args.registry, log })
+          const r = await fn({ depsDir, registry: args.registry, group, log })
           lines.push(r.note)
           if (r.stdout) {
             const tail = String(r.stdout).trim().split('\n').filter(Boolean).slice(-3)
             if (tail.length) lines.push(`npm 输出尾部：${tail.join(' | ')}`)
           }
-          detail = { action, ok: r.ok }
+          detail = { action, group, ok: r.ok }
         } else if (action === 'prune') {
           const p = pruneForeignPlatforms(depsDir)
-          lines.push(
-            `已移除 ${p.removed.length} 个非本平台目录（保留 ${p.kept}），回收 ${(p.freedBytes / 1048576).toFixed(1)} MB`,
-          )
+          lines.push(`已移除 ${p.removed.length} 个非本平台目录（保留 ${p.kept}），回收 ${(p.freedBytes / 1048576).toFixed(1)} MB`)
           detail = { action, removed: p.removed.length, freedBytes: p.freedBytes }
         } else if (action === 'remove') {
           const r = removeDeps(depsDir)
           lines.push(r.note)
           detail = { action, removed: r.removed }
         }
-        const st = depsStatus({ depsDir, alsoDirs: [PLUGIN_DIR] })
-        lines.push(`状态：${st.installed ? '受管目录内已就绪' : `受管目录内缺 ${st.missing.join(', ')}`}；体积 ${(st.sizeBytes / 1048576).toFixed(1)} MB`)
-        for (const p of st.packages) {
-          lines.push(`  ${p.name}@${p.wanted}：受管目录 ${p.installedInManagedDir ?? '无'}；可解析 ${p.resolvable ? '是' : '否'}`)
+        const st = depsStatus({ depsDir, alsoDirs: [PLUGIN_DIR], group })
+        lines.push(`\n各组状态（体积合计 ${(st.sizeBytes / 1048576).toFixed(1)} MB）：`)
+        for (const [g, gs] of Object.entries(st.groups)) {
+          lines.push(`  [${g}] ${gs.installed ? '就绪' : `未就绪（缺 ${gs.missing.join(', ')}${gs.broken.length ? '；加载失败 ' + gs.broken.join(', ') : ''}）`}`)
+          for (const p of gs.packages) {
+            lines.push(`      ${p.name}@${p.wanted}：受管目录 ${p.installedInManagedDir ?? '无'}；可解析 ${p.resolvable ? '是' : '否'}`)
+          }
         }
+        const missing = GROUP_NAMES.filter((g) => !st.groups[g]?.installed)
+        lines.push('')
         lines.push(
-          st.installed
-            ? '下一步：code_index 传 max_embed=<正整数> 即可补算向量（默认 0 = 不自动补算）'
-            : `下一步：code_index_deps action=install 下载依赖（${EMBED_PACKAGES.map((p) => `${p.name}@${p.version}`).join(', ')}）`,
+          missing.length
+            ? `下一步：code_index_deps action=install group=${missing.join('|')} —— ` +
+                missing.map((g) => `${g}: ${DEP_GROUPS[g].map((p) => `${p.name}@${p.version}`).join(', ')}`).join('；')
+            : '两组依赖都已就绪：code_index 传 max_embed=<正整数> 可补算向量；AST 切块（策略 ast）可直接使用。',
         )
         return textResult({ depsDir, ...detail, status: st }, lines.join('\n'))
       } catch (e) {
@@ -556,8 +602,18 @@ function applyInner(ctx, rawConfig = {}) {
     },
   })
 
+  // 策略表快照：让"每种文件会用哪种切块器"是可查的，而不是埋在代码里
+  const sample = ['.java', '.ts', '.vue', '.xml', '.md', '(.其它)']
+    .map((ext) => {
+      const c = resolveChunkConfig(ext === '(.其它)' ? 'x.unknown' : `x${ext}`, { strategy: 'auto' })
+      return ext === '(.其它)' ? `其它→${c.strategy}` : `${ext}→${c.strategy}`
+    })
+    .join(' ')
+
   ctx.logger?.info?.(
-    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}，deps=${expandPath(config.embedding.depsDir) ?? defaultDepsDir()}）`,
+    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}，` +
+      `chunking=${config.chunking.strategy}，deps=${expandPath(config.embedding.depsDir) ?? defaultDepsDir()}）`,
   )
+  ctx.logger?.info?.(`dsh-code-index 切块策略表：${sample}（表见 lib/strategies.js，可用 config.chunking.byExt 覆盖）`)
   bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_index_status', 'code_index_deps'] })
 }

@@ -70,16 +70,22 @@ dsh plugin --profile desktop ...  →  error: profile "desktop" is managed exclu
 
 ## 2. 嵌入依赖：**按需安装**（不再随插件安装）
 
-从 0.3.0 起，`onnxruntime-node` 与 `@huggingface/transformers` **不写在 package.json 里**。
-装插件只装纯 JS 部分（tarball 约 49 KB）：**不下载任何重依赖、不触发构建脚本审批、秒级完成**。
-需要向量检索时再装：
+从 0.3.0 起，重依赖**不写在 package.json 里**，装插件只装纯 JS 部分（tarball 约 50 KB）：
+**不下载任何重依赖、不触发构建脚本审批、秒级完成**。依赖分两组，按需安装到同一个受管目录：
+
+| 组 | 内容 | 体积 | 用途 |
+|---|---|---|---|
+| `embed` | `onnxruntime-node@1.30.0`、`@huggingface/transformers@3.8.1` | 661 MB（修剪后 264 MB） | 向量嵌入（语义检索） |
+| `parser` | `tree-sitter@0.21.1` + java 0.21.0 / javascript 0.21.4 / typescript 0.21.2 | 41 MB（修剪后更小） | AST 切块（语法树） |
 
 ```text
-code_index_deps action=status     # 默认：只看状态与缺什么
-code_index_deps action=install    # 下载安装（--ignore-scripts：不执行任何依赖脚本）
-code_index_deps action=prune      # 修剪非本平台二进制
-code_index_deps action=repair     # 删掉重装（修剪过想恢复别平台时用这个）
-code_index_deps action=remove     # 删除
+code_index_deps action=status                        # 默认：只看状态与缺什么
+code_index_deps action=install group=parser          # 装语法解析（41 MB，3 秒）
+code_index_deps action=install group=embed           # 装向量嵌入（约 46 秒）
+code_index_deps action=install group=all             # 两组都装
+code_index_deps action=prune                         # 修剪非本平台二进制
+code_index_deps action=repair group=all              # 删掉重装
+code_index_deps action=remove                        # 删除
 ```
 
 默认装到 `%LOCALAPPDATA%\dsh-code-index\embed-deps`（可用 `embedding.depsDir` 改；
@@ -87,8 +93,9 @@ POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。实测（2026-10-16，win
 
 | 步骤 | 实测结果 |
 |---|---|
-| `action=install` | **46 秒**、661.5 MB、**零依赖脚本**、无需任何审批 |
-| `action=prune` | 661.5 MB → **263.8 MB**（回收 397.7 MB），修剪后嵌入仍可用 |
+| `action=install group=embed` | **46 秒**、661.5 MB、**零依赖脚本**、无需任何审批 |
+| `action=install group=parser` | **3 秒**、41 MB（全部走预构建） |
+| `action=prune` | 661.5 → **263.8 MB**（回收 397.7 MB），修剪后嵌入仍可用 |
 
 **为什么不写进 package.json**（0.2.1 实测踩过的三件事）：
 
@@ -102,6 +109,7 @@ POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。实测（2026-10-16，win
 **自带各平台二进制**（`bin/napi-v6/{darwin,linux,win32}/{arm64,x64}`），所以 `--ignore-scripts`
 装完照样可用——实测 `require('onnxruntime-node')` 成功、`env.versions={common:1.30.0,node:1.30.0}`、
 `listSupportedBackends()` 返回 `[cpu(bundled), dml(bundled), webgpu(bundled)]`，**DirectML 在**。
+tree-sitter 同理：四个包都带 `prebuilds/win32-x64`，无需编译。
 
 > 早期版本的这份文档写着"onnxruntime-node 的原生二进制靠 postinstall 下载，必须放行"——
 > **那条是错的**，已删除。那个 postinstall 只是"若缺则从 NuGet 补下载"，不是二进制来源。
@@ -110,6 +118,42 @@ POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。实测（2026-10-16，win
 `~/.dsh/models/bge-small-zh-v1.5/`，需要 `model_fp16.onnx`(GPU) / `model_int8.onnx`(CPU) /
 `tokenizer.json` / `tokenizer_config.json`。官方 `BAAI/...` 仓库**没有 onnx**，用
 `Xenova/bge-small-zh-v1.5`（ModelScope 国内镜像最快）。
+
+## 2'. 切块策略表（对应 Cursor 的 `GetAvailableChunkingStrategies`）
+
+Cursor 那套是"**服务端按文件类型下发**切块策略"；我们本地没有服务端，等价物是
+**内置策略表（按扩展名）+ 配置覆盖 + 依赖缺失时自动降级**（表在 `lib/strategies.js`）。
+
+| 策略 | 实现 | 依赖 | 说明 |
+|---|---|---|---|
+| `ast` | tree-sitter 语法树，块边界落在成员声明上 | `parser` 组 | 需要按需安装；缺依赖或某文件解析失败会**降级并报告原因** |
+| `heuristic` | 纯 JS：括号深度 + 成员边界 + 引号/注释感知 | **无**（永远可用） | 兜底与表里未列语言 |
+| `window` | 固定行窗口 | 无 | **不是"旧代码没删"**，而是明确指定给 Vue/XML/SQL/Markdown 这类"括号深度无意义"的文件 |
+
+内置表（节选）：`.java/.js/.mjs/.cjs/.jsx/.ts/.tsx` → `ast`；
+`.vue/.xml/.html/.sql/.md/.json/.yml/.yaml/.properties` → `window`；其它 → `heuristic`。
+
+**实测（真值来自语法树，不是"括号深度"这种代理）**：
+
+| 仓库 | 策略 | 块数 | 平均行 | **块首行落在成员内部** |
+|---|---|---|---|---|
+| `saas`（8,777 个 Java 文件） | `window` | 22,619 | 33.3 | **29.4%** |
+| | `heuristic` | 18,765 | 40.1 | **7.5%** |
+| | **`ast`** | 13,156 | 45.1 | **0.1%**（30 个超长成员被强制拆分） |
+| `legacy-java-service`（94 个 Java 文件） | `window` | 207 | 32.3 | **15.0%** |
+| | `heuristic` | 179 | 37.4 | **6.1%** |
+| | **`ast`** | 122 | 43.4 | **0.0%** |
+
+"块首行落在成员内部"= 块从方法/字段**中间**开始，也就是"半截方法"——
+它的向量表达的是半截语义，检索匹配会被稀释。`ast` 把 29.4% 压到 0.1%。
+
+> 早前用"块内大括号是否平衡"当质量指标，**那个指标是错的**：AST 切出的块是"类里的一个方法"，
+> 天然不带类的那个 `{`，所以整块计数必然不为 0——它把正确切法判成异常（`ast` 66.8% 反而"差于"
+> `heuristic` 52.8%）。已换成对称可比的"首行/末行是否落在成员内"。
+
+**换策略必须重建索引**：插件在建库时写入"切块策略指纹"（`chunk_fingerprint`），
+指纹变化会**自动全量重建**并在结果里显式报告。否则增量建库只重切变动文件，
+库里会同时存在两种粒度的块——而且没有任何信号提示这件事发生了。
 
 ## 3. 验证：看插件自己写的两个文件
 
@@ -151,7 +195,10 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 | `embedding.threads` | 6 | CPU 线程数 |
 | `embedding.batch` | `null` | 批量大小；`null` = 自动（DML 甜点 8–16） |
 | `embedding.cachePath` | `~/.dsh/index/vectors.db` | 内容寻址向量缓存，与 Python 实验版共用 |
-| `embedding.depsDir` | `%LOCALAPPDATA%\dsh-code-index\embed-deps`（POSIX：`~/.cache/…`） | 按需安装的嵌入依赖放这里。解析顺序：**受管目录优先，其次包内 `node_modules`**（兼容旧安装形态） |
+| `embedding.depsDir` | `%LOCALAPPDATA%\dsh-code-index\embed-deps`（POSIX：`~/.cache/…`） | 按需安装的依赖放这里（两组共用）。解析顺序：**受管目录优先，其次包内 `node_modules`**（兼容旧安装形态） |
+| `chunking.strategy` | `auto` | `auto`（按扩展名查策略表）\| `ast` \| `heuristic` \| `window`。用非 auto 会**强制所有文件**用该策略 |
+| `chunking.byExt` | `{}` | 按扩展名覆盖策略表，例如 `{ ".vue": { "strategy": "heuristic" }, ".java": { "targetLines": 60 } }` |
+| `windowLines` | 40 | `window` 策略的窗口行数（`chunking.byExt` 里也可逐扩展名给 `windowLines`） |
 
 ## 5. 自测
 

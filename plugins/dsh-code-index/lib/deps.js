@@ -35,11 +35,43 @@ import { promisify } from 'node:util'
 
 const run = promisify(execFile)
 
-/** 固定版本：可复现优先。onnxruntime-node 1.30.0 是实测 `dml` 可用的那版。 */
-export const EMBED_PACKAGES = [
-  { name: 'onnxruntime-node', version: '1.30.0' },
-  { name: '@huggingface/transformers', version: '3.8.1' },
-]
+/**
+ * 依赖**分组**：两组都按需安装到同一个受管目录，共用一套解析器链。
+ *
+ * - `embed`：向量嵌入（onnxruntime-node + @huggingface/transformers）→ 约 661 MB 未修剪 / 264 MB 修剪后
+ * - `parser`：语法解析（tree-sitter + 各语言语法）→ 约 41 MB，用于 AST 切块
+ *
+ * 版本必须**同年代配对**：运行时 `tree-sitter@0.21.1` 配 0.21.x 的语法包。
+ * 实测踩坑（2026-10-16）：`tree-sitter-java@0.23.5` 声称 `peerOptional tree-sitter@^0.21.1`，
+ * 但它的预构建与 0.21.1 运行时不兼容——`setLanguage` 不报错、`parse` 也不报错，
+ * **读取节点时**才炸出 `Cannot read properties of undefined (reading '138')`（那个数字是节点类型 id）。
+ * 换成同年代的 0.21.0 后一切正常。**改版本时务必四个包一起验一次解析**。
+ */
+export const DEP_GROUPS = {
+  embed: [
+    { name: 'onnxruntime-node', version: '1.30.0' },
+    { name: '@huggingface/transformers', version: '3.8.1' },
+  ],
+  parser: [
+    { name: 'tree-sitter', version: '0.21.1' },
+    { name: 'tree-sitter-java', version: '0.21.0' },
+    { name: 'tree-sitter-javascript', version: '0.21.4' },
+    { name: 'tree-sitter-typescript', version: '0.21.2' },
+  ],
+}
+
+/** 兼容旧调用名（= embed 组） */
+export const EMBED_PACKAGES = DEP_GROUPS.embed
+
+/** 全部依赖包（跨组去重） */
+export function allPackages() {
+  const seen = new Map()
+  for (const list of Object.values(DEP_GROUPS)) for (const p of list) seen.set(p.name, p)
+  return [...seen.values()]
+}
+
+/** 依赖组名（供工具参数枚举） */
+export const GROUP_NAMES = Object.keys(DEP_GROUPS)
 
 export const MANIFEST_NAME = 'deps.json'
 export const SCHEMA_VERSION = 1
@@ -148,36 +180,43 @@ function pkgVersion(dir, name) {
 
 /**
  * 依赖现状。**不抛错**——缺依赖是正常状态（插件要能降级）。
+ *
+ * 顶层 `installed` / `missing` / `packages` 指的是 `group` 指定的那一组（默认 `embed`，
+ * 保持旧调用可用）；`groups` 里两组都有。
  */
-export function depsStatus({ depsDir, alsoDirs = [] } = {}) {
+export function depsStatus({ depsDir, alsoDirs = [], group = 'embed' } = {}) {
   const dir = depsDir ?? defaultDepsDir()
   const resolvers = makeResolvers({ depsDir: dir, alsoDirs })
-  const packages = []
-  const missing = []
-  for (const { name, version } of EMBED_PACKAGES) {
-    // 先看受管目录里有没有（这才是"按需安装"的对象）
-    const inManaged = pkgVersion(dir, name)
-    const resolvable = resolvers.length
-      ? (() => {
-          try {
-            loadFrom(resolvers, name)
-            return true
-          } catch {
-            return false
-          }
-        })()
-      : false
-    const entry = { name, wanted: version, installedInManagedDir: inManaged, resolvable }
-    packages.push(entry)
-    if (!inManaged) missing.push(name)
+  const groups = {}
+  for (const [g, pkgs] of Object.entries(DEP_GROUPS)) {
+    const packages = pkgs.map(({ name, version }) => {
+      let resolvable = false
+      try {
+        loadFrom(resolvers, name)
+        resolvable = true
+      } catch {
+        resolvable = false
+      }
+      return { name, wanted: version, installedInManagedDir: pkgVersion(dir, name), resolvable }
+    })
+    groups[g] = {
+      installed: packages.every((p) => p.installedInManagedDir && p.resolvable),
+      missing: packages.filter((p) => !p.installedInManagedDir).map((p) => p.name),
+      broken: packages.filter((p) => p.installedInManagedDir && !p.resolvable).map((p) => p.name),
+      packages,
+    }
   }
+  const g = groups[group] ?? groups.embed
   const exists = fs.existsSync(dir)
   return {
     dir,
     dirExists: exists,
-    installed: missing.length === 0,
-    missing,
-    packages,
+    group,
+    installed: g.installed,
+    missing: g.missing,
+    broken: g.broken,
+    packages: g.packages,
+    groups,
     sizeBytes: exists ? dirSizeBytes(dir) : 0,
     manifest: readManifest(dir),
     node: process.versions.node,
@@ -205,31 +244,38 @@ export function npmInvocation(args) {
 }
 
 /**
- * 按需安装。**只在显式动作里调用**。
- * @returns {Promise<{ok:boolean, note:string, status?:object, stdout?:string}>}
+ * 按需安装某个依赖组（或 `all`）。**只在显式动作里调用**。
  */
-export async function installDeps({ depsDir, registry, log = () => {}, timeoutMs = 30 * 60 * 1000 } = {}) {
+export async function installDeps({ depsDir, registry, group = 'embed', log = () => {}, timeoutMs = 30 * 60 * 1000 } = {}) {
   const dir = depsDir ?? defaultDepsDir()
   if (!dir) return { ok: false, note: '未指定依赖目录' }
+  const packages = group === 'all' ? allPackages() : DEP_GROUPS[group]
+  if (!packages) return { ok: false, note: `未知依赖组：${group}（可用：${GROUP_NAMES.join(', ')}, all）` }
   fs.mkdirSync(dir, { recursive: true })
   // npm 需要一个 package.json 才不会往上层找
   const pj = path.join(dir, 'package.json')
   if (!fs.existsSync(pj)) {
-    fs.writeFileSync(pj, JSON.stringify({ name: 'dsh-code-index-embed-deps', private: true, version: '0.0.0' }, null, 2) + '\n', 'utf8')
+    fs.writeFileSync(pj, JSON.stringify({ name: 'dsh-code-index-deps', private: true, version: '0.0.0' }, null, 2) + '\n', 'utf8')
   }
-  const args = buildInstallArgs({ dir, registry })
+  const args = buildInstallArgs({ dir, registry, packages })
   const { file, argv } = npmInvocation(args)
-  log(`安装嵌入依赖到 ${dir}（${EMBED_PACKAGES.map((p) => `${p.name}@${p.version}`).join(', ')}）`)
+  log(`安装 ${group} 依赖到 ${dir}（${packages.map((p) => `${p.name}@${p.version}`).join(', ')}）`)
   const t0 = Date.now()
   try {
     const { stdout, stderr } = await run(file, argv, { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true })
-    const st = depsStatus({ depsDir: dir })
-    const saved = { installedAt: new Date().toISOString(), packages: EMBED_PACKAGES, sizeBytes: st.sizeBytes }
-    writeManifest(dir, saved)
+    const st = depsStatus({ depsDir: dir, group })
+    const prev = readManifest(dir) ?? {}
+    writeManifest(dir, {
+      ...prev,
+      installedAt: new Date().toISOString(),
+      lastGroup: group,
+      groups: { ...(prev.groups ?? {}), [group]: packages.map((p) => `${p.name}@${p.version}`) },
+      sizeBytes: st.sizeBytes,
+    })
     return {
       ok: st.installed,
       note: st.installed
-        ? `安装完成：${EMBED_PACKAGES.map((p) => `${p.name}@${p.version}`).join(', ')}；${(st.sizeBytes / 1048576).toFixed(1)} MB，用时 ${((Date.now() - t0) / 1000).toFixed(0)}s（未执行任何依赖脚本）`
+        ? `安装完成（${group}）：${packages.map((p) => `${p.name}@${p.version}`).join(', ')}；累计 ${(st.sizeBytes / 1048576).toFixed(1)} MB，用时 ${((Date.now() - t0) / 1000).toFixed(0)}s（未执行任何依赖脚本）`
         : `安装结束但仍有缺失：${st.missing.join(', ')}`,
       status: st,
       stdout: String(stdout ?? '') + String(stderr ?? ''),
@@ -239,7 +285,7 @@ export async function installDeps({ depsDir, registry, log = () => {}, timeoutMs
       ok: false,
       note: `安装失败：${String(e.message).slice(0, 300)}`,
       stdout: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 4000),
-      status: depsStatus({ depsDir: dir }),
+      status: depsStatus({ depsDir: dir, group }),
     }
   }
 }
@@ -258,70 +304,67 @@ export function pruneForeignPlatforms(dir) {
   let freed = 0
   const keepPlatform = process.platform
   const keepArch = process.arch
-  /** 认定"这是我们要修剪的原生包"的路径特征：避免误删无关目录下的同名结构（本函数自己的测试抓到过） */
-  const NATIVE_PKG_SEGMENT = `${path.sep}onnxruntime-node${path.sep}`
-  const candidates = []
-  const stack = [dir]
-  while (stack.length) {
-    const cur = stack.pop()
-    let ents = []
-    try {
-      ents = fs.readdirSync(cur, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const e of ents) {
-      if (!e.isDirectory()) continue
-      const p = path.join(cur, e.name)
-      if (/^napi-v\d+$/.test(e.name)) {
-        if (p.includes(NATIVE_PKG_SEGMENT)) candidates.push(p)
-      } else stack.push(p)
-    }
-  }
-  for (const binDir of candidates) {
-    let plats = []
-    try {
-      plats = fs.readdirSync(binDir, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const p1 of plats) {
-      if (!p1.isDirectory()) continue
-      const p1p = path.join(binDir, p1.name)
-      if (p1.name !== keepPlatform) {
-        freed += dirSizeBytes(p1p)
-        try {
-          fs.rmSync(p1p, { recursive: true, force: true })
-          removed.push(p1p)
-        } catch {
-          /* 占用中则跳过 */
-        }
-        continue
-      }
-      let arches = []
+  const keepCombo = `${keepPlatform}-${keepArch}`
+
+  /** 只处理两种已知形状，路径特征不匹配的一律不碰（本函数自己的测试抓到过误删） */
+  const findDirs = (predicate, mustContain) => {
+    const found = []
+    const stack = [dir]
+    while (stack.length) {
+      const cur = stack.pop()
+      let ents = []
       try {
-        arches = fs.readdirSync(p1p, { withFileTypes: true })
+        ents = fs.readdirSync(cur, { withFileTypes: true })
       } catch {
         continue
       }
-      for (const p2 of arches) {
-        if (!p2.isDirectory() || p2.name === keepArch) continue
-        const p2p = path.join(p1p, p2.name)
-        freed += dirSizeBytes(p2p)
-        try {
-          fs.rmSync(p2p, { recursive: true, force: true })
-          removed.push(p2p)
-        } catch {
-          /* 占用中则跳过 */
-        }
+      for (const e of ents) {
+        if (!e.isDirectory()) continue
+        const p = path.join(cur, e.name)
+        if (predicate(e.name) && p.includes(mustContain)) found.push(p)
+        else stack.push(p)
+      }
+    }
+    return found
+  }
+
+  const drop = (target) => {
+    freed += dirSizeBytes(target)
+    try {
+      fs.rmSync(target, { recursive: true, force: true })
+      removed.push(target)
+    } catch {
+      /* 占用中则跳过 */
+    }
+  }
+
+  // 形状 ①：onnxruntime-node/bin/napi-v<N>/<platform>/<arch>/
+  for (const binDir of findDirs((n) => /^napi-v\d+$/.test(n), `${path.sep}onnxruntime-node${path.sep}`)) {
+    for (const p1 of fs.readdirSync(binDir, { withFileTypes: true })) {
+      if (!p1.isDirectory()) continue
+      const p1p = path.join(binDir, p1.name)
+      if (p1.name !== keepPlatform) {
+        drop(p1p)
+        continue
+      }
+      for (const p2 of fs.readdirSync(p1p, { withFileTypes: true })) {
+        if (p2.isDirectory() && p2.name !== keepArch) drop(path.join(p1p, p2.name))
       }
     }
   }
+
+  // 形状 ②：tree-sitter 语法包的 prebuilds/<platform>-<arch>/
+  for (const pb of findDirs((n) => n === 'prebuilds', `${path.sep}tree-sitter`)) {
+    for (const e of fs.readdirSync(pb, { withFileTypes: true })) {
+      if (e.isDirectory() && e.name !== keepCombo) drop(path.join(pb, e.name))
+    }
+  }
+
   if (removed.length) {
     const m = readManifest(dir) ?? {}
-    writeManifest(dir, { ...m, prunedFor: `${keepPlatform}-${keepArch}`, prunedAt: new Date().toISOString(), freedBytes: freed })
+    writeManifest(dir, { ...m, prunedFor: keepCombo, prunedAt: new Date().toISOString(), freedBytes: (m.freedBytes ?? 0) + freed })
   }
-  return { removed, freedBytes: freed, kept: `${keepPlatform}-${keepArch}` }
+  return { removed, freedBytes: freed, kept: keepCombo }
 }
 
 /** 整目录删除（修复/卸载用） */
@@ -336,6 +379,6 @@ export function removeDeps(dir) {
 export async function repairDeps(opts = {}) {
   const dir = opts.depsDir ?? defaultDepsDir()
   const r = removeDeps(dir)
-  const out = await installDeps({ ...opts, depsDir: dir })
+  const out = await installDeps({ ...opts, depsDir: dir, group: opts.group ?? 'all' })
   return { ...out, note: `${r.note}；${out.note}` }
 }

@@ -2,13 +2,14 @@
 
 DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 
-给 agent 三个工具：
+给 agent 四个工具：
 
 | 工具 | 作用 | 并发 |
 |---|---|---|
 | `code_index` | 建库 / 增量刷新（SQLite：FTS5 全文 + 可选向量） | 串行（写） |
 | `code_search` | 混合检索：BM25 + 向量 → RRF → 「文件:行 + 片段」 | ✅ 可并行 |
 | `code_index_status` | 覆盖情况与新鲜度（文件/块/向量、待更新数量） | ✅ 可并行 |
+| `code_index_deps` | 可选依赖的按需安装/修剪（`embed` / `parser` 两组），默认只报状态 | 串行 |
 
 ## 为什么用它（本机实测口径）
 
@@ -63,7 +64,10 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 
 1. **不做 Merkle 树**。实测全量遍历只要 120 ms（2088 文件），Merkle 的价值（十万级文件 + 跨网）在这里不存在。改用两级指纹：`mtime+size` 快扫 → 变了才读文件算 sha256。
 2. **块内容哈希是跨版本复用的钥匙**。同一段代码在你的 5 个 crm 版本里内容相同 → 同一哈希 → 向量缓存直接命中。
-3. **窗口切块而非 AST**。40 行窗口在标识符检索上 12/12 命中，且不需要原生解析依赖；`body`/`hash` 语义不变时可平滑换成 AST 切块器。
+3. **切块策略可配置（默认按文件类型查表）**。对应 Cursor 的 `GetAvailableChunkingStrategies`：
+   内置策略表 + 配置覆盖 + 依赖缺失自动降级。实测"块首行落在成员内部"（=从方法中间开始）：
+   `window` 29.4% → `heuristic`（纯 JS，零依赖）7.5% → **`ast`（tree-sitter）0.1%**
+   （`saas`，8,777 个 Java 文件）。详见 INSTALL.md §2'。
 4. **依赖可选、优雅降级**。缺 `onnxruntime-node` / 缺模型文件 → 自动退化为纯 FTS5，并在结果里说明原因，不会让插件加载失败。
 5. **GPU 批量的坑已处理**。DirectML 在 batch 8~16 最快，32 会掉到 10.8 块/s、更大直接崩 → 失败自动减半拆批，单条仍失败才回退 CPU。
 6. **截断策略对齐**。transformers.js 截断时把 512 位全填内容 token，Rust `tokenizers` 会给结尾 `[SEP]` 留位 —— 差 1 个 token 会让向量与 Python 版不一致（余弦 0.9986 → 0.999999）。已在推理层对齐。
@@ -73,43 +77,57 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 ## 配置
 
 ```yaml
-- insert:
-    - id: code-index
-      name: "file:///C:/Users/you/dsh-bundles/dsh-code-index/index.js"
-      config:
-        indexDirBase: "C:/Users/you/.dsh/code-index"   # 每仓库一个库；不配则用 <repo>/.dsh-index
-        roots: ["D:/Code"]                                  # 安全白名单；空 = 允许任意路径
-        windowLines: 40                                     # 切块窗口行数
-        maxFileBytes: 2097152                               # 单文件上限（默认 2 MB）
-        defaultTopK: 10
-        maxEmbedPerRun: 0                                   # 默认 0 = 建库不补算向量；>0 才自动补算（重负载，见上）
-        embedding:
-          backend: "auto"                                   # auto | cpu | gpu | off
-          modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"
-          threads: 6
-          cachePath: null                                   # 默认 ~/.dsh/index/vectors.db（与实验版共用）
+- id: code-index
+  name: "@local/dsh-code-index"          # 官方 tarball 安装后模块名=包名
+  config:
+    indexDirBase: "C:/Users/you/.dsh/code-index"   # 每仓库一个库；不配则用 <repo>/.dsh-index
+    roots: ["D:/Code"]                                  # 安全白名单；空 = 允许任意路径
+    windowLines: 40                                     # window 策略的窗口行数
+    chunking:
+      strategy: "auto"                                  # auto | ast | heuristic | window
+      byExt: {}                                         # 按扩展名覆盖策略表，如 {".vue": {"strategy": "heuristic"}}
+    maxFileBytes: 2097152                               # 单文件上限（默认 2 MB）
+    defaultTopK: 10
+    maxEmbedPerRun: 0                                   # 默认 0 = 建库不补算向量；>0 才自动补算（重负载，见上）
+    embedding:
+      backend: "auto"                                   # auto | cpu | gpu | off
+      modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"
+      threads: 6
+      cachePath: null                                   # 默认 ~/.dsh/index/vectors.db（与实验版共用）
+      depsDir: null                                     # 默认 %LOCALAPPDATA%/dsh-code-index/embed-deps
 ```
 
 ## 文件结构
 
 ```
-index.js            插件入口：apply(ctx, config) + 三个工具定义 + 加载标记
-lib/store.js        SQLite schema（files / chunks / chunks_fts / vectors / meta）
-lib/chunker.js      40 行窗口切块 + 块内容哈希
-lib/scan.js         仓库遍历、扩展名/目录过滤、两级指纹增量判定
-lib/query.js        查询 → 词项抽取（标识符 / 数字串 / 中文 n 元组）→ FTS5 MATCH
-lib/search.js       FTS5 + 向量 kNN → RRF 融合（k=20）
-lib/indexer.js      建库/增量编排（含向量补算与断点续跑）
-lib/embedder.js     可选嵌入层（onnxruntime-node + DirectML + 共享向量缓存）
-test.mjs            核心自测：建库/检索/增量/删除/降级（32 项）
-test-plugin.mjs     插件接口自测：注册面/错误路径/三工具真实调用（24 项）
+index.js              插件入口：apply(ctx, config) + 四个工具定义 + 加载标记
+lib/store.js          SQLite schema（files / chunks / chunks_fts / vectors / meta）
+lib/strategies.js     切块策略表（扩展名 → ast|heuristic|window）+ 配置覆盖解析
+lib/chunker.js        策略分发：ast → heuristic → window 降级链 + 固定窗口实现
+lib/chunk-ast.js      tree-sitter AST 切块（含 bufferSize 与 setLanguage 两个坑的处理）
+lib/chunk-heuristic.js 纯 JS 语法感知切块（括号深度 + 成员边界，零依赖）
+lib/hash.js           块内容哈希（单独成模块以避免循环依赖）
+lib/deps.js           依赖按需安装：embed / parser 两组、受管目录、修剪、解析器链
+lib/scan.js           仓库遍历、扩展名/目录过滤、两级指纹增量判定
+lib/query.js          查询 → 词项抽取（标识符 / 数字串 / 中文 n 元组）→ FTS5 MATCH
+lib/search.js         FTS5 + 向量 kNN → RRF 融合（k=20）
+lib/indexer.js        建库/增量编排（含向量补算、断点续跑、策略指纹强制重建）
+lib/embedder.js       可选嵌入层（onnxruntime-node + DirectML + 共享向量缓存）
+test.mjs              核心自测：建库/检索/增量/删除/降级/依赖层/切块策略（88 项）
+test-plugin.mjs       插件接口自测：注册面/错误路径/四工具真实调用（56 项）
+verify-install.mjs    装后验证：从已安装包跑通模块加载、工具注册、依赖解析（16 项）
 ```
 
 ## 测试
 
 ```console
-node test.mjs --repo D:\Code\your-repo              # 核心：32/32
-node test-plugin.mjs --repo D:\Code\your-repo       # 契约与接口：45/45
+node test.mjs --repo D:\Code\your-repo                                        # 核心：88/88
+node test-plugin.mjs --no-embed --repo D:\Code\your-repo                      # 契约与接口：56/56
+node verify-install.mjs                                                  # 装后验证（对已安装的包跑）
+
+# 避免重负载：加 --model-dir D:\nonexistent-model 即"模型关闭"路径
+# 切块策略的真实仓库 A/B（真值来自语法树）：
+node <workspace>/dsh-comparison/strategy-ab.mjs D:\Code\demo\svc\saas
 ```
 
 ## 按官方 skill 的合规性（cordis-plugin-development）
@@ -145,8 +163,9 @@ DSH 自带技能 `cordis-plugin-development`（位于 asar 内 `dsh-agent-preset
 ## 已知边界
 
 1. **中文中间词命中依赖向量通道**。FTS5 的 unicode61 分词会把连续中文切成一个整词（`退款超限校验` 是一个 token），所以中文词项用前缀查询只能命中开头；中间词要靠向量补。
-2. **40 行窗口不是 AST 边界**，跨函数的块可能混在一起；换成语法感知切块需要重建索引。跨版本共享率实测受此拖累（固定窗口 53.6% vs 内容定义边界 98.7%）。
-3. **依赖体积 661 MB**（`onnxruntime-node` 含全平台二进制）。
+2. **切块边界质量取决于策略**。默认按文件类型查表：`.java/.js/.ts/.tsx` → `ast`（需按需装 `parser` 组），
+   `.vue/.xml/.sql/.md` 等 → `window`，其它 → `heuristic`。换策略会**自动全量重建**索引（见 INSTALL.md §2'）。
+3. **依赖体积**：`embed` 组 661 MB → 修剪后 264 MB；`parser` 组 41 MB。两者都**按需安装**，装插件本身只 50 KB。
 4. **需要 Node ≥ 22.19 或 ≥ 24**（`node:sqlite` 免 flag 可用）。
 5. **@1 精度**：实测 RRF 在 rank 1 上不如纯通道（向量 18% > FTS5 15% > RRF 5%），所以默认返回 top-10；若你要"最可能的那一个"，用 `mode="vector"`。
 6. 改动插件代码后**需要重启 app**：cordis 不会重新 import 已加载的模块，配置热加载只对已存在的行生效。

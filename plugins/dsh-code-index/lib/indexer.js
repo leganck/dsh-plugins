@@ -14,7 +14,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { chunkText, bodyForEmbedding } from './chunker.js'
+import { chunkFile, bodyForEmbedding } from './chunker.js'
+import { sha256 } from './hash.js'
 import { walkRepo, diffFiles, readForIndex, DEFAULT_INCLUDE, DEFAULT_EXCLUDE_DIRS, DEFAULT_MAX_FILE_BYTES } from './scan.js'
 
 /**
@@ -49,19 +50,45 @@ export function scanStatus(store, repoRoot, opts = {}) {
  * @param {object} [p.opts] - 扫描选项（include/excludeDirs/maxFileBytes）
  * @param {object|null} [p.embedder] - createEmbedder() 的结果；null/不可用时跳过向量
  * @param {{maxEmbedPerRun?: number, mode?: 'incremental'|'full'}} [p.budget]
+ * @param {object} [p.chunking] - 切块策略配置（见 lib/strategies.js）
+ * @param {string} [p.depsDir] - 按需安装的依赖目录（parser 依赖从这里解析）
+ * @param {string[]} [p.depsFallbackDirs]
  */
-export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, budget = {} }) {
+export async function buildIndex({
+  store,
+  repoRoot,
+  opts = {},
+  embedder = null,
+  budget = {},
+  chunking = {},
+  depsDir,
+  depsFallbackDirs = [],
+}) {
   const t0 = Date.now()
-  const mode = budget.mode ?? 'incremental'
+  const requestedMode = budget.mode ?? 'incremental'
   // 默认 0：**不自动补算向量**。建库只做 FTS5（秒级）；要向量必须显式给 max_embed。
   // 理由（2026-10-16 实测）：默认 20000 意味着任何人建任何新仓库的索引都会自动跑一次
   // 可能数十分钟的重负载，且事前不打招呼；用显示 GPU 跑推理时整机会卡。
   // 重活要先说出来、由调用方决定，不能默认替人做。
   const maxEmbed = budget.maxEmbedPerRun ?? 0
 
+  /**
+   * 切块策略指纹 → 变了就必须**全量重建**。
+   *
+   * 不这么做的后果：换策略（例如默认从固定窗口切到 AST）后跑增量，
+   * 只有**变动过的文件**会被重新切块，于是库里同时存在"旧的窗口块"和"新的 AST 块"——
+   * 检索结果里两种粒度的块混在一起，而且**没有任何信号提示这件事发生了**。
+   * 这是典型的"悄悄改变检索质量"，必须挡住。
+   */
+  const fingerprint = sha256(JSON.stringify(chunking ?? {}))
+  const prevFingerprint = store.getMeta('chunk_fingerprint')
+  const strategyChanged = Boolean(prevFingerprint) && prevFingerprint !== fingerprint
+  const mode = strategyChanged ? 'full' : requestedMode
+
   if (mode === 'full') {
     store.db.exec('delete from chunks; delete from chunks_fts; delete from vectors; delete from files;')
   }
+  store.setMeta('chunk_fingerprint', fingerprint)
 
   const scanned = walkRepo(repoRoot, opts)
   const known = store.fileState()
@@ -69,13 +96,20 @@ export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, 
 
   let chunksWritten = 0
   const fileErrors = []
+  /** 实际用到的策略 → 文件数（如实报告，方便发现"以为在用 AST 其实在降级"） */
+  const strategyFiles = new Map()
+  const fallbackReasons = []
   for (const f of changed) {
     try {
       const { text, sha } = readForIndex(f.abs)
-      const chunks = chunkText(text, { windowLines: opts.windowLines })
-      store.replaceChunks(f.rel, chunks)
+      const r = chunkFile({ relPath: f.rel, text, chunking, depsDir, depsFallbackDirs })
+      store.replaceChunks(f.rel, r.chunks)
       store.upsertFile(f.rel, f.mtime, f.size, sha)
-      chunksWritten += chunks.length
+      chunksWritten += r.chunks.length
+      strategyFiles.set(r.strategy, (strategyFiles.get(r.strategy) ?? 0) + 1)
+      if (r.fellBack && r.reason && fallbackReasons.length < 5 && !fallbackReasons.includes(r.reason)) {
+        fallbackReasons.push(r.reason)
+      }
     } catch (e) {
       fileErrors.push(`${f.rel}: ${String(e.message).slice(0, 80)}`)
     }
@@ -137,6 +171,11 @@ export async function buildIndex({ store, repoRoot, opts = {}, embedder = null, 
     vectorsAfter: s.vectors,
     cacheEntries: embedder?.cache ? embedder.cache.count() : null,
     embedNote,
+    /** 实际使用的切块策略 → 文件数；以及降级原因（最多 5 条去重） */
+    strategies: Object.fromEntries(strategyFiles),
+    chunkFallbacks: fallbackReasons,
+    /** 是否因为切块策略变化而强制全量重建（调用方应当如实告知用户） */
+    strategyChanged,
     fileErrors: fileErrors.slice(0, 10),
     elapsedMs: Date.now() - t0,
     stats: s,
