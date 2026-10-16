@@ -352,6 +352,20 @@ console.log('\n[7] 嵌入依赖按需安装层')
     missingNow.length > 0 && missingNow.some((n) => String(reason).includes(n)),
     `缺 ${missingNow.join(',')}；原因里提到的是上面这个 → ${missingNow.some((n) => String(reason).includes(n))}`,
   )
+  // 全新机器：**既**没模型文件**又**没依赖 → 一条消息必须把两件事都说出来。
+  // 早前是"先报缺分词器"就返回了，用户补完模型再跑一次才被告知缺依赖（多一轮往返）。
+  const embFresh = await createEmbedder({
+    modelDir: path.join(tmp, 'no-such-model-dir'),
+    depsDir: fakeDeps,
+    backend: 'cpu',
+    log: () => {},
+  })
+  const freshReason = String(embFresh.ok ? '' : embFresh.reason)
+  check(
+    '全新机器（缺模型+缺依赖）一次说全两件事',
+    /缺模型文件/.test(freshReason) && /code_index_deps action=install group=embed/.test(freshReason),
+    freshReason.slice(0, 150),
+  )
 
   fs.rmSync(tmp, { recursive: true, force: true })
 }
