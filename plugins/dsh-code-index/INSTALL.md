@@ -119,6 +119,27 @@ tree-sitter 同理：四个包都带 `prebuilds/win32-x64`，无需编译。
 `tokenizer.json` / `tokenizer_config.json`。官方 `BAAI/...` 仓库**没有 onnx**，用
 `Xenova/bge-small-zh-v1.5`（ModelScope 国内镜像最快）。
 
+### 2''. 模型身份与"换模型 / 多机器"的一致性（0.4.6 起）
+
+向量必须带"**是哪份模型产出的**"标识，否则换模型后会拿新模型的查询向量去和旧模型的存量向量
+做点积 —— 维度不同变 NaN，**维度相同（如 fp16 ↔ int8）则完全静默地给出垃圾排名**。
+
+- **标签格式**：`bge-small-zh-v1.5-<sha8>-<fp16|int8>`，`sha8` = 模型文件 + 分词器 +
+  分词器配置的**内容哈希**前 8 位（本机实测 `…-716c6e6f-fp16`）。用内容哈希而不是 mtime/size，
+  因为文件跨机器复制时 mtime 必变 —— 而跨机器一致性正是这个标签要保证的事。
+- **自动重建**：建库写 `embedding_tag`；库里已有向量且 tag 不一致 → 自动全量重建并报告
+  `embedChanged`（与切块策略指纹同一套机制）。
+- **查询闸门**：tag 不符（含"旧库没记录"）或维度不符 → **不用向量通道**，并在结果里说明
+  原因与处置办法，绝不静默算垃圾。
+- **`code_index_status`** 同时显示「索引向量模型」与「当前模型」，一眼可比。
+- **升级后迁移历史缓存**（只做一次；不做则历史向量因 key 前缀不同而全部用不上）：
+  ```text
+  node tools/migrate-embedding-tag.mjs --dry-run    # 先看要迁多少条
+  node tools/migrate-embedding-tag.mjs              # 原地 UPDATE 前缀，可重复执行
+  ```
+
+多机器共享向量缓存的做法与前置条件见 `VECTOR-SHARING.md`。
+
 ## 2'. 切块策略表（对应 Cursor 的 `GetAvailableChunkingStrategies`）
 
 Cursor 那套是"**服务端按文件类型下发**切块策略"；我们本地没有服务端，等价物是
