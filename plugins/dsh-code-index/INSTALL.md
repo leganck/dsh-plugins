@@ -148,6 +148,8 @@ node tools\fetch-model.mjs --model bge-reranker-base --quant int8   # 实验用�
 
 ```powershell
 node tools\fetch-model.mjs --model qwen3-embedding-0.6b     # 1024 维，585 MB(int8)
+node tools\fetch-model.mjs --model bge-base-zh-v1.5        # 768 维，194 MB(fp16) 中文同族大一档
+node tools\fetch-model.mjs --model bge-large-zh-v1.5       # 1024 维，619 MB(fp16) 中文同族最大档
 node tools\fetch-model.mjs --model bge-m3                   # 1024 维，542 MB(int8)
 node tools\fetch-model.mjs --model bge-reranker-base        # 交叉编码器（重排，实测净负）
 ```
