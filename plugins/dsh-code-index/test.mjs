@@ -13,7 +13,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { Store } from './lib/store.js'
 import { buildIndex, scanStatus, dropIndex } from './lib/indexer.js'
-import { createEmbedder } from './lib/embedder.js'
+import { createEmbedder, modelFingerprint } from './lib/embedder.js'
 import {
   depsStatus,
   defaultDepsDir,
@@ -27,7 +27,7 @@ import {
 } from './lib/deps.js'
 import { search } from './lib/search.js'
 import { walkRepo } from './lib/scan.js'
-import { chunkText, chunkFile } from './lib/chunker.js'
+import { chunkText, chunkFile, sha256 } from './lib/chunker.js'
 import { braceDepths, heuristicChunks } from './lib/chunk-heuristic.js'
 import { getParser } from './lib/chunk-ast.js'
 import { resolveChunkConfig, DEFAULT_BY_EXT, DEFAULT_FALLBACK } from './lib/strategies.js'
@@ -536,8 +536,135 @@ console.log('\n[8] 切块策略')
   }
 }
 
-// ---------- 9. 清理 ----------
-console.log('\n[9] 清空索引')
+// ---------- 9. 嵌入模型一致性闸门（不需要模型：用假嵌入器） ----------
+// 这一节守的是"换模型后静默算垃圾"这个洞：
+//   - 索引里没记模型 → 拿新模型的查询向量和旧模型的存量向量做点积
+//   - 维度不同 → NaN；维度相同（fp16↔int8）→ 分数看着正常、排名是垃圾
+console.log('\n[9] 嵌入模型一致性')
+{
+  const tmpEmb = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-emb-'))
+  const storeEmb = Store.open(path.join(tmpEmb, 'index.db'))
+
+  /** 假模型目录：用来验证"指纹随内容变化" */
+  const mkModelDir = (content) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-model-'))
+    fs.writeFileSync(path.join(d, 'model_fp16.onnx'), content)
+    fs.writeFileSync(path.join(d, 'tokenizer.json'), '{"fake":true}')
+    return d
+  }
+  const dirA = mkModelDir('weights-A')
+  const dirB = mkModelDir('weights-B')
+  const fpA1 = modelFingerprint(dirA, 'model_fp16.onnx')
+  const fpA2 = modelFingerprint(dirA, 'model_fp16.onnx')
+  const fpB = modelFingerprint(dirB, 'model_fp16.onnx')
+  check('模型指纹是 8 位十六进制', /^[0-9a-f]{8}$/.test(fpA1), fpA1)
+  check('同一份模型指纹稳定（有记忆化）', fpA1 === fpA2)
+  check('模型内容不同 → 指纹不同（这是跨机器共享的关键）', fpA1 !== fpB, `${fpA1} vs ${fpB}`)
+
+  /** 假嵌入器：满足 indexer/search 需要的形状，返回 L2 归一化的常量向量 */
+  const fakeEmb = (tag, dim = 512) => ({
+    ok: true,
+    backend: 'fake',
+    modelFile: 'fake.onnx',
+    modelTag: tag,
+    dim,
+    cache: null,
+    embed: async (texts) => texts.map(() => new Float32Array(dim).fill(1 / Math.sqrt(dim))),
+  })
+
+  // (a) 建库时写入 embedding_tag
+  const embA = fakeEmb('fake-model-A-fp16')
+  const b1 = await buildIndex({
+    store: storeEmb,
+    repoRoot: repo,
+    embedder: embA,
+    budget: { maxEmbedPerRun: 8 },
+    opts: { maxFileBytes: 256 * 1024 },
+  })
+  check('建库写入 embedding_tag', storeEmb.getMeta('embedding_tag') === 'fake-model-A-fp16', String(storeEmb.getMeta('embedding_tag')))
+  check('确实产生了向量（否则后面的闸门测不到）', b1.stats.vectors > 0, `${b1.stats.vectors} 条`)
+
+  // (b) 换模型 → 强制全量重建并如实标记
+  const b2 = await buildIndex({
+    store: storeEmb,
+    repoRoot: repo,
+    embedder: fakeEmb('fake-model-B-fp16'),
+    budget: { maxEmbedPerRun: 8 },
+    opts: { maxFileBytes: 256 * 1024 },
+  })
+  check('换模型 → 自动全量重建（embedChanged=true）', b2.mode === 'full' && b2.embedChanged === true, `mode=${b2.mode} embedChanged=${b2.embedChanged}`)
+  check('重建后 tag 更新为新模型', storeEmb.getMeta('embedding_tag') === 'fake-model-B-fp16')
+  // 同一模型再跑 → 回到增量
+  const b3 = await buildIndex({
+    store: storeEmb,
+    repoRoot: repo,
+    embedder: fakeEmb('fake-model-B-fp16'),
+    budget: { maxEmbedPerRun: 0 },
+    opts: { maxFileBytes: 256 * 1024 },
+  })
+  check('同模型再跑不再是全量重建', b3.mode === 'incremental' && b3.embedChanged === false, `mode=${b3.mode}`)
+
+  // (c) 查询闸门：用一个干净库造数据，逐条验证
+  const mkSearchStore = () => {
+    const s = Store.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-gate-')), 'index.db'))
+    const chunks = s.replaceChunks('Gate.java', [
+      { startLine: 1, endLine: 10, hash: sha256('a'), body: 'public void 退款超限校验() { int x = 1; }' },
+      { startLine: 11, endLine: 20, hash: sha256('b'), body: 'public void another() { int y = 2; }' },
+    ])
+    return { s, chunks }
+  }
+  const vec512 = new Float32Array(512).fill(1 / Math.sqrt(512))
+
+  // (c1) 正常路径：tag 一致 + 维度一致 → 应当走 hybrid
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'fake-model-A-fp16')
+    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
+    check('tag/维度一致 → 走 hybrid', r.mode === 'hybrid', `mode=${r.mode} note=${r.note.slice(0, 60)}`)
+    check('hybrid 结果带向量名次', r.results.every((x) => typeof x.vecRank === 'number'), JSON.stringify(r.results.map((x) => x.vecRank)))
+    dropIndex(s)
+  }
+  // (c2) 闸门①：tag 不一致 → 禁用向量通道并说明原因
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'old-model-fp16')
+    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
+    check('模型不一致 → 不用向量通道', r.mode === 'fts' && r.results.every((x) => x.vecRank === null), `mode=${r.mode}`)
+    check('并说明"不一致"及处置办法', /不一致/.test(r.note) && /code_index/.test(r.note), r.note.slice(0, 100))
+    dropIndex(s)
+  }
+  // (c3) 闸门①b：库里没记模型（旧版本建的库）→ 也要挡住
+  {
+    const { s, chunks } = mkSearchStore()
+    s.putVectors([[chunks[0].id, vec512]]) // 有向量但没有 embedding_tag
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
+    check('库无模型记录 → 不用向量通道（不猜）', r.mode === 'fts' && /没有记录/.test(r.note), r.note.slice(0, 100))
+    dropIndex(s)
+  }
+  // (c4) 闸门②：tag 一致但维度不符 → 也要挡住（配置漂移的兜底）
+  {
+    const { s, chunks } = mkSearchStore()
+    s.setMeta('embedding_tag', 'fake-model-A-fp16')
+    s.putVectors([[chunks[0].id, new Float32Array(3).fill(0.5)]]) // 故意维度不符
+    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
+    check('维度不符 → 不用向量通道并说明', r.mode === 'fts' && /维度/.test(r.note), r.note.slice(0, 100))
+    dropIndex(s)
+  }
+
+  dropIndex(storeEmb)
+  for (const d of [tmpEmb, dirA, dirB]) {
+    try {
+      fs.rmSync(d, { recursive: true, force: true })
+    } catch {
+      /* Windows 句柄，留给系统清理 */
+    }
+  }
+}
+
+// ---------- 10. 清理 ----------
+console.log('\n[10] 清空索引')
 dropIndex(store)
 check('清空后块数为 0', store.stats().chunks === 0)
 check('清空后向量为 0', store.stats().vectors === 0)

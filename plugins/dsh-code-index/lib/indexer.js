@@ -88,12 +88,30 @@ export async function buildIndex({
   const prevFingerprint = store.getMeta('chunk_fingerprint')
   const hasIndexedFiles = store.stats().files > 0
   const strategyChanged = hasIndexedFiles && prevFingerprint !== fingerprint
-  const mode = strategyChanged ? 'full' : requestedMode
+
+  /**
+   * **嵌入模型一致性**：库里已有向量、但那些向量不是当前模型产出的 → 必须全量重建。
+   *
+   * 为什么单独管这一条（与切块指纹同理，但更隐蔽）：
+   * `vectors(chunk_id, dim, v)` 里**没有模型标识**，而查询时的 kNN 直接做点积
+   * （`search.js`：`mat[base+d] * qv[d]`，既不查维度也不查模型）。于是换模型后：
+   *   - 维度不同 → 越界读到 undefined → 分数变 NaN
+   *   - 维度相同（如 fp16 ↔ int8）→ **完全静默**：分数看着正常、排名却是垃圾
+   * 若再叠加增量建库（只重嵌变动文件），库里会变成"旧模型向量 + 新模型向量"混装。
+   * 所以只要 tag 不一致且库里已有向量，就清库重建。
+   */
+  const embeddingTag = embedder?.ok ? embedder.modelTag : null
+  const prevEmbeddingTag = store.getMeta('embedding_tag')
+  const embedChanged = Boolean(embeddingTag) && store.stats().vectors > 0 && prevEmbeddingTag !== embeddingTag
+
+  const mode = strategyChanged || embedChanged ? 'full' : requestedMode
 
   if (mode === 'full') {
     store.db.exec('delete from chunks; delete from chunks_fts; delete from vectors; delete from files;')
   }
   store.setMeta('chunk_fingerprint', fingerprint)
+  // 记录产出这批向量的模型；没有可用嵌入器时**不写**（写 null 会让下次误判成"换过模型"）
+  if (embeddingTag) store.setMeta('embedding_tag', embeddingTag)
 
   const scanned = walkRepo(repoRoot, opts)
   const known = store.fileState()
@@ -181,6 +199,9 @@ export async function buildIndex({
     chunkFallbacks: fallbackReasons,
     /** 是否因为切块策略变化而强制全量重建（调用方应当如实告知用户） */
     strategyChanged,
+    /** 是否因为**嵌入模型变化**而强制全量重建；以及本库向量由哪个模型产出 */
+    embedChanged,
+    embeddingTag: embeddingTag ?? prevEmbeddingTag ?? null,
     fileErrors: fileErrors.slice(0, 10),
     elapsedMs: Date.now() - t0,
     stats: s,

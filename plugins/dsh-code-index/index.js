@@ -27,7 +27,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.12'
+export const BUILD = '2026-10-17.1'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -414,6 +414,10 @@ function applyInner(ctx, rawConfig = {}) {
         if (r.strategyChanged) {
           lines.push('  ⚠️ 切块策略指纹变了 → 已自动全量重建（否则库里会混着新旧两种粒度的块）')
         }
+        if (r.embedChanged) {
+          lines.push('  ⚠️ 嵌入模型变了 → 已自动全量重建（否则旧模型的向量会被当成有效向量继续参与点积）')
+        }
+        if (r.embeddingTag) lines.push(`  向量模型：${r.embeddingTag}`)
         for (const why of r.chunkFallbacks ?? []) lines.push(`  ⚠️ ${why}`)
         if (r.fileErrors.length) lines.push(`  读取失败 ${r.fileErrors.length} 个：${r.fileErrors.join('; ')}`)
         if (!embedder.ok) lines.push(`  ⚠️ 向量通道未启用，当前是纯关键词检索：${embedder.reason}`)
@@ -514,6 +518,8 @@ function applyInner(ctx, rawConfig = {}) {
           `  覆盖 ${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
           `  最后建库：${store.getMeta('last_build_at') ? new Date(Number(store.getMeta('last_build_at'))).toLocaleString() : '从未'}`,
           `  嵌入器：${embedder.ok ? `${embedder.backend}/${embedder.modelFile}（缓存 ${embedder.cacheEntries} 条）` : `未启用 —— ${embedder.reason}`}`,
+          // 索引里的向量由哪个模型产出：与当前模型不一致时向量通道会被闸门挡住（见 lib/search.js）
+          `  索引向量模型：${store.getMeta('embedding_tag') ?? '未记录（旧版本建的库）'}${embedder.ok ? `　当前模型：${embedder.modelTag}` : ''}`,
         ]
         let st = null
         if (args.scan !== false) {
