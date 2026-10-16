@@ -68,17 +68,45 @@ dsh plugin --profile desktop ...  →  error: profile "desktop" is managed exclu
 插件的配置项会**显式校验并大声失败**（见下文「配置」）：写错键名会让插件行不生效，
 而不是被静默忽略。改完补丁层后**需要重启应用**——cordis 不会重新 import 已加载的模块。
 
-## 2. 依赖与模型
+## 2. 嵌入依赖：**按需安装**（不再随插件安装）
 
-```powershell
-cd <本包目录>
-npm install --registry=https://registry.npmmirror.com --no-audit --no-fund
-# onnxruntime-node 的原生二进制（含 DirectML.dll）靠 postinstall 下载，必须放行：
-npm install-scripts approve onnxruntime-node
-npm rebuild onnxruntime-node --foreground-scripts --registry=https://registry.npmmirror.com
+从 0.3.0 起，`onnxruntime-node` 与 `@huggingface/transformers` **不写在 package.json 里**。
+装插件只装纯 JS 部分（tarball 约 49 KB）：**不下载任何重依赖、不触发构建脚本审批、秒级完成**。
+需要向量检索时再装：
+
+```text
+code_index_deps action=status     # 默认：只看状态与缺什么
+code_index_deps action=install    # 下载安装（--ignore-scripts：不执行任何依赖脚本）
+code_index_deps action=prune      # 修剪非本平台二进制
+code_index_deps action=repair     # 删掉重装（修剪过想恢复别平台时用这个）
+code_index_deps action=remove     # 删除
 ```
 
-模型（可选；缺失则退化为纯关键词检索）：`bge-small-zh-v1.5` 的 ONNX 版放到
+默认装到 `%LOCALAPPDATA%\dsh-code-index\embed-deps`（可用 `embedding.depsDir` 改；
+POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。实测（2026-10-16，win32-x64）：
+
+| 步骤 | 实测结果 |
+|---|---|
+| `action=install` | **46 秒**、661.5 MB、**零依赖脚本**、无需任何审批 |
+| `action=prune` | 661.5 MB → **263.8 MB**（回收 397.7 MB），修剪后嵌入仍可用 |
+
+**为什么不写进 package.json**（0.2.1 实测踩过的三件事）：
+
+1. 装插件就要下载并落盘 463 MB；
+2. pnpm 与 npm **都会拦依赖脚本**，要人类逐包批准（`approvedBuilds` / `allowScripts`）；
+3. 最坏情况撞上服务侧 `idleTimeoutMs`（默认 600 秒）空闲超时：`onnxruntime-node` 的
+   `postinstall` 会 bootstrap `global-agent` 走代理下载，脚本结束后 pnpm 迟迟不退出 →
+   pnpm 自己打了 `Done in 2s` 却被判 `timeout`，**整次安装回滚**。
+
+改成按需之后，这三件事都不再发生。**关键事实**：onnxruntime-node 的 npm 包
+**自带各平台二进制**（`bin/napi-v6/{darwin,linux,win32}/{arm64,x64}`），所以 `--ignore-scripts`
+装完照样可用——实测 `require('onnxruntime-node')` 成功、`env.versions={common:1.30.0,node:1.30.0}`、
+`listSupportedBackends()` 返回 `[cpu(bundled), dml(bundled), webgpu(bundled)]`，**DirectML 在**。
+
+> 早期版本的这份文档写着"onnxruntime-node 的原生二进制靠 postinstall 下载，必须放行"——
+> **那条是错的**，已删除。那个 postinstall 只是"若缺则从 NuGet 补下载"，不是二进制来源。
+
+**模型**（可选；缺失则退化为纯关键词检索）：`bge-small-zh-v1.5` 的 ONNX 版放到
 `~/.dsh/models/bge-small-zh-v1.5/`，需要 `model_fp16.onnx`(GPU) / `model_int8.onnx`(CPU) /
 `tokenizer.json` / `tokenizer_config.json`。官方 `BAAI/...` 仓库**没有 onnx**，用
 `Xenova/bge-small-zh-v1.5`（ModelScope 国内镜像最快）。
@@ -123,6 +151,7 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 | `embedding.threads` | 6 | CPU 线程数 |
 | `embedding.batch` | `null` | 批量大小；`null` = 自动（DML 甜点 8–16） |
 | `embedding.cachePath` | `~/.dsh/index/vectors.db` | 内容寻址向量缓存，与 Python 实验版共用 |
+| `embedding.depsDir` | `%LOCALAPPDATA%\dsh-code-index\embed-deps`（POSIX：`~/.cache/…`） | 按需安装的嵌入依赖放这里。解析顺序：**受管目录优先，其次包内 `node_modules`**（兼容旧安装形态） |
 
 ## 5. 自测
 

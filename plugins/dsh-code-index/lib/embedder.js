@@ -16,6 +16,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 // node:sqlite 延迟加载（理由见 lib/store.js）：顶层 import 会让整个插件在缺该内置模块时静默不加载
 import { sqliteDriver } from './store.js'
+import { makeResolvers, loadFrom, depsStatus, defaultDepsDir } from './deps.js'
 
 export const DIM = 512
 export const MAX_TOKENS = 512
@@ -74,19 +75,46 @@ function l2(v) {
 /**
  * 创建嵌入器；任何一步失败都返回 {ok:false, reason}，由调用方决定是否继续纯关键词模式。
  */
-export async function createEmbedder({ modelDir, backend = 'auto', batch, deviceId = 0, threads = 6, cachePath, log = () => {} } = {}) {
+export async function createEmbedder({
+  modelDir,
+  backend = 'auto',
+  batch,
+  deviceId = 0,
+  threads = 6,
+  cachePath,
+  depsDir,
+  depsFallbackDirs = [],
+  log = () => {},
+} = {}) {
   const dir = modelDir ?? path.join(os.homedir(), '.dsh', 'models', 'bge-small-zh-v1.5')
   if (!fs.existsSync(path.join(dir, 'tokenizer.json'))) {
     return { ok: false, reason: `未找到分词器：${dir}\\tokenizer.json（把 bge-small-zh-v1.5 的 onnx 版放这里，或改配置 modelDir）` }
   }
+  // 依赖**按需安装**在受管目录，不再写进 package.json（理由见 lib/deps.js 顶部注释）。
+  // 解析顺序：受管目录 → 调用方给的兜底目录（通常是插件自身的 node_modules，兼容旧安装形态）。
+  const resolvedDepsDir = depsDir ?? defaultDepsDir()
+  const resolvers = makeResolvers({ depsDir: resolvedDepsDir, alsoDirs: depsFallbackDirs })
   let ort
   let AutoTokenizer
   let env
   try {
-    ort = (await import('onnxruntime-node')).default
-    ;({ AutoTokenizer, env } = await import('@huggingface/transformers'))
+    const ortMod = loadFrom(resolvers, 'onnxruntime-node')
+    ort = ortMod?.default ?? ortMod // createRequire 拿到的是 module.exports，没有 ESM 的 .default 包装
+    const tfMod = loadFrom(resolvers, '@huggingface/transformers')
+    const tf = tfMod?.default ?? tfMod
+    AutoTokenizer = tf.AutoTokenizer
+    env = tf.env
   } catch (e) {
-    return { ok: false, reason: `嵌入依赖未安装（onnxruntime-node / @huggingface/transformers）：${String(e.message).slice(0, 120)}` }
+    const st = depsStatus({ depsDir: resolvedDepsDir, alsoDirs: depsFallbackDirs })
+    // 区分两种失败：**缺包**（要按需安装）vs **包在但加载失败**（多半是传递依赖缺失或版本不匹配）。
+    // 早前把后者也说成"缺 xxx"，会把人指错方向。
+    const hint =
+      st.missing.length > 0
+        ? `缺：${st.missing.join(' / ')}——按需安装请用 code_index_deps action=install` +
+          `（约 240 MB，不执行任何依赖脚本）`
+        : `包已在受管目录（${st.dir}）但加载失败：${String(e?.message ?? e).slice(0, 160)}` +
+          `——多为传递依赖缺失或版本不匹配，可试 code_index_deps action=repair`
+    return { ok: false, reason: `嵌入依赖不可用：${hint}`, deps: st, cause: String(e?.message ?? e).slice(0, 160) }
   }
 
   let resolved = backend

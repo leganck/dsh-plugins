@@ -111,9 +111,9 @@ if (mod) {
       roots: ['D:/Code'],
       embedding: { backend: 'off' }, // 关键：不碰模型
     })
-    check('apply() 成功且注册 3 个工具', registry.size === 3, [...registry.keys()].join(','))
+    check('apply() 成功且注册 4 个工具', registry.size === 4, [...registry.keys()].join(','))
   } catch (e) {
-    check('apply() 成功且注册 3 个工具', false, String(e.message).slice(0, 140))
+    check('apply() 成功且注册 4 个工具', false, String(e.message).slice(0, 140))
   }
 
   // ---- 3. roots 白名单（验证 config 覆盖行是否应用）----
@@ -134,31 +134,52 @@ if (mod) {
   check('卸载后注册归零', registry.size === 0, `剩余 ${registry.size}`)
 }
 
-// ---- 4. 依赖解析（只按包内文件为基准解析 + 加载绑定，不做推理）----
-// 注意：**不能**在本脚本里 `import('onnxruntime-node')` —— Node 按导入方文件所在位置解析，
-// 本脚本位于源码目录（无 node_modules），那样测出来的失败是测试自己的问题，不是包的问题。
-// 正确做法：createRequire 以【包内文件】为基准，解析的是该文件自己的依赖树。
-console.log('\n[4] 依赖解析（以包内文件为基准，不推理）')
-const { createRequire } = await import('node:module')
-const req = createRequire(path.join(pkgDir, 'lib', 'embedder.js'))
-for (const spec of ['onnxruntime-node', '@huggingface/transformers']) {
-  try {
-    const resolved = req.resolve(spec)
-    check(`${spec} 可解析`, true, resolved.replace(/\\/g, '/').replace(/^.*node_modules\//, 'node_modules/').slice(0, 80))
-  } catch (e) {
-    check(`${spec} 可解析`, false, String(e.code || e.message).slice(0, 60))
+// ---- 4. 嵌入依赖（按需安装在受管目录；不在包内，也不该在包内）----
+//
+// 两条必须守住的边界：
+//   ① 装插件**不该**带来任何重依赖（包里不该再出现 onnxruntime-node）
+//   ② 依赖的解析要落在**受管目录**上（%LOCALAPPDATA%/dsh-code-index/embed-deps），
+//      用 createRequire 以该目录的 package.json 为锚点——不能靠 ESM 裸标识符解析
+//      （那是以导入方文件为基准的，装到别处就找不到）
+console.log('\n[4] 嵌入依赖：按需安装在受管目录')
+const depsMod = await import('file:///' + pkgDir.replace(/\\/g, '/') + '/lib/deps.js')
+const dstat = depsMod.depsStatus({ depsDir: depsMod.defaultDepsDir(), alsoDirs: [pkgDir] })
+console.log(`  受管目录：${dstat.dir}`)
+console.log(`  体积 ${(dstat.sizeBytes / 1048576).toFixed(1)} MB；${dstat.installed ? '已就绪' : `缺 ${dstat.missing.join(', ')}`}`)
+
+const pkgLocal = path.join(pkgDir, 'node_modules', 'onnxruntime-node')
+check('包里**没有**再捆 onnxruntime-node（装插件不该带 287 MB）', !fs.existsSync(pkgLocal), pkgLocal)
+check('安装未执行依赖脚本（无构建产物残留）', !fs.existsSync(path.join(pkgDir, 'node_modules', 'onnxruntime-node', 'build')))
+
+if (dstat.installed) {
+  for (const spec of ['onnxruntime-node', '@huggingface/transformers']) {
+    const req = (await import('node:module')).createRequire(path.join(dstat.dir, 'package.json'))
+    try {
+      const resolved = req.resolve(spec)
+      check(`${spec} 从受管目录可解析`, true, resolved.replace(/\\/g, '/').replace(/^.*node_modules\//, 'node_modules/').slice(0, 70))
+    } catch (e) {
+      check(`${spec} 从受管目录可解析`, false, String(e.code || e.message).slice(0, 70))
+    }
   }
+  try {
+    const req = (await import('node:module')).createRequire(path.join(dstat.dir, 'package.json'))
+    const ort = req('onnxruntime-node')
+    const v = ort?.env?.versions?.node ?? '?'
+    check(`onnxruntime-node 可加载（版本 ${v}；未创建会话、未推理）`, typeof ort?.InferenceSession === 'function')
+  } catch (e) {
+    check('onnxruntime-node 可加载', false, String(e.message).slice(0, 90))
+  }
+  const dml = path.join(dstat.dir, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', 'win32', 'x64', 'DirectML.dll')
+  check('DirectML.dll 在受管目录（GPU 路径）', fs.existsSync(dml), dml.replace(/\\/g, '/'))
+} else {
+  console.log('  （未按需安装 → 跳过解析检查；这是**正常状态**，插件此时走纯 FTS5 降级）')
+  const emb = await (await import('file:///' + pkgDir.replace(/\\/g, '/') + '/lib/embedder.js')).createEmbedder({
+    depsDir: dstat.dir,
+    backend: 'cpu',
+    log: () => {},
+  })
+  check('缺依赖时嵌入器如实降级且指出下一步', emb.ok === false && /code_index_deps/.test(String(emb.reason)), String(emb.reason).slice(0, 110))
 }
-try {
-  const ort = req('onnxruntime-node')
-  const v = ort?.env?.versions?.node ?? '?'
-  check(`onnxruntime-node 可加载（版本 ${v}；未创建会话、未推理）`, typeof ort?.InferenceSession === 'function')
-} catch (e) {
-  check('onnxruntime-node 可加载', false, String(e.message).slice(0, 90))
-}
-// 原生二进制是否就位（只看文件，不加载）
-const dml = path.join(pkgDir, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', 'win32', 'x64', 'DirectML.dll')
-check('DirectML.dll 在包内 node_modules（GPU 路径）', fs.existsSync(dml), dml.replace(/\\/g, '/'))
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 if (fail) process.exitCode = 1

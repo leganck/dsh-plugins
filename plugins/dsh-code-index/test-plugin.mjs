@@ -92,11 +92,15 @@ function cordisLikeCtx(mod) {
 }
 
 const indexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-plugin-'))
+// 依赖目录也隔离：测试绝不能碰真实的受管目录（%LOCALAPPDATA%/dsh-code-index/embed-deps）
+const testDepsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-deps-'))
 const { ctx, registry, logs, effects, declared } = cordisLikeCtx(plugin)
 plugin.apply(ctx, {
   indexDir,
   roots: [repo],
-  embedding: process.argv.includes('--no-embed') ? { backend: 'off' } : { backend: 'auto', modelDir },
+  embedding: process.argv.includes('--no-embed')
+    ? { backend: 'off', depsDir: testDepsDir }
+    : { backend: 'auto', modelDir, depsDir: testDepsDir },
   maxEmbedPerRun: 400,
 })
 
@@ -181,19 +185,31 @@ check('未声明 inject 时 apply 会抛错（回归保护）', (() => {
     return /without inject/.test(e.message)
   }
 })())
-check('注册了 3 个工具', registry.size === 3, [...registry.keys()].join(','))
-for (const name of ['code_index', 'code_search', 'code_index_status']) {
+check('注册了 4 个工具', registry.size === 4, [...registry.keys()].join(','))
+for (const name of ['code_index', 'code_search', 'code_index_status', 'code_index_deps']) {
   check(`包含 ${name}`, registry.has(name))
 }
 const search = registry.get('code_search')
 const index = registry.get('code_index')
 const status = registry.get('code_index_status')
+const deps = registry.get('code_index_deps')
 check('code_search 声明为并发安全', search?.isConcurrencySafe?.() === true)
 check('code_index_status 声明为并发安全', status?.isConcurrencySafe?.() === true)
 check('code_index 未声明并发安全（写操作应串行）', index?.isConcurrencySafe === undefined)
 check('code_search 的 query 是必填参数', search?.parameters?.required?.includes('query') === true, JSON.stringify(search?.parameters?.required))
-check('三个工具都提供了 render', [search, index, status].every((t) => typeof t.output?.render === 'function'))
+check('四个工具都提供了 render', [search, index, status, deps].every((t) => typeof t.output?.render === 'function'))
+check('code_index_deps 只允许固定的 action 枚举', JSON.stringify(deps?.parameters?.properties?.action?.enum) === JSON.stringify(['status', 'install', 'prune', 'repair', 'remove']), JSON.stringify(deps?.parameters?.properties?.action?.enum))
+check('code_index_deps 描述里说明"不随插件安装"', /不随插件安装/.test(String(deps?.description ?? '')))
 check('插件写入了加载日志', logs.some((l) => l.includes('dsh-code-index')), JSON.stringify(logs))
+
+// 依赖工具：默认只**报**状态，绝不擅自下载（下载必须由显式 action 触发）
+const depsStatusOut = await deps.execute({}, {})
+const depsText = depsStatusOut.content[0].text
+check('code_index_deps 默认只报状态', /嵌入依赖目录/.test(depsText) && /状态：/.test(depsText), depsText.split('\n')[0])
+check('code_index_deps 给出可执行的下一步', /code_index_deps action=install/.test(depsText), depsText.split('\n').slice(-1)[0])
+check('code_index_deps 默认不动手（没创建 node_modules）', !fs.existsSync(path.join(testDepsDir, 'node_modules')))
+const depsPruneOut = await deps.execute({ action: 'prune' }, {})
+check('code_index_deps prune 在空目录上安全', /已移除 0 个/.test(depsPruneOut.content[0].text), depsPruneOut.content[0].text.split('\n')[1])
 
 // ---------- 错误路径 ----------
 console.log('\n[2] 错误路径')

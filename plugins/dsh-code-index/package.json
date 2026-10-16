@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status.",
+  "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status / code_index_deps. Embedding deps are installed on demand, not at plugin install time.",
   "license": "MIT",
   "icon": "./icon.svg",
   "engines": {
@@ -25,6 +25,7 @@
     "icon.svg",
     "README.md",
     "INSTALL.md",
+    "verify-install.mjs",
     "test.mjs",
     "test-plugin.mjs"
   ],
@@ -44,14 +45,6 @@
     "@deepseek-ai/dsh": {
       "optional": true
     }
-  },
-  "optionalDependencies": {
-    "@huggingface/transformers": "^3.7.6",
-    "onnxruntime-node": "^1.30.0"
-  },
-  "allowScripts": {
-    "onnxruntime-node@1.21.0": true,
-    "onnxruntime-node@1.30.0": true
   },
   "scripts": {
     "test": "node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo"
