@@ -23,7 +23,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.1'
+export const BUILD = '2026-10-16.2'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -39,6 +39,12 @@ export const SCHEMA_VERSION = 1
  * 契约见技能 cordis-plugin-development/references/host-plugin.md。
  */
 export const inject = ['tools']
+
+/**
+ * 插件在 cordis 里的名字（与补丁行的 id 对应）。参考 dsh-ops / dsh-tool-todo 的
+ * `export const name`。
+ */
+export const name = 'code-index'
 
 // ------------------------------------------------------------------ 加载记录仪
 /**
@@ -77,20 +83,77 @@ const DEFAULTS = {
   roots: [],
   maxFileBytes: 2 * 1024 * 1024,
   windowLines: 40,
-  embedding: { backend: 'auto', modelDir: null, threads: 6 },
+  embedding: { backend: 'auto', modelDir: null, threads: 6, batch: null, cachePath: null },
   defaultTopK: 10,
   maxEmbedPerRun: 20000,
 }
 
-function normalizeConfig(raw = {}) {
-  const cfg = {
-    ...DEFAULTS,
-    ...raw,
-    embedding: { ...DEFAULTS.embedding, ...(raw.embedding ?? {}) },
+/**
+ * 配置错误。策略与 dsh-ops 一致：**不导出 Schemastery `Config`，改为显式校验并大声失败**。
+ *
+ * 原因（dsh-ops 的 config.js 写得很清楚，与本插件实测一致）：宿主这一半必须做到
+ * **不 import 任何 `@deepseek-ai/*` 值**——那些名字由 profile 加载器提供，每多一个
+ * 就多一条让插件加载失败的路（本插件就曾因缺 `inject` 而整行不生效）。
+ * 所以配置校验自己做：指明是哪个键、允许什么，这正是加载器自带 schema 本来会做的事。
+ */
+export class ConfigError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ConfigError'
   }
-  if (typeof cfg.maxEmbedPerRun !== 'number' || cfg.maxEmbedPerRun < 1) cfg.maxEmbedPerRun = DEFAULTS.maxEmbedPerRun
-  if (typeof cfg.defaultTopK !== 'number' || cfg.defaultTopK < 1) cfg.defaultTopK = DEFAULTS.defaultTopK
-  cfg.allowedRoots = (cfg.roots ?? []).map((r) => path.resolve(String(r).replace(/^~(?=[\\/]|$)/, os.homedir())))
+}
+
+const EMBEDDING_KEYS = Object.keys(DEFAULTS.embedding)
+const BACKENDS = ['auto', 'cpu', 'gpu', 'off']
+
+function normalizeConfig(raw = {}) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ConfigError(`config 必须是对象，收到 ${Array.isArray(raw) ? 'array' : typeof raw}`)
+  }
+  const unknown = Object.keys(raw).filter((k) => !(k in DEFAULTS))
+  if (unknown.length) {
+    throw new ConfigError(`未知配置项：${unknown.join(', ')}；可用：${Object.keys(DEFAULTS).join(', ')}`)
+  }
+  const rawEmb = raw.embedding ?? {}
+  if (rawEmb === null || typeof rawEmb !== 'object' || Array.isArray(rawEmb)) {
+    throw new ConfigError(`config.embedding 必须是对象，收到 ${Array.isArray(rawEmb) ? 'array' : typeof rawEmb}`)
+  }
+  const unknownEmb = Object.keys(rawEmb).filter((k) => !EMBEDDING_KEYS.includes(k))
+  if (unknownEmb.length) {
+    throw new ConfigError(
+      `未知配置项：${unknownEmb.map((k) => `embedding.${k}`).join(', ')}；可用：${EMBEDDING_KEYS.map((k) => `embedding.${k}`).join(', ')}`,
+    )
+  }
+
+  const cfg = { ...DEFAULTS, ...raw, embedding: { ...DEFAULTS.embedding, ...rawEmb } }
+
+  const intAtLeast1 = (value, key) => {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new ConfigError(`config.${key} 必须是 >= 1 的整数，收到 ${JSON.stringify(value)}`)
+    }
+  }
+  intAtLeast1(cfg.maxEmbedPerRun, 'maxEmbedPerRun')
+  intAtLeast1(cfg.defaultTopK, 'defaultTopK')
+  intAtLeast1(cfg.windowLines, 'windowLines')
+  intAtLeast1(cfg.embedding.threads, 'embedding.threads')
+  if (typeof cfg.maxFileBytes !== 'number' || cfg.maxFileBytes <= 0) {
+    throw new ConfigError(`config.maxFileBytes 必须是正数，收到 ${JSON.stringify(cfg.maxFileBytes)}`)
+  }
+  if (cfg.embedding.batch !== undefined && cfg.embedding.batch !== null && !Number.isInteger(cfg.embedding.batch)) {
+    // null 表示自动挑 batch
+    throw new ConfigError(`config.embedding.batch 必须是整数或 null，收到 ${JSON.stringify(rawEmb.batch)}`)
+  }
+  if (cfg.indexDirBase !== null && typeof cfg.indexDirBase !== 'string') {
+    throw new ConfigError(`config.indexDirBase 必须是字符串或 null，收到 ${typeof cfg.indexDirBase}`)
+  }
+  if (cfg.indexDir !== null && typeof cfg.indexDir !== 'string') {
+    throw new ConfigError(`config.indexDir 必须是字符串或 null，收到 ${typeof cfg.indexDir}`)
+  }
+  if (!Array.isArray(cfg.roots)) throw new ConfigError(`config.roots 必须是数组，收到 ${typeof cfg.roots}`)
+  if (!BACKENDS.includes(cfg.embedding.backend)) {
+    throw new ConfigError(`config.embedding.backend 必须是 ${BACKENDS.join(' | ')}，收到 ${JSON.stringify(cfg.embedding.backend)}`)
+  }
+  cfg.allowedRoots = cfg.roots.map((r) => path.resolve(String(r).replace(/^~(?=[\\/]|$)/, os.homedir())))
   return cfg
 }
 
@@ -155,6 +218,30 @@ function applyInner(ctx, rawConfig = {}) {
   const stores = new Map()
   let embedderPromise = null
 
+  // ---------------------------------------------------------------- 工具注册
+  // practices.md：「Register every resource inside `apply` with `ctx.effect` or `ctx.on`
+  // and return its cleanup.」注册属于 context 拥有的 effect：插件卸载 / profile 补丁
+  // 变更时，cordis 依据这个 effect 回收我们注册的工具，不需要外部追踪。
+  const toolDisposers = []
+  const registerTool = (def) => {
+    const dispose = ctx.tools.register(def)
+    if (typeof dispose === 'function') toolDisposers.push(dispose)
+    else if (dispose && typeof dispose.dispose === 'function') toolDisposers.push(() => dispose.dispose())
+    return dispose
+  }
+  ctx.effect(
+    () => () => {
+      for (const dispose of toolDisposers.splice(0)) {
+        try {
+          dispose()
+        } catch (e) {
+          bootLog('tool-dispose-failed', { message: String(e?.message).slice(0, 200) })
+        }
+      }
+    },
+    'dsh-code-index: tools',
+  )
+
   // 会话工作目录（工具未显式给 path 时用）；取不到就退回进程 cwd
   const sessionCwd = (exec) => {
     try {
@@ -196,7 +283,7 @@ function applyInner(ctx, rawConfig = {}) {
   }
 
   // ---------------------------------------------------------------- code_index
-  ctx.tools.register({
+  registerTool({
     name: 'code_index',
     description:
       '建立或增量刷新某个代码仓库的检索索引（本地 SQLite：FTS5 全文 + 可选向量）。首次较慢（向量部分按仓库大小，实测 GPU 约 4–17 分钟/仓库），之后只处理变化的文件，通常秒级。'
@@ -258,7 +345,7 @@ function applyInner(ctx, rawConfig = {}) {
   })
 
   // ---------------------------------------------------------------- code_search
-  ctx.tools.register({
+  registerTool({
     name: 'code_search',
     description:
       '在本仓库的代码索引里做混合检索（关键词 BM25 + 语义向量，RRF 融合），返回排好序的「文件:行 + 片段」。'
@@ -313,7 +400,7 @@ function applyInner(ctx, rawConfig = {}) {
   })
 
   // ---------------------------------------------------------------- code_index_status
-  ctx.tools.register({
+  registerTool({
     name: 'code_index_status',
     description: '查看代码索引的覆盖情况与新鲜度（文件/块/向量数量、有多少文件变了、库文件大小）。',
     isConcurrencySafe: () => true,

@@ -1,27 +1,50 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status.",
   "license": "MIT",
+  "icon": "./icon.svg",
   "engines": {
-    "node": ">=23.4.0"
+    "node": "^22.19 || >=24"
   },
-  "scripts": {
-    "test": "node test.mjs"
-  },
+  "main": "index.js",
   "exports": {
-    ".": "./index.js",
-    "./package.json": "./package.json"
+    ".": {
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
-    "lib/*.js",
-    "test.mjs",
+    "lib",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
     "README.md",
-    "INSTALL.md"
+    "INSTALL.md",
+    "test.mjs",
+    "test-plugin.mjs"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.7.6",
     "onnxruntime-node": "^1.30.0"
@@ -29,5 +52,8 @@
   "allowScripts": {
     "onnxruntime-node@1.21.0": true,
     "onnxruntime-node@1.30.0": true
+  },
+  "scripts": {
+    "test": "node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo"
   }
 }

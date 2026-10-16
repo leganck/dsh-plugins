@@ -1,0 +1,16 @@
+# 本 bundle 自带的插件行。
+#
+# name 用**包名**而非 file:// 路径：bundle 经 plugin_manager 的 install_bundle 安装后，
+# 该包从 profile 的 node_modules 解析。
+#
+# 这里只放**可移植的默认值**；机器相关或团队相关的取值（roots 白名单、模型目录、
+# 索引位置）请在你自己 profile 的 cordis.patch.yml 里按 id 覆盖 —— 用户补丁层
+# 在所有 bundle 层之后应用，且能跨插件升级保留。
+- insert:
+    - id: code-index
+      name: '@local/dsh-code-index'
+      config:
+        indexDirBase: ~/.dsh/code-index
+        embedding:
+          backend: auto
+          modelDir: ~/.dsh/models/bge-small-zh-v1.5
