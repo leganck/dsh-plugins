@@ -87,16 +87,22 @@ export async function createEmbedder({
   log = () => {},
 } = {}) {
   const dir = modelDir ?? path.join(os.homedir(), '.dsh', 'models', 'bge-small-zh-v1.5')
-  if (!fs.existsSync(path.join(dir, 'tokenizer.json'))) {
-    return { ok: false, reason: `未找到分词器：${dir}\\tokenizer.json（把 bge-small-zh-v1.5 的 onnx 版放这里，或改配置 modelDir）` }
-  }
-  // 依赖**按需安装**在受管目录，不再写进 package.json（理由见 lib/deps.js 顶部注释）。
+
+  // 两个前置条件**必须一起检查、一起报告**。
+  // 早前的实现先 return"缺分词器"，于是在**全新机器**上（既没模型也没依赖）只报模型问题——
+  // 用户补完模型，再跑一次才被告知还缺依赖，白白多一轮往返。
+  // 这是跑"干净机器"场景时实测发现的，不是推测。
+  const tokenizerPath = path.join(dir, 'tokenizer.json')
+  const hasTokenizer = fs.existsSync(tokenizerPath)
+
+  // 依赖**按需安装**在受管目录，不写进 package.json（理由见 lib/deps.js 顶部注释）。
   // 解析顺序：受管目录 → 调用方给的兜底目录（通常是插件自身的 node_modules，兼容旧安装形态）。
   const resolvedDepsDir = depsDir ?? defaultDepsDir()
   const resolvers = makeResolvers({ depsDir: resolvedDepsDir, alsoDirs: depsFallbackDirs })
   let ort
   let AutoTokenizer
   let env
+  let depsProblem = null
   try {
     const ortMod = loadFrom(resolvers, 'onnxruntime-node')
     ort = ortMod?.default ?? ortMod // createRequire 拿到的是 module.exports，没有 ESM 的 .default 包装
@@ -106,19 +112,32 @@ export async function createEmbedder({
     env = tf.env
   } catch (e) {
     const st = depsStatus({ depsDir: resolvedDepsDir, alsoDirs: depsFallbackDirs })
-    // 区分两种失败：**缺包**（要按需安装）vs **包在但加载失败**（多半是传递依赖缺失或版本不匹配）。
-    // 早前把后者也说成"缺 xxx"，会把人指错方向。
-    const hint =
+    // 区分三种失败：**缺包**（要按需安装）、**版本不符**（tree-sitter 那类 ABI 配对问题也在这里暴露）、
+    // **包在但对、却加载失败**（多半是传递依赖缺失）。早前把后两者也说成"缺 xxx"，会把人指错方向。
+    depsProblem =
       st.missing.length > 0 || st.mismatched.length > 0
         ? [
-            st.missing.length ? `缺：${st.missing.join(' / ')}` : '',
-            st.mismatched.length ? `版本不符：${st.mismatched.join('；')}` : '',
+            st.missing.length ? `缺 ${st.missing.join(' / ')}` : '',
+            st.mismatched.length ? `版本不符 ${st.mismatched.join('；')}` : '',
           ]
             .filter(Boolean)
-            .join('；') + `——按需安装请用 code_index_deps action=install group=embed（约 240 MB，不执行任何依赖脚本）`
-        : `包已在受管目录（${st.dir}）但加载失败：${String(e?.message ?? e).slice(0, 160)}` +
-          `——多为传递依赖缺失或版本不匹配，可试 code_index_deps action=repair`
-    return { ok: false, reason: `嵌入依赖不可用：${hint}`, deps: st, cause: String(e?.message ?? e).slice(0, 160) }
+            .join('；') + `（安装：code_index_deps action=install group=embed，约 240 MB，不执行依赖脚本）`
+        : `依赖已在 ${st.dir} 但加载失败：${String(e?.message ?? e).slice(0, 140)}（可试 code_index_deps action=repair）`
+    if (hasTokenizer) {
+      return { ok: false, reason: `嵌入不可用：${depsProblem}`, deps: st, cause: String(e?.message ?? e).slice(0, 160) }
+    }
+    return {
+      ok: false,
+      reason: `嵌入不可用：① 缺模型文件 ${tokenizerPath}（把 bge-small-zh-v1.5 的 onnx 版放这里，或改配置 modelDir）；② ${depsProblem}`,
+      deps: st,
+      cause: String(e?.message ?? e).slice(0, 160),
+    }
+  }
+  if (!hasTokenizer) {
+    return {
+      ok: false,
+      reason: `嵌入不可用：缺模型文件 ${tokenizerPath}（把 bge-small-zh-v1.5 的 onnx 版放这里，或改配置 modelDir）；依赖已就绪`,
+    }
   }
 
   let resolved = backend

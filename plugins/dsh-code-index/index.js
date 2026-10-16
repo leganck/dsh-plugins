@@ -27,7 +27,7 @@ import { search as hybridSearch } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-16.8'
+export const BUILD = '2026-10-16.9'
 export const SCHEMA_VERSION = 1
 
 /**
