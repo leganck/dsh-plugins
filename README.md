@@ -76,6 +76,11 @@ pwsh -File install.ps1 -DryRun
    | 安装耗时 | 287+208 MB 下载；曾撞 10 分钟超时并回滚两次 | **`Done in 1.6s`** |
    | 包变动 | `+61` | **`+1 -85`**（顺带清掉旧依赖树） |
 
+4. **同一个版本号装了不同内容 → `error.code: "ambiguous-install"`。** 实测：改了 tarball 内容
+   但 `package.json` 里版本仍是 `0.3.0`，pnpm 判定 `Already up to date`（什么都没重装），
+   管理器随即报 `ambiguous-install`、`changed: false` 并**保护性地拒绝**（什么都没被破坏）。
+   正确做法：**改了内容就升版本号**（`0.3.0 → 0.3.1`）。这个报错是对的——同版本号本该同内容。
+
 装完**用返回字段判定**，不要只看插件自己的标记：
 
 ```
