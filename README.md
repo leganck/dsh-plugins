@@ -18,26 +18,34 @@
 
 ## 快速开始
 
-```powershell
-# 安装全部插件（源码 → bundle 目录 → 幂等写入 cordis.patch.yml）
-pwsh -File install.ps1 -Plugin all
+安装按官方技能 `cordis-plugin-development` 的路径走：`plugin_manager` 的
+`install_bundle`，target 传**包目录的绝对路径**。`install.ps1` 默认就是这个流程——
+它检查前置条件并打印应当交给 agent 执行的调用（脚本无法调用工具）：
 
-# 只装一个
-pwsh -File install.ps1 -Plugin code-index
+```powershell
+# 官方路径（默认）：前置检查 + 打印 install_bundle 调用
+pwsh -File install.ps1
+
+# 退路：复制到 bundle 目录 + 手写 file:// 补丁行（非官方，仅在 plugin_manager 不可用时）
+pwsh -File install.ps1 -Mode Legacy -SkipNpm
 
 # 只看会做什么，不落盘
-pwsh -File install.ps1 -Plugin all -DryRun
+pwsh -File install.ps1 -DryRun
 ```
 
-装完**需要重启 DSH 应用**（实测补丁层的热加载只对已存在的行生效，新插入的行要重启）。
+**前置条件**：profile 里 `tool-plugin-manager` 被 shipped patch 置为 `disabled: true`，
+需要在 profile 补丁层按 id 覆盖成 `disabled: false` 并重启应用，`plugin_manager` 才可用。
+另外本 profile 由应用独占管理，`dsh plugin --profile …` CLI 那条路不可用。
+
+装完**需要重启 DSH 应用**（cordis 不会重新 import 已加载的模块）。
 
 验证：
 
 ```powershell
-# 记忆插件：加载标记
-Get-Content "$env:USERPROFILE\.dsh\archive\_loaded.json" -Raw
-# 索引插件：加载标记
-Get-Content "$env:USERPROFILE\.dsh\code-index\_loaded.json" -Raw
+# 官方路径：读 install_bundle 返回的 application / warnings，并用 cordis_inspect_query 确认
+# 退路（手写行）：看插件自己写的加载标记
+Get-Content "$env:USERPROFILE\.dsh\archive\_loaded.json" -Raw      # 记忆插件
+Get-Content "$env:USERPROFILE\.dsh\code-index\_loaded.json" -Raw   # 索引插件
 ```
 
 ## 目录结构

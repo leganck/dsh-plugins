@@ -11,7 +11,7 @@
 | DSH | 桌面版 0.2.0-rc.2（宿主运行时实测 Electron 44 / Node 24.18.1） | — |
 | 平台 | Windows x64（GPU 走 DirectML）；其它平台可跑 CPU/int8 | — |
 
-## 1. 安装（首选：官方 bundle 路径）
+## 1. 安装（官方 bundle 路径）
 
 按技能 `cordis-plugin-development`：
 
@@ -23,16 +23,35 @@ plugin_manager(action: "install_bundle", target: "<本包绝对路径>")
 ```
 
 判定是否生效：**看返回的 `application` 与 `warnings` 字段**，不是日志、终端输出或进程列表。
-`restart-required` 表示改动尚未生效。
+`restart-required` 表示改动尚未生效。确认新行用 `cordis_inspect_query`（无需审批）。
 
-> ⚠️ 本机 profile 里 `tool-plugin-manager` 行是 `disabled: true`，所以该工具默认不可用，
-> 需要先在 profile 补丁层里把它打开（这是启用 shipped plugin 的标准做法：
-> 写一个 workspace bundle，其 patch 覆盖该行为 `disabled: false`）。
+### 前置条件：`plugin_manager` 工具必须启用
 
-## 1'. 安装（替代：手工 file:// 行，本机当前采用）
+本机 profile 的 `tool-plugin-manager` 行被 shipped patch 置为 `disabled: true`，所以该工具
+默认调不出来 —— 这既是此前只能手写补丁行的原因，也是 `install_bundle` 用不了的原因。
+按 id 覆盖那一行即可（这正是该补丁文件的常规用法，模型/UI/主题都是这么改的）：
 
-本机当前用的是这条路径（因为上一条的 `plugin_manager` 未启用）：在
-`~/.dsh/profiles/desktop/cordis.patch.yml` 追加
+```yaml
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: false
+```
+
+改完**重启应用**。另外本 profile 由应用独占管理，**CLI 那条路走不通**：
+
+```
+dsh plugin --profile desktop ...  →  error: profile "desktop" is managed exclusively by the Electron application
+```
+
+> 仓库根目录的 `install.ps1` 默认就是这套官方流程：它检查上面的前置条件并打印应当交给
+> agent 执行的 `install_bundle` 调用（脚本本身无法调用工具）。
+
+## 1'. 安装（退路：手工 file:// 行）
+
+**仅在 `plugin_manager` 不可用时使用。** 手写行绕过了 `install_bundle` 的清单/patch 校验
+与结构化回执 —— 本插件历史上正因此出现过"插件静默不生效、排查花了几轮重启"。
+
+在 `~/.dsh/profiles/desktop/cordis.patch.yml` 追加：
 
 ```yaml
 - insert:

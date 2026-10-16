@@ -62,9 +62,31 @@ node tools/reindex.mjs             # 确认后落盘
 
 ## 三条路径
 
-### A. 原生 bundle（推荐）
+### 0. `plugin_manager` + `install_bundle`（**官方推荐**，优先用这条）
 
-适用于 `dsh plugin` 可用的 profile。本包已是 bundle，所以：
+技能 `cordis-plugin-development` 指定的路径：target 传**包目录的绝对路径**。
+
+```
+plugin_manager(action: "install_bundle", target: "<本目录的绝对路径>")
+```
+
+它会完成包安装与 bundle 选择；**不要**用 shell 命令复现这两步。判定是否生效看返回的
+`application` 与 `warnings` 字段，并用 `cordis_inspect_query` 确认新行（无需审批）。
+
+前置条件：profile 的 `tool-plugin-manager` 行被 shipped patch 置为 `disabled: true`，
+需要在 profile 补丁层按 id 覆盖为 `disabled: false` 并重启应用：
+
+```yaml
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: false
+```
+
+### A. 原生 bundle CLI（`dsh plugin add`）
+
+**仅适用于非应用独占的 profile。** `desktop` 这类被应用管理的 profile 会被直接拒绝：
+`error: profile "desktop" is managed exclusively by the Electron application`。
+本包已是 bundle，所以：
 
 ```bash
 dsh plugin --profile <profile> add <本目录 | .tgz | git+https://git.example.com/your-org/dsh-plugins.git>
