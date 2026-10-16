@@ -28,7 +28,7 @@ import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js
 import { normalizeRelPrefix } from './lib/scan.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-17.3'
+export const BUILD = '2026-10-17.4'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -318,6 +318,17 @@ function applyInner(ctx, rawConfig = {}) {
             roots: config.allowedRoots,
             embedding: { backend: config.embedding.backend, modelDir: expandPath(config.embedding.modelDir) ?? null },
             chunking: { strategy: config.chunking?.strategy ?? 'auto', byExt: Object.keys(config.chunking?.byExt ?? {}) },
+            // 扫描范围与预算也要记：否则"加载时到底排除了哪些目录"无法回答 ——
+            // 这个坑真的踩过：profile 的 config 覆盖条目**替换整份 config**，
+            // 写漏了不会报错、只是静默失效，而标记里看不到就没法确认。
+            scan: {
+              excludeDirs: config.excludeDirs ?? [],
+              excludePaths: config.excludePaths ?? [],
+              maxFileBytes: config.maxFileBytes,
+              windowLines: config.windowLines,
+              defaultTopK: config.defaultTopK,
+              maxEmbedPerRun: config.maxEmbedPerRun,
+            },
           },
           markerFile: path.join(markerDir, '_loaded.json'),
         },
