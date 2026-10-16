@@ -142,6 +142,36 @@ node tools\fetch-model.mjs --model bge-reranker-base --quant int8   # 实验用�
 
 > 校验里 `model_fp16.onnx` 显示 ❌ 只代表"**GPU 路径不可用**"，CPU 的 int8 路径仍然可用。
 
+### 2''''. 候选升级的嵌入模型（**实验性**，插件不引用）
+
+清单里还有三个**非默认**模型，供"换更强的中文/代码嵌入模型值不值"做对照：
+
+```powershell
+node tools\fetch-model.mjs --model qwen3-embedding-0.6b     # 1024 维，585 MB(int8)
+node tools\fetch-model.mjs --model bge-m3                   # 1024 维，542 MB(int8)
+node tools\fetch-model.mjs --model bge-reranker-base        # 交叉编码器（重排，实测净负）
+```
+
+**各自的正确用法不同，弄错就会把模型测成废物**（本机实测踩过）：
+
+| 模型 | 查询前缀 | 文档前缀 | pooling | 推荐执行后端 |
+|---|---|---|---|---|
+| `bge-small-zh-v1.5`（默认） | `为这个句子生成表示以用于检索相关文章：` | 无 | **CLS** | DirectML / fp16 |
+| `qwen3-embedding-0.6b` | `Instruct: {任务}\nQuery:{问题}` | 无 | **last_token** | CPU / int8（量化算子在 DML 上支持差） |
+| `bge-m3` | 无 | 无 | **CLS** | CPU / int8 |
+
+两个易踩点：
+1. **`onnx/` 子目录**：我们把 ONNX 放在模型目录**根**（与 `lib/embedder.js` 的约定一致），
+   但 `transformers.js` 的 `pipeline()` 只认 `<dir>/onnx/<file>.onnx`。下载器对这两个候选模型
+   会在下载后**自动补硬链接**（`linkOnnxSubdir`），瞬时且不占额外磁盘 —— 手工放模型时也要注意。
+2. **带 KV-cache 的 ONNX 导出**：`Qwen3-Embedding` 的 ONNX 声明了 `position_ids` 与一堆
+   `past_key_values.*` 输入 → **不要用裸 `session.run`**（要自己填 KV，还会算无用的 `present.*`
+   输出、内存翻倍）→ 走 `pipeline('feature-extraction', dir, { dtype, pooling, normalize })`。
+
+**换模型的代价（实测）**：标签变 → 缓存复用 **0%**（全库要重嵌）；维度 512 → 1024 → 每向量
+2048 B → 4096 B（存储 ×2）；`Qwen3-0.6B` 在 CPU/int8 下 **864 ms/块**、查询 **297 ms**
+（对照 `bge-small` 在 DML/fp16 下 29 ms/块、查询 25 ms）。
+
 ### 2''. 模型身份与"换模型 / 多机器"的一致性（0.4.6 起）
 
 向量必须带"**是哪份模型产出的**"标识，否则换模型后会拿新模型的查询向量去和旧模型的存量向量
