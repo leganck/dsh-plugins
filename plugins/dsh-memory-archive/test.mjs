@@ -299,8 +299,22 @@ const noticeMessage = prepended[0]?.message
 const noticeBody = noticeMessage?.content?.[0]?.text ?? ''
 check('notice names the INDEX file', noticeBody.includes('INDEX.md'))
 check('notice names the segment glob', noticeBody.includes('segment_*.md'))
-check('notice tells the model to grep/read for exact evidence', /grep or read/.test(noticeBody) && noticeBody.includes('tool outputs'))
+// 触发条件必须是**可判定的任务类型**，而不是"摘要够不够"这种自我评估。
+// 旧文案 `when the checkpoint summary above is insufficient` 实测永不触发
+// （本会话归档 12 段 / 5253 事件 / 0 次读取）；改为"要精确回忆标识符/数值/原始输出时先 grep"，
+// 依据是 Cursor 的取证行为：它用**精确标识符**（PENDING_PAYMENT、工单号）grep 自己的 segment。
+check(
+  'notice states a task-type trigger (exact identifier/value/output), not "summary insufficient"',
+  /exact identifier, value, or raw tool output/i.test(noticeBody) && !/summary above is insufficient/i.test(noticeBody),
+)
+check('notice tells the model to grep these files first', /grep these files first/i.test(noticeBody))
 check('notice carries the do-not-modify rule', noticeBody.includes('Do not modify these files'))
+// 关键词直接内联：读者不必先读 INDEX 才知道该 grep 什么
+check(
+  'notice inlines keywords (new segment or earlier segments)',
+  /Keywords of the new segment/.test(noticeBody) || /Keywords of earlier segments/.test(noticeBody),
+)
+check('notice reports the accumulated archive size', /Archived so far in this session/.test(noticeBody))
 check('notice is a user message with a source', noticeMessage?.role === 'user' && typeof noticeMessage?.source?.kind === 'string')
 
 const d2 = await preStep({ agent: agentWithInbox, messages: [], turn: 3, step: 2 }, next)

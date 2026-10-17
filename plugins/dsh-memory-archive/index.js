@@ -41,7 +41,7 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url))
  * Bump when the behaviour changes. It is written into `_loaded.json` so the
  * running app can be shown to hold *this* code, not a stale module cache.
  */
-export const BUILD = '2026-10-14.1'
+export const BUILD = '2026-10-17.1'
 
 /**
  * Bumped whenever the keyword extractor changes shape.
@@ -936,7 +936,7 @@ export function renderIndex(rows, evictedRows = []) {
   lines.push('`Keywords` answer "which segment has this?". They are picked to be discriminating')
   lines.push('and verbatim greppable — issue ids, file names, and domain identifiers outrank plain')
   lines.push('words — while host paths, generic vocabulary, and redaction placeholders are')
-  lines.push('excluded. Grep one across `segment_*.md` to land on the segment that holds it.')
+  lines.push('excluded. Grep one across `segment_NNN.md` to land on the segment that holds it.')
   lines.push('')
   lines.push('| Segment | File | Compaction | Shadowed seqs | Events | Tool calls | Bytes | Keywords |')
   lines.push('|---|---|---|---|---|---|---|---|')
@@ -967,9 +967,24 @@ export function renderIndex(rows, evictedRows = []) {
  * This mirrors the Cursor design, whose compaction checkpoint ends with the
  * archive glob, the INDEX path, an instruction to use read_file/grep for exact
  * code, file paths, and tool outputs, and a do-not-modify rule.
+ *
+ * ## 为什么要改触发条件（2026-10-17，有取证支撑）
+ * 旧文案的门槛是「when the checkpoint summary above is insufficient」——
+ * 这是让**模型自己评估"摘要够不够"**，而摘要里往往已经把结论写得挺完整，
+ * 于是这个条件几乎永不成立：本会话归档了 12 段 / 5253 事件 / 2442 次工具调用，
+ * **被读取 0 次**（写得多、读得少）。
+ *
+ * 参照 Cursor 的**实际行为取证**（本机 `…/agent-transcripts/<id>/compaction/` 与历史取证文件）：
+ * 它会 `read` 自己的 INDEX.md、并用 **精确标识符**（`PENDING_PAYMENT`、工单号 `10060`、
+ * `demoOrderQuery`）grep 自己的 `segment_NNN.md`。也就是说触发条件是
+ * **"我要精确回忆某个标识符/数值/原始输出"**，而不是"摘要不够"。
+ *
+ * 因此把门槛改成**可判定的任务类型**，并把本段与各段的关键词直接摆在指针里
+ * （省掉"先读 INDEX 才知道 grep 什么"这一步）。
  */
 function noticeText(notice) {
   const index = join(notice.dir, 'INDEX.md')
+  const fmt = (n) => Number(n ?? 0).toLocaleString('en-US')
   const lines = [
     '<system-reminder>',
     'A compaction checkpoint was archived to disk together with its verbatim turns.',
@@ -981,10 +996,27 @@ function noticeText(notice) {
   if (notice.evictedCount > 0) {
     lines.push(`- Evicted events (removed from context by compaction/prune, in no segment): ${join(notice.dir, 'evicted.md')} (${notice.evictedCount} recovered)`)
   }
+  if (notice.segmentCount || notice.totalEvents) {
+    lines.push(`- Archived so far in this session: ${fmt(notice.segmentCount)} segment(s), ${fmt(notice.totalEvents)} events, ${fmt(notice.totalToolCalls)} tool calls — none of it is in your context now`)
+  }
+  // 关键词直接摆在指针里：读者的第一个问题是"该 grep 什么"，不该让他先读一遍 INDEX。
+  if (Array.isArray(notice.keywords) && notice.keywords.length) {
+    lines.push(`- Keywords of the new segment: ${notice.keywords.map((k) => `"${k}"`).join(', ')}`)
+  }
+  const older = Array.isArray(notice.indexKeywords)
+    ? notice.indexKeywords.filter((row) => row.file !== notice.file).slice(-4)
+    : []
+  if (older.length) {
+    lines.push('- Keywords of earlier segments (grep one of these across `segment_NNN.md` to land on the right one):')
+    for (const row of older) {
+      lines.push(`    ${row.file}: ${(row.keywords ?? []).map((k) => `"${k}"`).join(', ')}`)
+    }
+  }
   lines.push(
     '',
-    'When the checkpoint summary above is insufficient, use grep or read on those files to recover exact',
-    'code, file paths, and tool outputs from the summarized span. Do not modify these files.',
+    'When you need to recall an exact identifier, value, or raw tool output from an earlier turn',
+    '(issue id, status constant, SQL result, a measured number, a file path, a diff), grep these files first:',
+    'the index keywords above are the cheapest way in. Do not modify these files.',
     '</system-reminder>',
   )
   return lines.join('\n')
@@ -1340,6 +1372,12 @@ export function apply(ctx, rawConfig) {
       eventCount: shadowed.length,
       toolCount: built.toolCount,
       evictedCount: evictedRows.filter((row) => row.missing !== true).length,
+      // 指针要能直接回答"该 grep 什么"，所以把关键词与累计规模一起带出去。
+      keywords: built.keywords ?? [],
+      segmentCount: rows.length,
+      totalEvents: rows.reduce((n, row) => n + (Number(row.eventCount) || 0), 0),
+      totalToolCalls: rows.reduce((n, row) => n + (Number(row.toolCount) || 0), 0),
+      indexKeywords: rows.map((row) => ({ file: row.file, keywords: row.keywords ?? [] })),
     }
   }
 

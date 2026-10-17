@@ -1,3 +1,27 @@
+## 1.2.0 — 2026-10-17
+
+### 为什么改：写得多、读得少
+本会话归档了 **12 段 / 5,253 事件 / 2,442 次工具调用（8.05 MB）**，但**被读取 0 次**。
+旧指针的门槛是「when the checkpoint summary above is insufficient」—— 它要求模型**自评"摘要够不够"**，
+而摘要通常已经写得很完整，于是这个条件几乎永不成立。
+
+### 依据：对 Cursor 的取证
+本机 Cursor 的 `…/agent-transcripts/<id>/compaction/` 与历史取证文件显示：它会 `read` 自己的 `INDEX.md`，
+并用**精确标识符**（`PENDING_PAYMENT`、工单号 `10060`、`demoOrderQuery`）grep 自己的 `segment_*.md`。
+即真实触发条件是「**要精确回忆某个标识符/数值/原始输出**」，而不是"摘要不够"。
+
+### 改动
+1. **指针改成任务式触发条件**：明确列出"issue id / 状态常量 / SQL 结果 / 测得的数字 / 文件路径 / diff"，
+   并直接写 "grep these files first"
+2. **关键词内联**：新段与最近 4 段的关键词直接列在指针里（省掉"先读 INDEX 才知道 grep 什么"）
+3. **累计规模可见**：`Archived so far: N segments, X events, Y tool calls — none of it is in your context now`
+4. **新增 `tools/memory-search.mjs`**：一次调用完成归档检索
+   - 多词默认 AND · `--re` 正则 · `--session/--dir/--limit/--context/--json`
+   - 实测：`node tools/memory-search.mjs "净负 重排"` 一秒定位到被推翻的旧结论所在段行
+
+### 测试
+`node test.mjs` → **109 项全过**（新增：任务式触发条件、grep-first、关键词内联、累计规模四项断言）
+
 # Changelog
 
 归档产物的**结构**未变（`segment_*.md` 照旧）；1.1.1 重做了 INDEX 关键词并新增补齐工具，
