@@ -293,7 +293,7 @@ const s2 = await status.execute({ path: repo }, {})
 const s2Text = s2.content[0].text
 check('报告库文件大小', /\d+(\.\d+)?\s*MB[)）]/.test(s2Text), s2Text.slice(0, 120))
 check('报告覆盖情况', /覆盖 \d+ 文件/.test(s2Text))
-check('报告嵌入器状态', /嵌入器：/.test(s2Text))
+check('报告嵌入器状态', /嵌入器（建库）：/.test(s2Text))
 console.log(s2Text.split('\n').map((l) => '    ' + l).join('\n'))
 
 // ---------- 卸载契约 ----------

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status / code_index_deps. Embedding deps are installed on demand, not at plugin install time.",
@@ -21,6 +21,7 @@
     "index.js",
     "lib",
     "tools",
+    "deploy",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -29,6 +30,7 @@
     "verify-install.mjs",
     "test.mjs",
     "test-plugin.mjs",
+    "test-remote.mjs",
     "model"
   ],
   "dsh": {
@@ -49,7 +51,12 @@
     }
   },
   "scripts": {
-    "test": "node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo",
+    "test": "node test-remote.mjs && node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo",
+    "test:remote": "node test-remote.mjs",
+    "bench:local": "node tools/bench-local.mjs",
+    "bench:search": "node tools/bench-search.mjs",
+    "bench:remote": "node tools/bench-remote.mjs",
+    "bench:build": "node tools/bench-build-vector.mjs",
     "pack:stage": "node tools/pack-model.mjs stage",
     "pack:clean": "node tools/pack-model.mjs clean",
     "prepack": "node tools/pack-model.mjs stage",

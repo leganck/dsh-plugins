@@ -5,7 +5,7 @@
 | 插件 | 版本 | 作用 | 依赖 |
 |---|---|---|---|
 | [`plugins/dsh-memory-archive`](plugins/dsh-memory-archive/) | 1.1.1 | **记忆**：每次压缩（compaction）把被折叠的**逐字**轮次写成 `segment_NNN.md`，并维护 `INDEX.md`，同时向会话注入指针，让早期工具输出在长会话里可被重新检索 | 无（纯 node 内置模块） |
-| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | 0.1.0 | **索引加速**：本地代码库混合检索（SQLite FTS5/BM25 + 本地 ONNX 向量 → RRF 融合），三个工具 `code_index` / `code_search` / `code_index_status` | `onnxruntime-node`、`@huggingface/transformers`（可选，缺失则退化为纯关键词） |
+| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | 0.7.0 | **索引加速**：本地代码库混合检索（SQLite FTS5/BM25 + 本地 ONNX 向量 → RRF 融合），四个工具 `code_index` / `code_search` / `code_index_status` / `code_index_deps`；算力位置可配（本机 GPU/CPU、或远端 `/embed`+`/rerank`） | `onnxruntime-node`、`@huggingface/transformers`（可选，按需装；缺失则退化为纯关键词） |
 
 ## 为什么这两个放一起
 

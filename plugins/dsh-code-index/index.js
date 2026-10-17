@@ -21,7 +21,8 @@ import path from 'node:path'
 import os from 'node:os'
 import { Store } from './lib/store.js'
 import { createEmbedder } from './lib/embedder.js'
-import { createReranker, RERANK_TIERS } from './lib/reranker.js'
+import { createReranker, RERANK_TIERS, RERANK_MAX_TOKENS } from './lib/reranker.js'
+import { createRemoteEmbedder, createRemoteReranker, endpointsOf, describeStatus, REMOTE_DEFAULTS } from './lib/remote.js'
 import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms, defaultDepsDir, EMBED_PACKAGES, GROUP_NAMES, DEP_GROUPS } from './lib/deps.js'
 import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strategies.js'
 import { search as hybridSearch } from './lib/search.js'
@@ -29,7 +30,7 @@ import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js
 import { normalizeRelPrefix } from './lib/scan.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-17.15'
+export const BUILD = '2026-10-17.16'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -128,7 +129,37 @@ const DEFAULTS = {
    * 理由见 lib/deps.js：实测那两包解压 463 MB、会触发构建脚本审批、还可能撞上安装超时；
    * 而 onnxruntime-node 的 npm 包自带各平台二进制，`--ignore-scripts` 装完照样可用（dml 后端也在）。
    */
-  embedding: { backend: 'auto', modelDir: null, threads: 6, batch: null, cachePath: null, depsDir: null },
+  embedding: {
+    backend: 'auto',
+    /**
+     * **查询侧**单独指定后端（`null` = 跟 `backend` 一样）。
+     *
+     * 为什么要分开（本机实测，同一份 bge-base fp16、同一个标签）：
+     *  - 建库是**长批**：DML 27.5 块/s vs CPU 3.4 块/s → 建库必须用 GPU
+     *  - 查询是 **batch=1**：DML 每次调用有 ~45 ms 固定开销（提交+同步+回读），
+     *    所以本机 40 行文本 DML 68 ms、CPU 40 ms → 查询反而 CPU 更快
+     * 两者向量标签一致（同一模型文件），所以"建库用 GPU、查询用 CPU"是安全的，
+     * 也是这台机器上不动任何远端就能拿到的最大收益。
+     */
+    queryBackend: null,
+    modelDir: null,
+    threads: 6,
+    batch: null,
+    cachePath: null,
+    depsDir: null,
+    /**
+     * **远端嵌入**（`backend: 'remote'` 时才用）。默认不配 —— 本机就是默认路线。
+     *
+     * 为什么留成可选而不是默认：本机 bge-base 一查询 34 ms，已经够用；远端多一个
+     * 故障点（网络 / 那台机器开机 / 证书），能赢的场景是"开发机弱、旁边有台带独显的机器"。
+     *
+     * `tag` 是**向量标签**（模型名 + 模型文件内容哈希 + 精度，与本机 `modelTag` 同一算法）。
+     * 服务端在 `GET /` 里自述时就不用手填；手填的用途是"服务端还没升级到会报 tag 的版本"
+     * 或者"你确认两边是同一份模型、但哈希算不出来"。**标签对不上不会回退本机** ——
+     * 回退等于把两种来源的向量混进同一个索引，检索质量会悄悄变差。
+     */
+    remote: { url: null, timeoutMs: 8000, apiKey: null, tag: null, model: null, fallbackLocal: true },
+  },
   /**
    * 切块策略（表见 lib/strategies.js，对应 Cursor 的 `GetAvailableChunkingStrategies`）：
    *   `strategy`：`auto`（按扩展名查内置表）| `ast` | `heuristic` | `window`
@@ -155,6 +186,14 @@ const DEFAULTS = {
    */
   rerank: 'off',
   rerankModelDir: null,
+  /**
+   * 重排**在哪算**：`local`（默认，本机 ONNX）| `remote`（远端 HTTP）。
+   * 与 `rerank` 分开的理由：`rerank` 是"开不开、候选多少"，这是"谁来算"，
+   * 两个维度正交 —— 想从 quality 换成 fast、或从本机换到远端，互不牵连。
+   */
+  rerankBackend: 'local',
+  /** `rerankBackend: 'remote'` 时的远端地址与超时（与 embedding.remote 同构） */
+  rerankRemote: { url: null, timeoutMs: 8000, apiKey: null, fallbackLocal: true },
 }
 
 /**
@@ -173,7 +212,7 @@ export class ConfigError extends Error {
 }
 
 const EMBEDDING_KEYS = Object.keys(DEFAULTS.embedding)
-const BACKENDS = ['auto', 'cpu', 'gpu', 'off']
+const BACKENDS = ['auto', 'cpu', 'gpu', 'remote', 'off']
 
 function normalizeConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -195,6 +234,9 @@ function normalizeConfig(raw = {}) {
   }
 
   const cfg = { ...DEFAULTS, ...raw, embedding: { ...DEFAULTS.embedding, ...rawEmb } }
+  // 两处 remote 都是**嵌套对象**：浅合并会把默认值整块顶掉，必须单独深合一层
+  cfg.embedding.remote = { ...DEFAULTS.embedding.remote, ...(rawEmb.remote ?? {}) }
+  cfg.rerankRemote = { ...DEFAULTS.rerankRemote, ...(raw.rerankRemote ?? {}) }
 
   const intAtLeast1 = (value, key) => {
     if (!Number.isInteger(value) || value < 1) {
@@ -277,6 +319,64 @@ function normalizeConfig(raw = {}) {
   if (!BACKENDS.includes(cfg.embedding.backend)) {
     throw new ConfigError(`config.embedding.backend 必须是 ${BACKENDS.join(' | ')}，收到 ${JSON.stringify(cfg.embedding.backend)}`)
   }
+  // 查询侧覆盖：null 表示跟 backend 走；给了就必须是已知后端
+  if (cfg.embedding.queryBackend !== null && !BACKENDS.includes(cfg.embedding.queryBackend)) {
+    throw new ConfigError(
+      `config.embedding.queryBackend 必须是 null 或 ${BACKENDS.join(' | ')}，收到 ${JSON.stringify(cfg.embedding.queryBackend)}`,
+    )
+  }
+
+  // ---- 远端推理（embedding.remote / rerankRemote）----
+  // 这两块的错误信息必须**点名键路径**：远端配置错一个字段的表现是"一直降级成本机"，
+  // 不点名就会让人以为是网络问题（本插件在 excludePaths 上就吃过这种亏）。
+  const checkRemote = (block, label, allowedKeys) => {
+    if (block === null || typeof block !== 'object' || Array.isArray(block)) {
+      throw new ConfigError(`config.${label} 必须是对象，收到 ${Array.isArray(block) ? 'array' : typeof block}`)
+    }
+    const unknown = Object.keys(block).filter((k) => !allowedKeys.includes(k))
+    if (unknown.length) {
+      throw new ConfigError(`未知配置项：${unknown.map((k) => `${label}.${k}`).join(', ')}；可用：${allowedKeys.map((k) => `${label}.${k}`).join(', ')}`)
+    }
+    if (block.url !== null && typeof block.url !== 'string') {
+      throw new ConfigError(`config.${label}.url 必须是字符串或 null，收到 ${typeof block.url}`)
+    }
+    if (typeof block.url === 'string' && block.url.trim()) {
+      try {
+        endpointsOf(block.url)
+      } catch (e) {
+        throw new ConfigError(`config.${label}.url 不可用：${e.message}`)
+      }
+    }
+    if (!Number.isInteger(block.timeoutMs) || block.timeoutMs < 100) {
+      throw new ConfigError(`config.${label}.timeoutMs 必须是 >= 100 的整数（毫秒），收到 ${JSON.stringify(block.timeoutMs)}`)
+    }
+    if (block.apiKey !== null && typeof block.apiKey !== 'string') {
+      throw new ConfigError(`config.${label}.apiKey 必须是字符串或 null，收到 ${typeof block.apiKey}`)
+    }
+    if (typeof block.fallbackLocal !== 'boolean') {
+      throw new ConfigError(`config.${label}.fallbackLocal 必须是 true/false，收到 ${JSON.stringify(block.fallbackLocal)}`)
+    }
+    for (const key of ['tag', 'model']) {
+      if (key in block && block[key] !== null && typeof block[key] !== 'string') {
+        throw new ConfigError(`config.${label}.${key} 必须是字符串或 null，收到 ${typeof block[key]}`)
+      }
+    }
+  }
+  checkRemote(cfg.embedding.remote, 'embedding.remote', Object.keys(DEFAULTS.embedding.remote))
+  checkRemote(cfg.rerankRemote, 'rerankRemote', Object.keys(DEFAULTS.rerankRemote))
+  // 选了远端却没有地址 → 直接拒绝。否则表现是"每次查询静默降级"，比报错难查得多。
+  if (cfg.embedding.backend === 'remote' && !String(cfg.embedding.remote.url ?? '').trim()) {
+    throw new ConfigError('config.embedding.backend = remote 时必须给 config.embedding.remote.url（例如 https://dsh-embed.example.com）')
+  }
+  if (cfg.rerankBackend !== 'local' && cfg.rerankBackend !== 'remote') {
+    throw new ConfigError(`config.rerankBackend 必须是 'local' 或 'remote'，收到 ${JSON.stringify(cfg.rerankBackend)}`)
+  }
+  if (cfg.rerankBackend === 'remote' && !String(cfg.rerankRemote.url ?? '').trim()) {
+    // 重排地址缺省时可以复用嵌入的地址（同一台服务同时提供 /embed 与 /rerank）
+    const shared = String(cfg.embedding.remote.url ?? '').trim()
+    if (!shared) throw new ConfigError('config.rerankBackend = remote 时必须给 config.rerankRemote.url（或至少配置 embedding.remote.url 复用同一台服务）')
+    cfg.rerankRemote.url = shared
+  }
   cfg.allowedRoots = cfg.roots.map((r) => path.resolve(String(r).replace(/^~(?=[\\/]|$)/, os.homedir())))
   return cfg
 }
@@ -332,8 +432,24 @@ function applyInner(ctx, rawConfig = {}) {
           config: {
             indexDirBase: config.indexDirBase,
             roots: config.allowedRoots,
-            embedding: { backend: config.embedding.backend, modelDir: expandPath(config.embedding.modelDir) ?? null },
-            rerank: { tier: config.rerank, modelDir: expandPath(config.rerankModelDir) ?? null },
+            embedding: {
+              backend: config.embedding.backend,
+              queryBackend: config.embedding.queryBackend,
+              modelDir: expandPath(config.embedding.modelDir) ?? null,
+              // 远端只记**地址与开关**，绝不记 apiKey（标记文件是明文的，会被归档/分享）
+              remote: config.embedding.backend === 'remote' || config.embedding.queryBackend === 'remote'
+                ? { url: config.embedding.remote.url, tag: config.embedding.remote.tag, fallbackLocal: config.embedding.remote.fallbackLocal, apiKeySet: Boolean(config.embedding.remote.apiKey) }
+                : null,
+            },
+            rerank: {
+              tier: config.rerank,
+              backend: config.rerankBackend,
+              modelDir: expandPath(config.rerankModelDir) ?? null,
+              remote:
+                config.rerankBackend === 'remote'
+                  ? { url: config.rerankRemote.url, fallbackLocal: config.rerankRemote.fallbackLocal, apiKeySet: Boolean(config.rerankRemote.apiKey) }
+                  : null,
+            },
             chunking: { strategy: config.chunking?.strategy ?? 'auto', byExt: Object.keys(config.chunking?.byExt ?? {}) },
             // 扫描范围与预算也要记：否则"加载时到底排除了哪些目录"无法回答 ——
             // 这个坑真的踩过：profile 的 config 覆盖条目**替换整份 config**，
@@ -358,7 +474,6 @@ function applyInner(ctx, rawConfig = {}) {
   }
 
   const stores = new Map()
-  let embedderPromise = null
 
   // ---------------------------------------------------------------- 工具注册
   // practices.md：「Register every resource inside `apply` with `ctx.effect` or `ctx.on`
@@ -409,35 +524,84 @@ function applyInner(ctx, rawConfig = {}) {
     if (!ok) throw new Error(`路径不在允许的 roots 白名单内：${repoRoot}\n已配置：${config.allowedRoots.join(', ')}`)
   }
 
-  async function getEmbedder() {
-    if (config.embedding.backend === 'off') return { ok: false, reason: '配置 embedding.backend = off' }
-    if (!embedderPromise) {
-      embedderPromise = createEmbedder({
-        modelDir: expandPath(config.embedding.modelDir) ?? undefined,
-        backend: config.embedding.backend,
-        threads: config.embedding.threads,
-        batch: config.embedding.batch,
-        cachePath: expandPath(config.embedding.cachePath) ?? undefined,
-        // 依赖按需安装在受管目录；插件自身目录作为兜底（兼容把依赖装在包内的旧形态）
-        depsDir: expandPath(config.embedding.depsDir) ?? undefined,
-        depsFallbackDirs: [PLUGIN_DIR],
-        // 让嵌入器优先用**随包提供的模型**（<插件目录>/model）→ 装上即用，不必另下 194 MB
-        pluginDir: PLUGIN_DIR,
-        log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
-      })
+  /**
+   * 本机嵌入器（**懒加载 + 按后端记忆化**）：远端模式下它同时充当"标签一致的兜底"，
+   * 所以必须只建一次 —— 每次回退都重新建会话，等于把 GPU 反复烧一遍。
+   *
+   * 键是**具体后端**（cpu/gpu/auto/...）而不是"本机"：查询侧可能被单独指定成 cpu
+   * （实测本机 batch=1 查询 CPU 比 DML 快 1.7×），这时会并存两个本机实例，
+   * 它们共享同一个模型文件 → 同一个向量标签 → 索引里的向量对两边都有效。
+   */
+  const localEmbedders = new Map()
+  const localEmbedder = (backend) => {
+    const key = backend === 'remote' ? 'auto' : backend
+    if (!localEmbedders.has(key)) {
+      localEmbedders.set(
+        key,
+        createEmbedder({
+          modelDir: expandPath(config.embedding.modelDir) ?? undefined,
+          backend: key,
+          threads: config.embedding.threads,
+          batch: config.embedding.batch,
+          cachePath: expandPath(config.embedding.cachePath) ?? undefined,
+          // 依赖按需安装在受管目录；插件自身目录作为兜底（兼容把依赖装在包内的旧形态）
+          depsDir: expandPath(config.embedding.depsDir) ?? undefined,
+          depsFallbackDirs: [PLUGIN_DIR],
+          // 让嵌入器优先用**随包提供的模型**（<插件目录>/model）→ 装上即用，不必另下 194 MB
+          pluginDir: PLUGIN_DIR,
+          log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
+        }),
+      )
     }
-    return embedderPromise
+    return localEmbedders.get(key)
   }
+
+  /** 某个用途（建库 / 查询）实际该用哪个后端 */
+  const backendFor = (kind) =>
+    (kind === 'query' ? config.embedding.queryBackend : null) ?? config.embedding.backend
+
+  /** 建库/索引侧嵌入器；`getQueryEmbedder()` 是查询侧（默认同一个实例） */
+  async function embedderFor(kind) {
+    const backend = backendFor(kind)
+    if (backend === 'off') {
+      return { ok: false, reason: `配置 embedding.${kind === 'query' ? 'queryBackend' : 'backend'} = off` }
+    }
+    if (!embedderCache.has(kind)) {
+      let p
+      if (backend === 'remote') {
+        const rem = config.embedding.remote
+        p = createRemoteEmbedder({
+          url: rem.url,
+          timeoutMs: rem.timeoutMs,
+          apiKey: rem.apiKey,
+          tag: rem.tag,
+          model: rem.model ?? undefined,
+          fallbackLocal: rem.fallbackLocal,
+          // 只有允许回退时才把本机嵌入器交出去（否则远端失败就是失败，别偷偷换模型）
+          localFactory: rem.fallbackLocal ? () => localEmbedder('auto') : null,
+          cachePath: expandPath(config.embedding.cachePath) ?? undefined,
+          log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
+        })
+      } else {
+        p = localEmbedder(backend)
+      }
+      embedderCache.set(kind, p)
+    }
+    return embedderCache.get(kind)
+  }
+  const embedderCache = new Map()
+  const getEmbedder = () => embedderFor('index')
+  const getQueryEmbedder = () => embedderFor('query')
 
   /**
    * 重排器（**懒加载**）：只在配置开启且真的用到时才建会话（531 MB 模型 + DML 会话不该在启动时付）。
    * 失败不抛错 —— 返回 {ok:false, reason}，由 search 走"不重排"的分支并把原因写进结果。
    */
   let rerankerPromise = null
-  async function getReranker() {
-    if (config.rerank === 'off') return { ok: false, reason: '配置 rerank = off' }
-    if (!rerankerPromise) {
-      rerankerPromise = createReranker({
+  let localRerankerPromise = null
+  const localReranker = () => {
+    if (!localRerankerPromise) {
+      localRerankerPromise = createReranker({
         modelDir: expandPath(config.rerankModelDir) ?? undefined,
         backend: config.embedding.backend === 'cpu' ? 'cpu' : 'auto',
         threads: config.embedding.threads,
@@ -445,6 +609,26 @@ function applyInner(ctx, rawConfig = {}) {
         depsFallbackDirs: [PLUGIN_DIR],
         log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
       })
+    }
+    return localRerankerPromise
+  }
+  async function getReranker() {
+    if (config.rerank === 'off') return { ok: false, reason: '配置 rerank = off' }
+    if (!rerankerPromise) {
+      if (config.rerankBackend === 'remote') {
+        const rem = config.rerankRemote
+        rerankerPromise = createRemoteReranker({
+          url: rem.url,
+          timeoutMs: rem.timeoutMs,
+          apiKey: rem.apiKey,
+          maxTokens: RERANK_MAX_TOKENS,
+          fallbackLocal: rem.fallbackLocal,
+          localFactory: rem.fallbackLocal ? localReranker : null,
+          log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
+        })
+      } else {
+        rerankerPromise = localReranker()
+      }
     }
     return rerankerPromise
   }
@@ -565,7 +749,7 @@ function applyInner(ctx, rawConfig = {}) {
         if (s.chunks === 0) {
           return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。索引位于 ${dbPath}`)
         }
-        const embedder = await getEmbedder()
+        const embedder = await getQueryEmbedder()
         const reranker = await getReranker()
         const tier = RERANK_TIERS[config.rerank]
         const r = await hybridSearch(store, embedder, args.query, {
@@ -624,15 +808,24 @@ function applyInner(ctx, rawConfig = {}) {
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         const embedder = await getEmbedder()
+        const queryEmbedder = config.embedding.queryBackend ? await getQueryEmbedder() : embedder
+        const describe = (e) => {
+          if (!e?.ok) return `未启用 —— ${e?.reason ?? '未知'}`
+          if (e.backend === 'remote') return `remote ${e.remote?.url ?? ''}（${describeStatus(e.remote?.status)}）`
+          return `${e.backend}/${e.modelFile}`
+        }
         const lines = [
           `索引：${repoRoot}`,
           `  库文件 ${dbPath}（${(s.dbBytes / 1048576).toFixed(1)} MB）`,
           `  覆盖 ${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
           `  最后建库：${store.getMeta('last_build_at') ? new Date(Number(store.getMeta('last_build_at'))).toLocaleString() : '从未'}`,
-          `  嵌入器：${embedder.ok ? `${embedder.backend}/${embedder.modelFile}（缓存 ${embedder.cacheEntries} 条）` : `未启用 —— ${embedder.reason}`}`,
+          `  嵌入器（建库）：${describe(embedder)}${embedder.ok ? `（缓存 ${embedder.cacheEntries} 条）` : ''}`,
+          // 建库与查询可以走不同后端（本机实测：DML 建库快 8×，但 batch=1 查询 CPU 更快）——
+          // 两档只在"向量标签一致"时才有意义，所以标签必须并排显示
+          queryEmbedder !== embedder ? `  嵌入器（查询）：${describe(queryEmbedder)}` : '',
           // 索引里的向量由哪个模型产出：与当前模型不一致时向量通道会被闸门挡住（见 lib/search.js）
           `  索引向量模型：${store.getMeta('embedding_tag') ?? '未记录（旧版本建的库）'}${embedder.ok ? `　当前模型：${embedder.modelTag}` : ''}`,
-        ]
+        ].filter(Boolean)
         let st = null
         if (args.scan !== false) {
           st = scanStatus(store, repoRoot, scanOptsOf(config))
@@ -640,7 +833,10 @@ function applyInner(ctx, rawConfig = {}) {
         }
         // 重排状态：只报"配置值"，**不在这里加载模型**（status 必须是轻量的，不该为了显示去建 531 MB 会话）
         if (RERANK_TIERS[config.rerank]) {
-          lines.push(`  重排：${config.rerank}（候选 ${RERANK_TIERS[config.rerank].candidates} 个，实测约 +${config.rerank === 'fast' ? 474 : 939} ms/查询，首次用到时才加载模型）`)
+          const where = config.rerankBackend === 'remote' ? `远端 ${config.rerankRemote.url}（连不上会回退本机）` : '本机'
+          lines.push(
+            `  重排：${config.rerank}（候选 ${RERANK_TIERS[config.rerank].candidates} 个，${where}，首次用到时才加载模型/连接）`,
+          )
         } else {
           lines.push('  重排：off')
         }
@@ -765,7 +961,9 @@ function applyInner(ctx, rawConfig = {}) {
     .join(' ')
 
   ctx.logger?.info?.(
-    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}，` +
+    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}` +
+      `${config.embedding.queryBackend ? `(查询=${config.embedding.queryBackend})` : ''}，` +
+      `rerank=${config.rerank}${config.rerank !== 'off' ? `@${config.rerankBackend}` : ''}，` +
       `chunking=${config.chunking.strategy}，deps=${expandPath(config.embedding.depsDir) ?? defaultDepsDir()}）`,
   )
   ctx.logger?.info?.(`dsh-code-index 切块策略表：${sample}（表见 lib/strategies.js，可用 config.chunking.byExt 覆盖）`)

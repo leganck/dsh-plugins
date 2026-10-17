@@ -347,6 +347,55 @@ rerank: quality   # off（默认）| fast（top-10，约 +474 ms）| quality（t
 
 要点：
 - **必须用 fp16**：int8 的量化算子在 DirectML 上支持差 → 只能 CPU（每候选 250 ms vs 47 ms）
-- 重排失败（缺模型/依赖/DML 不可用）**自动降级为不重排**，并在结果里报告原因，绝不让搜索失败
+- 重排失败（缺模型/依赖/DML 不可用）**自动降级为不重排**，并在结果里报因，绝不让搜索失败
 - code_search 输出会写明 重排：quality（20 个候选，1266 ms，gpu/model_fp16.onnx）；未生效时写明原因
 - code_index_deps 的 status 会报告重排模型是否就位
+
+---
+
+## 可选：把重排（或向量）放到另一台机器（0.7.0 起，默认关）
+
+先在另一台机器上起服务端（本项目自带）：
+
+```sh
+# 目录结构、CUDA 12 + ORT 1.19.2 的原因、compose 示例都在：
+plugins/dsh-code-index/deploy/nas-dsh-embed/README.md
+```
+
+起好后本机先量一遍，**再决定搬哪一段**（不要凭印象）：
+
+```sh
+node tools/bench-remote.mjs --url https://dsh-embed.example.com --runs 12 --batch 16
+#   自述 / RTT / 单条查询 / 批量 / 重排，各一行
+node tools/bench-build-vector.mjs --repo D:/oss/some-big-repo --n 8000 \
+     --remote https://dsh-embed.example.com --arms local-gpu,remote
+#   同一批块、同一份模型：本机与远端的"创建向量"速度对照
+```
+
+然后只把**值得搬的那一段**切过去（实测结论：只有重排值得搬）：
+
+```yml
+rerank: quality
+rerankBackend: remote
+embedding:
+  remote:
+    url: "https://dsh-embed.example.com"   # rerankRemote.url 留空即复用
+    fallbackLocal: true
+```
+
+验证切没切过去，看两处：
+
+```sh
+code_index_status        # 会打印「重排：quality（… 远端 https://…）」
+node tools/bench-remote.mjs --url https://… --skip-rerank   # 只看嵌入那半
+```
+
+远端不可达时的表现（都**不会**让检索失败）：
+
+| 情况 | 表现 |
+|---|---|
+| 服务端整个连不上 | 搜索仍返回结果，向量通道降级为纯关键词；重排回退本机（`fallbackLocal: true`） |
+| 服务端在但 `rerank_ready=false` | 直接报"远端未装重排模型"，不发无谓请求 |
+| 向量 `tag` 与本机不一致 | **不回退**，报原因（回退会把两种模型的向量混进一个索引） |
+
+
