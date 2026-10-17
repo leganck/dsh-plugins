@@ -66,6 +66,8 @@ const has = (k) => process.argv.includes(k)
 
 const DEPS = path.join(process.env.LOCALAPPDATA, 'dsh-code-index', 'embed-deps')
 const MODELS = path.join(os.homedir(), '.dsh', 'models')
+// 缓存按「语料」分开存（用索引目录名做标识）：只按模型名存会在换仓库评测时读到上一个语料的向量
+const CORPUS = path.basename(path.dirname(indexPath))
 const VECDIR = path.join(os.tmpdir(), 'dsh-embed-ab-vecs')
 
 const indexPath = arg('--index')
@@ -181,8 +183,8 @@ const l2 = (v) => {
   return o
 }
 const loadVecs = (key) => {
-  const f = path.join(VECDIR, `${key}.f32`)
-  const m = path.join(VECDIR, `${key}.json`)
+  const f = path.join(VECDIR, `${key}-${CORPUS}.f32`)
+  const m = path.join(VECDIR, `${key}-${CORPUS}.json`)
   if (!fs.existsSync(f) || !fs.existsSync(m)) return null
   const meta = JSON.parse(fs.readFileSync(m, 'utf8'))
   if (meta.n !== rows.length) return null // 语料变了 → 存盘失效
@@ -199,8 +201,8 @@ const saveVecs = (key, vecs) => {
   fs.mkdirSync(VECDIR, { recursive: true })
   const buf = Buffer.alloc(vecs.length * vecs[0].length * 4)
   vecs.forEach((v, i) => Buffer.from(v.buffer, v.byteOffset, v.byteLength).copy(buf, i * v.byteLength))
-  fs.writeFileSync(path.join(VECDIR, `${key}.f32`), buf)
-  fs.writeFileSync(path.join(VECDIR, `${key}.json`), JSON.stringify({ dim: vecs[0].length, n: vecs.length }))
+  fs.writeFileSync(path.join(VECDIR, `${key}-${CORPUS}.f32`), buf)
+  fs.writeFileSync(path.join(VECDIR, `${key}-${CORPUS}.json`), JSON.stringify({ dim: vecs[0].length, n: vecs.length, corpus: CORPUS }))
 }
 const rankAll = (docVec, qVecs) => {
   const ranks = []
