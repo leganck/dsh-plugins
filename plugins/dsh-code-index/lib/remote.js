@@ -31,6 +31,7 @@
  * 3. **超时必须短**：查询路径上的超时是 8 s 默认值 —— 它只用来兜住"那台机器睡了"，
  *    不该让用户等出体感。
  */
+import zlib from 'node:zlib'
 import { VectorCache, QUERY_PREFIX } from './embedder.js'
 
 /** 远端默认参数（与 lib 注释里的取舍保持一致） */
@@ -55,7 +56,7 @@ export class RemoteError extends Error {
 }
 
 /**
- * 把用户填的 URL 拆成四个端点。
+ * 把用户填的 URL 拆成端点。
  *
  * 允许三种写法（都指向同一批端点）：
  *   `https://host`            → /  /embed  /rerank
@@ -110,14 +111,14 @@ export class RemoteClient {
     return h
   }
 
-  async request(method, endpoint, body, { timeoutMs = this.timeoutMs } = {}) {
+  async request(method, endpoint, body, { timeoutMs = this.timeoutMs, headers = null, rawBody = null } = {}) {
     const t0 = Date.now()
     let res
     try {
       res = await fetch(endpoint, {
         method,
-        headers: this.headers(),
-        body: body === undefined ? undefined : JSON.stringify(body),
+        headers: { ...this.headers(), ...(headers ?? {}) },
+        body: rawBody ?? (body === undefined ? undefined : JSON.stringify(body)),
         signal: AbortSignal.timeout(timeoutMs),
       })
     } catch (e) {
@@ -130,11 +131,20 @@ export class RemoteClient {
     const text = await res.text()
     if (!res.ok) {
       this.stats.failures++
-      throw new RemoteError(`远端返回 HTTP ${res.status}（${endpoint}）：${text.slice(0, 200)}`, {
+      let payload = null
+      try {
+        payload = JSON.parse(text)
+      } catch {
+        /* 非 JSON 错误体：保留原文在 message 里 */
+      }
+      const err = new RemoteError(`远端返回 HTTP ${res.status}（${endpoint}）：${text.slice(0, 200)}`, {
         code: 'http-error',
         status: res.status,
         endpoint,
       })
+      // 上层要按业务错误码分支（409 冲突 / 507 超限 / 401 鉴权），所以把解析后的载荷带出来
+      err.payload = payload
+      throw err
     }
     try {
       return JSON.parse(text)
@@ -439,6 +449,133 @@ export async function createRemoteReranker({
       if (typeof payload.scores_b64 === 'string') return b64ToF32(payload.scores_b64)
       if (Array.isArray(payload.scores)) return Float32Array.from(payload.scores)
       throw new RemoteError('远端 /rerank 返回里没有 scores', { code: 'bad-response', endpoint: ep.rerank })
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 远端索引客户端（vectorStore: 'remote'）
+//
+// 与 createRemoteEmbedder 的区别：那个只借"算向量"，索引仍在本地；
+// 这个把**索引本身**放到服务端 —— 块清单、向量、kNN、（可选）重排都在那边，
+// 本地只保留 BM25。融合仍在客户端做（RRF），这样"远端挂了"只是语义召回消失，
+// 关键词检索照常可用。
+// ---------------------------------------------------------------------------
+
+const NS_ENC = (namespace) => encodeURIComponent(namespace)
+
+/**
+ * @param {object} opts
+ * @param {string} opts.url 服务端基址
+ * @param {number} [opts.timeoutMs]
+ * @param {string} [opts.apiKey]
+ */
+export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, apiKey = null, log = () => {} } = {}) {
+  const client = new RemoteClient({ url, timeoutMs, apiKey, log })
+  const base = client.endpoints.base
+  const repoUrl = (namespace, action) => `${base}/v1/repos/${NS_ENC(namespace)}${action ? `/${action}` : ''}`
+
+  /** 大载荷走 gzip（16 万块的清单 ≈ 10 MB → 压完 2–3 MB）；返回 {rawBody, headers} */
+  function encoded(body) {
+    const text = JSON.stringify(body ?? {})
+    if (text.length < 64 * 1024) return { body, headers: null, rawBody: null }
+    return { body: null, headers: { 'content-encoding': 'gzip' }, rawBody: zlib.gzipSync(Buffer.from(text, 'utf8')) }
+  }
+
+  function rethrow(e) {
+    const p = e?.payload
+    if (e?.status === 409) {
+      const err = new RemoteError(`同步冲突：服务端 revision=${p?.revision}，需要改走全量清单`, { code: 'revision-conflict', status: 409 })
+      err.revision = p?.revision ?? null
+      throw err
+    }
+    if (e?.status === 507) {
+      const err = new RemoteError(`服务端容量不足：${p?.detail ?? '存储上界'}`, { code: 'quota', status: 507 })
+      err.payload = p
+      throw err
+    }
+    if (e?.status === 401) {
+      throw new RemoteError('服务端拒绝：鉴权失败（检查 remote.apiKey）', { code: 'unauthorized', status: 401 })
+    }
+    if (e?.status === 400) {
+      const err = new RemoteError(`服务端拒绝了请求：${p?.detail ?? p?.error ?? '参数错误'}`, { code: 'rejected', status: 400 })
+      err.payload = p
+      throw err
+    }
+    throw e
+  }
+
+  return {
+    url: base,
+    client,
+    /** 命名空间清单差分（payload 见 server.py 的 /sync 文档） */
+    async sync(namespace, payload) {
+      const enc = encoded(payload)
+      try {
+        return await client.request('POST', repoUrl(namespace, 'sync'), enc.body, {
+          headers: enc.headers,
+          rawBody: enc.rawBody,
+          timeoutMs: Math.max(timeoutMs, 15000),
+        })
+      } catch (e) {
+        rethrow(e)
+      }
+    },
+    /** 上传缺失正文（调用方按批切好） */
+    async uploadChunks(namespace, bodies) {
+      const enc = encoded({ bodies })
+      try {
+        return await client.request('POST', repoUrl(namespace, 'chunks'), enc.body, {
+          headers: enc.headers,
+          rawBody: enc.rawBody,
+          timeoutMs: Math.max(timeoutMs, 20000),
+        })
+      } catch (e) {
+        rethrow(e)
+      }
+    },
+    /** 触发后台嵌入（服务端会自动限流；rate 可选地覆盖） */
+    async kickEmbed(namespace, { rate } = {}) {
+      try {
+        return await client.request('POST', repoUrl(namespace, 'embed'), rate === undefined ? {} : { rate })
+      } catch (e) {
+        rethrow(e)
+      }
+    },
+    async status(namespace) {
+      try {
+        return await client.request('GET', repoUrl(namespace, 'status'), undefined, { timeoutMs: Math.max(timeoutMs, 15000) })
+      } catch (e) {
+        rethrow(e)
+      }
+    },
+    /** 服务端 kNN（可选在同一请求里做重排） */
+    async search(namespace, query, { k = 10, tag = null, rerankCandidates = 0 } = {}) {
+      try {
+        return await client.request(
+          'POST',
+          `${base}/v1/search`,
+          { namespace, query, k, tag, rerank: rerankCandidates ? { candidates: rerankCandidates } : undefined },
+          { timeoutMs: Math.max(timeoutMs, 15000) },
+        )
+      } catch (e) {
+        rethrow(e)
+      }
+    },
+    async pause() {
+      return client.request('POST', `${base}/v1/admin/pause`, {})
+    },
+    async resume() {
+      return client.request('POST', `${base}/v1/admin/resume`, {})
+    },
+    async setRate(rate) {
+      return client.request('POST', `${base}/v1/admin/rate`, { rate })
+    },
+    async adopt(toLineage, fromLineage, hashes) {
+      return client.request('POST', `${base}/v1/lineages/${NS_ENC(toLineage)}/adopt`, { from: fromLineage, hashes })
+    },
+    async health() {
+      return client.request('GET', `${base}/`, undefined, { timeoutMs: Math.min(timeoutMs, 8000) })
     },
   }
 }

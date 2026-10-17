@@ -190,3 +190,125 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
     rerank: rerankInfo,
   }
 }
+
+// ---------------------------------------------------------------------------
+// 远端索引模式：本地 BM25 + 远端 kNN（可选远端重排）→ 客户端 RRF 融合
+//
+// 为什么融合仍在客户端：远端只是"第二路召回"。它挂了就退化成纯关键词，
+// 不需要在服务端实现 BM25、也不需要把查询语义外包出去。
+// 身份用**内容哈希**（服务端只回 hash + 坐标），而不是本地 chunk id——
+// 这样两边对"同一个块"的定义完全一致，也不会因为删建索引导致 id 漂移。
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} store 本地索引（提供 BM25 与正文）
+ * @param {string} question
+ * @param {object} o
+ * @param {number} [o.topK]
+ * @param {Array<{hash:string,score:number,rerankScore?:number}>} o.remoteHits 远端召回（已按相关性排好）
+ * @param {object} [o.remoteMeta] 远端自述：{ms, coverage, rerank}
+ * @param {number} [o.remoteCandidates]
+ */
+export async function searchFusedRemote(store, question, { topK = 10, remoteHits = [], remoteMeta = null, reranker = null, rerankCandidates = 0 } = {}) {
+  const terms = extractTerms(question)
+  const match = buildMatch(terms)
+  let fts = []
+  if (match) {
+    try {
+      fts = store.ftsSearch(match, FTS_CANDIDATES)
+    } catch {
+      for (const t of terms.slice(0, 3)) {
+        try {
+          const m = buildMatch([t])
+          if (m) {
+            fts = store.ftsSearch(m, FTS_CANDIDATES)
+            if (fts.length) break
+          }
+        } catch {
+          /* 单关键词语法错误忽略 */
+        }
+      }
+    }
+  }
+
+  const acc = new Map()
+  fts.forEach((r, i) => {
+    acc.set(r.hash, { hash: r.hash, ftsRank: i + 1, vecRank: null, score: 1 / (RRF_K + i + 1) })
+  })
+  remoteHits.forEach((h, i) => {
+    const e = acc.get(h.hash) ?? { hash: h.hash, ftsRank: null, vecRank: null, score: 0 }
+    e.vecRank = i + 1
+    e.score += 1 / (RRF_K + i + 1)
+    if (h.rerankScore !== undefined) e.rerankScore = h.rerankScore
+    acc.set(h.hash, e)
+  })
+
+  let ranked = [...acc.values()]
+  ranked.sort((a, b) => b.score - a.score)
+  // 远端做过重排：带分的项按重排分排序，未参与重排的（纯 BM25 命中）排在后面
+  const scored = ranked.filter((e) => e.rerankScore !== undefined)
+  if (scored.length) {
+    scored.sort((a, b) => b.rerankScore - a.rerankScore)
+    ranked = [...scored, ...ranked.filter((e) => e.rerankScore === undefined)]
+  }
+
+  const pool = ranked.slice(0, Math.max(topK, 40, rerankCandidates || 0))
+  const byHash = store.chunksByHashes(pool.map((e) => e.hash))
+
+  // 可选：**本机**重排（rerankBackend: local）。远端做过重排时不会走到这里。
+  let rerankInfo = remoteMeta?.rerank ?? null
+  if (reranker?.ok && rerankCandidates > 0 && pool.length > 1 && !pool.some((e) => e.rerankScore !== undefined)) {
+    const t0 = Date.now()
+    try {
+      const bodies = pool.map((e) => byHash.get(e.hash)?.body ?? '')
+      const scores = await reranker.score(question, bodies)
+      rerankInfo = { applied: true, candidates: pool.length, ms: Date.now() - t0, backend: reranker.backend, modelFile: reranker.modelFile, where: 'local' }
+      const order = pool.map((e, i) => [e, scores[i]]).sort((a, b) => b[1] - a[1])
+      pool.splice(0, pool.length, ...order.map(([e]) => e))
+      order.forEach(([e, s]) => {
+        e.rerankScore = Number(s.toFixed(4))
+      })
+    } catch (e) {
+      rerankInfo = { applied: false, candidates: pool.length, reason: String(e?.message ?? e).slice(0, 140) }
+    }
+  }
+  const results = []
+  let stale = 0
+  for (const e of pool) {
+    const c = byHash.get(e.hash)
+    if (!c) {
+      stale++
+      continue
+    }
+    const r = {
+      rank: results.length + 1,
+      path: c.path,
+      startLine: c.startLine,
+      endLine: c.endLine,
+      score: Number(e.score.toFixed(6)),
+      ftsRank: e.ftsRank,
+      vecRank: e.vecRank,
+      snippet: snippet(c.body, terms),
+    }
+    if (e.rerankScore !== undefined) r.rerankScore = Number(e.rerankScore.toFixed(4))
+    results.push(r)
+    if (results.length >= topK) break
+  }
+
+  const notes = []
+  if (!remoteHits.length) notes.push('远端向量通道没有返回结果（可能服务端还没嵌入完该仓库）')
+  if (stale) notes.push(`${stale} 条远端命中的块在本地已不存在（本地索引比远端新，跑一次 code_index 可对齐）`)
+  if (remoteMeta?.coverage !== undefined && remoteMeta.coverage < 1) {
+    notes.push(`远端向量覆盖 ${(remoteMeta.coverage * 100).toFixed(0)}%（服务端后台仍在嵌入）`)
+  }
+
+  return {
+    mode: remoteHits.length && fts.length ? 'hybrid-remote' : remoteHits.length ? 'vector-remote' : 'fts',
+    terms,
+    note: notes.join('；'),
+    results,
+    rerank: rerankInfo,
+    remote: remoteMeta ?? null,
+    staleHits: stale,
+  }
+}

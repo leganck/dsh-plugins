@@ -5,7 +5,7 @@
 | 插件 | 版本 | 作用 | 依赖 |
 |---|---|---|---|
 | [`plugins/dsh-memory-archive`](plugins/dsh-memory-archive/) | 1.1.1 | **记忆**：每次压缩（compaction）把被折叠的**逐字**轮次写成 `segment_NNN.md`，并维护 `INDEX.md`，同时向会话注入指针，让早期工具输出在长会话里可被重新检索 | 无（纯 node 内置模块） |
-| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | 0.7.0 | **索引加速**：本地代码库混合检索（SQLite FTS5/BM25 + 本地 ONNX 向量 → RRF 融合），四个工具 `code_index` / `code_search` / `code_index_status` / `code_index_deps`；算力位置可配（本机 GPU/CPU、或远端 `/embed`+`/rerank`） | `onnxruntime-node`、`@huggingface/transformers`（可选，按需装；缺失则退化为纯关键词） |
+| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | 0.8.0 | **索引加速**：本地代码库混合检索（SQLite FTS5/BM25 + ONNX 向量 → RRF 融合），四个工具 `code_index` / `code_search` / `code_index_status` / `code_index_deps`；算力与索引位置可配（本机 GPU/CPU，或远端 [`server/`](server/code-index-service/)：`/v1` 索引层 + `/embed` + `/rerank`） | `onnxruntime-node`、`@huggingface/transformers`（可选，按需装；缺失则退化为纯关键词） |
 
 ## 为什么这两个放一起
 
@@ -115,13 +115,20 @@ plugins/
     tools/                      reindex / verify-segments / verify-evicted / backfill-session
     test.mjs                    自测（106 项）
   dsh-code-index/
-    index.js                    插件入口 + 三个工具
-    lib/                        store / chunker / scan / query / search / indexer / embedder
+    index.js                    插件入口 + 四个工具
+    lib/                        store / chunker / scan / query / search / indexer / embedder / remote / repo
+    tools/                      模型下载、评测、基准、远端同步（bench-* / remote-index-sync）
     release/                    随 tag 分发的静态产物（.tgz + SHA256SUMS.txt）
     verify-install.mjs          装后验证：从**安装后的包路径**加载 + roots 白名单断言 + 依赖解析
-    test.mjs                    核心自测（35 项；带模型 38 项）
-    test-plugin.mjs             插件接口自测（46 项；带模型 45 项）
+    test.mjs                    核心自测（147 项；带模型 150 项）
+    test-plugin.mjs             插件接口自测（65 项）
+    test-remote.mjs             远端客户端与配置校验（45 项，不需要模型/网络）
+server/
+  code-index-service/           远端索引服务（Python）：/v1 索引层 + /embed + /rerank
+    selftest.py                 服务端自测（41 项，FAKE_EMBED 模式不需要模型）
+    start.sh / compose.yaml     部署（CUDA 12 + onnxruntime 1.19.2，兼容 Pascal GPU）
 ```
+
 
 ## 自测
 

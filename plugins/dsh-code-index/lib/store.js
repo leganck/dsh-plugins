@@ -187,13 +187,57 @@ export class Store {
   ftsSearch(query, limit) {
     return this.db.prepare(
       `select f.rowid as id, c.path as path, c.start_line as start_line, c.end_line as end_line,
-              c.body as body, bm25(chunks_fts) as score
+              c.hash as hash, c.body as body, bm25(chunks_fts) as score
        from chunks_fts f join chunks c on c.id = f.rowid
        where chunks_fts match ? order by score limit ?`,
     ).all(query, limit).map((r) => ({
       id: Number(r.id), path: r.path, startLine: Number(r.start_line), endLine: Number(r.end_line),
-      body: r.body, score: r.score,
+      hash: r.hash, body: r.body, score: r.score,
     }))
+  }
+
+  /** 按内容哈希取块（远端命中只回 hash + 坐标，正文以本地为准） */
+  chunksByHashes(hashes) {
+    if (!hashes.length) return new Map()
+    const out = new Map()
+    for (let i = 0; i < hashes.length; i += 400) {
+      const part = hashes.slice(i, i + 400)
+      const ph = part.map(() => '?').join(',')
+      for (const r of this.db.prepare(
+        `select id, path, start_line, end_line, hash, body from chunks where hash in (${ph})`,
+      ).all(...part)) {
+        out.set(r.hash, {
+          id: Number(r.id), path: r.path, startLine: Number(r.start_line), endLine: Number(r.end_line),
+          hash: r.hash, body: r.body,
+        })
+      }
+    }
+    return out
+  }
+
+  /** 整份清单（供远端全量同步用）：按文件分组，(path, sha, [{hash,start,end}]) */
+  manifest() {
+    const files = this.db.prepare('select path, sha from files').all()
+    const byPath = new Map(files.map((f) => [f.path, { path: f.path, hash: f.sha, chunks: [] }]))
+    for (const r of this.db.prepare('select path, start_line, end_line, hash from chunks order by path, start_line').all()) {
+      const f = byPath.get(r.path)
+      if (f) f.chunks.push({ hash: r.hash, start: Number(r.start_line), end: Number(r.end_line) })
+    }
+    return [...byPath.values()]
+  }
+
+  /** 正文（按 hash）——远端要嵌的块只在本地有一份正文 */
+  bodiesByHashes(hashes) {
+    if (!hashes.length) return new Map()
+    const out = new Map()
+    for (let i = 0; i < hashes.length; i += 400) {
+      const part = hashes.slice(i, i + 400)
+      const ph = part.map(() => '?').join(',')
+      for (const r of this.db.prepare(`select hash, body from chunks where hash in (${ph})`).all(...part)) {
+        out.set(r.hash, r.body)
+      }
+    }
+    return out
   }
 
   // ---- 统计 ----
