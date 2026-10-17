@@ -95,7 +95,7 @@ const ARMS = [
     label: 'bge-base-zh-v1.5（中文同族大一档）',
     kind: 'raw',
     dir: path.join(MODELS, 'bge-base-zh-v1.5'),
-    // 注 1：该模型 **fp16 在 DirectML 上会崩**（DML GPU readback failed, DXGI_ERROR_DEVICE_REMOVED），
+    // 注 1：该模型的 fp16 曾**一次**在 DirectML 上报 DML GPU readback failed（瞬时 TDR，复测正常），
     //       而同样代码路径下 bge-small 的 fp16 正常 → 本臂用 CPU
     // 注 2：int8 版实测**质量崩坏**（名次 111~226）→ 怀疑该 int8 导出有问题，故用 fp16/CPU
     file: 'model_fp16.onnx',

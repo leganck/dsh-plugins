@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional local ONNX embeddings (DirectML) fused with RRF, exposed as code_index / code_search / code_index_status / code_index_deps. Embedding deps are installed on demand, not at plugin install time.",
@@ -28,7 +28,8 @@
     "INSTALL.md",
     "verify-install.mjs",
     "test.mjs",
-    "test-plugin.mjs"
+    "test-plugin.mjs",
+    "model"
   ],
   "dsh": {
     "bundle": {
@@ -48,6 +49,10 @@
     }
   },
   "scripts": {
-    "test": "node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo"
+    "test": "node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo",
+    "pack:stage": "node tools/pack-model.mjs stage",
+    "pack:clean": "node tools/pack-model.mjs clean",
+    "prepack": "node tools/pack-model.mjs stage",
+    "postpack": "node tools/pack-model.mjs clean"
   }
 }

@@ -158,7 +158,8 @@ node tools\fetch-model.mjs --model bge-reranker-base        # 交叉编码器（
 
 | 模型 | 查询前缀 | 文档前缀 | pooling | 推荐执行后端 |
 |---|---|---|---|---|
-| `bge-small-zh-v1.5`（默认） | `为这个句子生成表示以用于检索相关文章：` | 无 | **CLS** | DirectML / fp16 |
+| `bge-small-zh-v1.5` | `为这个句子生成表示以用于检索相关文章：` | 无 | **CLS** | DirectML / fp16 |
+| **`bge-base-zh-v1.5`（默认，随包提供）** | 同上 | 无 | **CLS** | int8/CPU（fp16 可选）|
 | `qwen3-embedding-0.6b` | `Instruct: {任务}\nQuery:{问题}` | 无 | **last_token** | CPU / int8（量化算子在 DML 上支持差） |
 | `bge-m3` | 无 | 无 | **CLS** | CPU / int8 |
 
@@ -277,7 +278,7 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 | `defaultTopK` | 10 | `code_search` 默认返回条数 |
 | `maxEmbedPerRun` | **0** | 单次最多补算多少块向量。**0 = 建库时不补算**（只做 FTS5，秒级）；>0 会在每次 `code_index` 时自动跑重负载。要向量建议用工具参数 `max_embed` 按需分批传，而不是把这个配置调大 |
 | `embedding.backend` | `auto` | `auto` \| `cpu` \| `gpu` \| `off` |
-| `embedding.modelDir` | `~/.dsh/models/bge-small-zh-v1.5` | 模型目录 |
+| `embedding.modelDir` | 随包提供的模型（`<插件目录>/model`，即 bge-base-zh-v1.5 int8） | 模型目录 |
 | `embedding.threads` | 6 | CPU 线程数 |
 | `embedding.batch` | `null` | 批量大小；`null` = 自动（DML 甜点 8–16） |
 | `embedding.cachePath` | `~/.dsh/index/vectors.db` | 内容寻址向量缓存，与 Python 实验版共用 |
@@ -297,6 +298,26 @@ node test-plugin.mjs --repo D:\Code\your-repo   # 契约与接口：45 项
 
 删掉补丁层里那段 `- insert:`（文件中有注释标明起止）→ 重启。索引与日志在
 `~/.dsh/code-index/`，可一并删除。
+
+## 默认模型：bge-base-zh-v1.5（随包提供）
+
+从 0.6.0 起默认嵌入模型是 **bge-base-zh-v1.5**（103 题实测 hit@3 **43% → 54%**，查询 22 → 34 ms）。
+
+- **随包提供 int8 版（97.7 MB）**，装在 `<插件目录>/model`，**装上即用**，不必另下
+- 只放 int8 的理由：体积小、CPU 一定可用；fp16（194 MB）可另下（`--quant fp16`，DirectML 更快）
+- 构建期怎么打包：`npm pack` 的 `prepack` 会把模型拷进包、`postpack` 再删掉 → **仓库里不留二进制**（`.gitignore` 忽略 `model/`）
+
+### ⚠️ 升级提示（很重要）
+
+**换模型 = 向量空间变了** → 已有索引里的向量全部作废，升级后**第一次 `code_index` 会全量重嵌**：
+
+| 规模 | 重嵌耗时（CPU int8 约 456 ms/块）|
+|---|---|
+| 一个模块 676 块 | ≈ **5 分钟** |
+| 大仓库 4,501 块 | ≈ **34 分钟** |
+| 全部历史 6.7 万块 | ≈ **8.5 小时**（别一次全做）|
+
+不想付这个成本的话：把 `embedding.modelDir` 指回 `~/.dsh/models/bge-small-zh-v1.5` 即可继续用旧模型/旧向量。
 
 ## 可选：开启交叉编码器重排（默认关）
 
