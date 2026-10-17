@@ -36,7 +36,22 @@ import { DatabaseSync } from 'node:sqlite'
 const DEPS = path.join(process.env.LOCALAPPDATA, 'dsh-code-index', 'embed-deps')
 const MODELS = path.join(os.homedir(), '.dsh', 'models')
 const INSTALLED = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const SRC_INDEX = path.join(os.homedir(), '.dsh', 'code-index', 'billing-service-b2006596', 'index.db')
+// `--index <index.db>`：**必须支持**。早前这里写死了一个本机索引路径，`--index` 被静默忽略，
+// 于是"拿 A 语料的题库去查 B 语料的索引"会直接得到全 0 且没有任何提示（真踩过：换了新题库后 30 题全 0/30，
+// 排查半天才发现根本没打开指定索引）。默认值留空 → 报错要求显式传，避免再次静默跑错语料。
+const SRC_INDEX = (() => {
+  const i = process.argv.indexOf('--index')
+  if (i >= 0 && process.argv[i + 1]) return path.resolve(process.argv[i + 1])
+  return null
+})()
+if (!SRC_INDEX) {
+  console.error('用法: node tools/config-matrix.mjs --index <index.db> [--cases <cases.json>] [--topk 20]')
+  console.error('必须显式指定 --index：题库与索引必须来自同一语料，否则结果无意义（且会静默为 0）。')
+  process.exit(2)
+}
+// 缓存按「语料」分开存：早前只按模型名存，换一个仓库做评测时会读到上一个语料的向量，
+// 表现为尺寸不符（或更糟：尺寸恰好相同、结果全错）。用索引目录名做语料标识。
+const CORPUS = path.basename(path.dirname(SRC_INDEX))
 const VECDIR = path.join(os.tmpdir(), 'dsh-embed-ab-vecs')
 const CASES_FILE = (() => { const i = process.argv.indexOf('--cases'); return i >= 0 ? process.argv[i + 1] : path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'cases', 'oss-mall-30.json') })()
 const CASES_ALL = JSON.parse(fs.readFileSync(CASES_FILE, 'utf8'))
@@ -73,7 +88,7 @@ const ARMS = [
 function prepIndex(arm) {
   const dbPath = path.join(WORK, `${arm.key}.db`)
   fs.copyFileSync(SRC_INDEX, dbPath)
-  const buf = fs.readFileSync(path.join(VECDIR, `${arm.vec}.f32`))
+  const buf = fs.readFileSync(path.join(VECDIR, `${arm.vec}-${CORPUS}.f32`))
   const db = new DatabaseSync(dbPath)
   const ids = db.prepare('select id from chunks order by path, start_line').all().map((r) => r.id)
   const n = ids.length
