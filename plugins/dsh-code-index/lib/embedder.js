@@ -18,7 +18,19 @@ import crypto from 'node:crypto'
 import { sqliteDriver } from './store.js'
 import { makeResolvers, loadFrom, depsStatus, defaultDepsDir } from './deps.js'
 
-export const DIM = 512
+/**
+ * 默认嵌入模型（**bge-base-zh-v1.5**，103 题实测 hit@3 比 bge-small 高 11 个百分点：43% → 54%）。
+ *
+ * 为什么默认选 base 而不是 small：
+ *  - 排序明显更准（@1 27%→35%、@3 43%→54%、@10 71%→79%），查询只慢 12 ms（22 → 34 ms）
+ *  - 代价是索引慢约 7 倍（CPU 456 ms/块）→ 一次性成本，可用"打包模型 + 只对需要的仓库建索引"控制
+ * 注意：它的 fp16 曾**一次**在 DirectML 上报 `DML GPU readback failed 0x887A0006`（DXGI_ERROR_DEVICE_REMOVED），
+ * 复测正常（13 ms/查询，快于 CPU 的 17 ms）→ 判断是**瞬时 TDR**（当时机器上并发跑着多个 GPU 任务），
+ * 所以随包提供的只有 int8；若用户自行换成 fp16/DML，下面的**运行期降级**会兜住。
+ */
+export const DEFAULT_MODEL = 'bge-base-zh-v1.5'
+/** 已知模型的向量维度（仅用于诊断；真正的维度在首次推理后从输出张量得到） */
+export const KNOWN_DIMS = { 'bge-small-zh-v1.5': 512, 'bge-base-zh-v1.5': 768, 'bge-large-zh-v1.5': 1024 }
 export const MAX_TOKENS = 512
 export const QUERY_PREFIX = '为这个句子生成表示以用于检索相关文章：'
 const SEP_ID = 102n
@@ -111,9 +123,18 @@ export async function createEmbedder({
   cachePath,
   depsDir,
   depsFallbackDirs = [],
+  pluginDir,
   log = () => {},
 } = {}) {
-  const dir = modelDir ?? path.join(os.homedir(), '.dsh', 'models', 'bge-small-zh-v1.5')
+  // 模型查找顺序：显式配置 → **随包提供的** `<插件目录>/model`（打包形态，装上就能用）
+  // → 用户目录 `~/.dsh/models/<默认模型>`（fetch-model.mjs 下载的位置）
+  const bundledDir = pluginDir ? path.join(pluginDir, 'model') : null
+  const dir =
+    modelDir ??
+    (bundledDir && fs.existsSync(path.join(bundledDir, 'tokenizer.json'))
+      ? bundledDir
+      : path.join(os.homedir(), '.dsh', 'models', DEFAULT_MODEL))
+  const modelName = path.basename(dir) === 'model' ? DEFAULT_MODEL : path.basename(dir)
 
   // 两个前置条件**必须一起检查、一起报告**。
   // 早前的实现先 return"缺分词器"，于是在**全新机器**上（既没模型也没依赖）只报模型问题——
@@ -155,7 +176,7 @@ export async function createEmbedder({
     }
     return {
       ok: false,
-      reason: `嵌入不可用：① 缺模型文件 ${tokenizerPath}（把 bge-small-zh-v1.5 的 onnx 版放这里，或改配置 modelDir）；② ${depsProblem}`,
+      reason: `嵌入不可用：① 缺模型文件 ${tokenizerPath}（跑 tools/fetch-model.mjs --model ${DEFAULT_MODEL}，或改配置 modelDir）；② ${depsProblem}`,
       deps: st,
       cause: String(e?.message ?? e).slice(0, 160),
     }
@@ -163,17 +184,24 @@ export async function createEmbedder({
   if (!hasTokenizer) {
     return {
       ok: false,
-      reason: `嵌入不可用：缺模型文件 ${tokenizerPath}（把 bge-small-zh-v1.5 的 onnx 版放这里，或改配置 modelDir）；依赖已就绪`,
+      reason: `嵌入不可用：缺模型文件 ${tokenizerPath}（跑 tools/fetch-model.mjs --model ${DEFAULT_MODEL}，或改配置 modelDir）；依赖已就绪`,
     }
   }
 
   let resolved = backend
   const hasFp16 = fs.existsSync(path.join(dir, 'model_fp16.onnx'))
+  const hasInt8 = fs.existsSync(path.join(dir, 'model_int8.onnx'))
   if (resolved === 'auto') resolved = hasFp16 && process.platform === 'win32' ? 'gpu' : 'cpu'
   if (resolved === 'gpu' && !hasFp16) resolved = 'cpu'
-  const modelFile = resolved === 'gpu' ? 'model_fp16.onnx' : 'model_int8.onnx'
+  let modelFile = resolved === 'gpu' ? 'model_fp16.onnx' : 'model_int8.onnx'
   if (!fs.existsSync(path.join(dir, modelFile))) {
-    return { ok: false, reason: `未找到模型文件 ${modelFile}（目录 ${dir}）` }
+    // gpu 档要 fp16 但只有 int8 时也别直接失败 —— 退到 int8/CPU，并在原因里说清
+    if (hasInt8) {
+      modelFile = 'model_int8.onnx'
+      resolved = 'cpu'
+    } else {
+      return { ok: false, reason: `未找到模型文件 ${modelFile}（目录 ${dir}）` }
+    }
   }
 
   env.allowRemoteModels = false
@@ -183,17 +211,16 @@ export async function createEmbedder({
   const base = { graphOptimizationLevel: 'all', intraOpNumThreads: threads, interOpNumThreads: 1 }
   let session
   let usedBackend = resolved
-  const attempts =
-    resolved === 'gpu'
-      ? [[{ name: 'dml', deviceId }, 'cpu'], ['dml', 'cpu'], ['cpu']]
-      : [['cpu']]
+  const openSession = async (eps) => {
+    session = await ort.InferenceSession.create(path.join(dir, modelFile), { ...base, executionProviders: eps })
+    const first = Array.isArray(eps) ? eps[0] : eps
+    usedBackend = first === 'cpu' || (first && typeof first === 'object' && first.name === 'cpu') ? 'cpu' : 'gpu'
+  }
+  const attempts = resolved === 'gpu' ? [[{ name: 'dml', deviceId }, 'cpu'], ['dml', 'cpu'], ['cpu']] : [['cpu']]
   let lastErr
   for (const eps of attempts) {
     try {
-      session = await ort.InferenceSession.create(path.join(dir, modelFile), { ...base, executionProviders: eps })
-      // eps[0] 可能是 'cpu' 字符串，也可能是 { name: 'dml', ... } 对象
-      const first = Array.isArray(eps) ? eps[0] : eps
-      usedBackend = first === 'cpu' || (first && typeof first === 'object' && first.name === 'cpu') ? 'cpu' : 'gpu'
+      await openSession(eps)
       break
     } catch (e) {
       lastErr = e
@@ -206,6 +233,38 @@ export async function createEmbedder({
     tokenizer = await AutoTokenizer.from_pretrained(path.basename(dir), { local_files_only: true })
   } catch (e) {
     return { ok: false, reason: `加载分词器失败（可能需要 tokenizer_config.json）：${String(e.message).slice(0, 120)}` }
+  }
+
+  /**
+   * **建会话成功 ≠ 能推理。** 实测 bge-base 的 fp16 在 DirectML 上：会话建得出来，
+   * 但第一次 `session.run` 可能崩（曾见 `DML GPU readback failed 0x887A0006` = DXGI_ERROR_DEVICE_REMOVED，属瞬时 TDR）。
+   * 只在"建会话失败"时回退兜不住这种情况 —— 表现会是**每条查询的向量通道都失败、静默退化成纯关键词**
+   * （质量腰斩却只有一个 note）。所以这里用一次极小推理（8 token）在**使用前**探测，
+   * 崩了就重建到 CPU，模型标签也在**任何嵌入发生之前**就确定下来（避免同一索引里混两种精度）。
+   */
+  const probe = async () => {
+    // 探测必须**接近真实负载**：8 token 的探测太弱 —— 实测 bge-base fp16 在 DML 上
+    // 小块能跑、真实长度的批量才崩（`DML GPU readback failed`）。这里用约 256 token × 4 条。
+    const filler = 'public void handleRefundLimitCheck(Map<String, Object> params) { log.info("退款超限校验 {}", params); } '
+    const enc = tokenizer([filler.repeat(4), filler.repeat(4), filler.repeat(3), filler.repeat(3)], { padding: true, truncation: true, max_length: 256 })
+    const feeds = {}
+    for (const name of session.inputNames) {
+      if (enc[name]) feeds[name] = new ort.Tensor('int64', BigInt64Array.from(Array.from(enc[name].data, (x) => BigInt(x))), enc[name].dims)
+    }
+    await session.run(feeds)
+  }
+  try {
+    await probe()
+  } catch (e) {
+    if (usedBackend !== 'gpu') return { ok: false, reason: `模型推理探测失败（CPU）：${String(e?.message ?? e).slice(0, 140)}` }
+    log(`GPU 探测推理失败（${String(e?.message ?? e).slice(0, 100)}），改用 CPU 重建会话`)
+    modelFile = hasInt8 ? 'model_int8.onnx' : modelFile
+    try {
+      await openSession(['cpu'])
+      await probe()
+    } catch (e2) {
+      return { ok: false, reason: `GPU 与 CPU 均无法推理：${String(e2?.message ?? e2).slice(0, 140)}` }
+    }
   }
 
   let cache = null
@@ -229,8 +288,8 @@ export async function createEmbedder({
      * 内容哈希让"同 tag ⇔ 同一份模型（含分词器）"，是跨机器一致性的唯一可靠依据。
      * （不能用 mtime/size 代替：文件在机器之间复制时 mtime 必然变。）
      */
-    modelTag: `bge-small-zh-v1.5-${modelFingerprint(dir, modelFile)}-${usedBackend === 'gpu' ? 'fp16' : 'int8'}`,
-    dim: DIM,
+    modelTag: `${modelName}-${modelFingerprint(dir, modelFile)}-${usedBackend === 'gpu' ? 'fp16' : 'int8'}`,
+    dim: KNOWN_DIMS[modelName] ?? null,
     batch: batch ?? (usedBackend === 'gpu' ? 12 : 48),
     cache,
     cacheEntries: cache ? cache.count() : 0,

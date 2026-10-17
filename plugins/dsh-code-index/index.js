@@ -29,7 +29,7 @@ import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js
 import { normalizeRelPrefix } from './lib/scan.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-17.12'
+export const BUILD = '2026-10-17.13'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -421,6 +421,8 @@ function applyInner(ctx, rawConfig = {}) {
         // 依赖按需安装在受管目录；插件自身目录作为兜底（兼容把依赖装在包内的旧形态）
         depsDir: expandPath(config.embedding.depsDir) ?? undefined,
         depsFallbackDirs: [PLUGIN_DIR],
+        // 让嵌入器优先用**随包提供的模型**（<插件目录>/model）→ 装上即用，不必另下 194 MB
+        pluginDir: PLUGIN_DIR,
         log: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
       })
     }
