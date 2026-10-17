@@ -124,6 +124,9 @@ class IndexStore:
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.lock = threading.RLock()
+        # 计数/体积缓存：coverage 的 JOIN 计数在 16 万块上要 400 ms，而它在**每次查询**里都要用。
+        # 只在会改变数据的操作（sync/put_chunks/put_vectors/gc/adopt）后失效。
+        self._cache = {}
         self.db = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.execute("pragma journal_mode = wal")
@@ -174,6 +177,7 @@ class IndexStore:
         with self.lock:
             self.db.execute("update repos set tag = ?, updated_at = ? where namespace = ?", (tag, int(time.time()), namespace))
             self.db.commit()
+            self._invalidate()  # set_tag 改了数据 → 计数/体积缓存失效
 
     # ---------------------------------------------------------------- 同步
     def sync(self, namespace, payload):
@@ -261,6 +265,7 @@ class IndexStore:
             )
             self.db.execute("update lineages set last_seen = ? where id = ?", (now, lineage))
             self.db.commit()
+            self._invalidate()  # sync 改了数据 → 计数/体积缓存失效
             rev = int(self.db.execute("select revision from repos where namespace = ?", (namespace,)).fetchone()["revision"])
             missing = self._missing(namespace, lineage, tag)
 
@@ -309,6 +314,7 @@ class IndexStore:
                 )
                 accepted += 1
             self.db.commit()
+            self._invalidate()  # put_chunks 改了数据 → 计数/体积缓存失效
         return {"accepted": accepted, "deduped": deduped}
 
     def pending(self, namespace, tag, limit=64, order="spread"):
@@ -338,6 +344,7 @@ class IndexStore:
                     (lineage, tag, h, int(v.shape[0]), v.tobytes(), now),
                 )
             self.db.commit()
+            self._invalidate()  # put_vectors 改了数据 → 计数/体积缓存失效
 
     def missing_bodies(self, namespace, tag, limit=64, order="spread"):
         return self.pending(namespace, tag, limit, order)
@@ -389,24 +396,47 @@ class IndexStore:
         with self.lock:
             return int(self.db.execute(sql, args).fetchone()["n"])
 
+    def _invalidate(self):
+        """任何会改变 chunks/blobs/vectors 的操作后调用（sync/put_chunks/put_vectors/gc/adopt）。"""
+        self._cache.clear()
+
     def counts(self, namespace):
+        """{chunks, vectors, coverage}。
+
+        **必须缓存**：`vectors` 那个 JOIN 在 16 万块上实测 401 ms，而 coverage 是
+        `/v1/search` 每次都要返回的字段 —— 不缓存就等于每次查询白付 0.4 秒。
+        缓存只在写操作后失效，稳态下是 O(1)。
+        """
+        hit = self._cache.get(("counts", namespace))
+        if hit is not None:
+            return dict(hit)
         with self.lock:
             chunks = self.db.execute("select count(*) as n from chunks where namespace = ?", (namespace,)).fetchone()["n"]
             repo = self.db.execute("select lineage_id, tag from repos where namespace = ?", (namespace,)).fetchone()
             if not repo:
-                return {"chunks": 0, "vectors": 0, "coverage": 0.0}
+                out = {"chunks": 0, "vectors": 0, "coverage": 0.0}
+                self._cache[("counts", namespace)] = out
+                return dict(out)
             vectors = self.db.execute(
                 "select count(*) as n from chunks c join vectors v"
                 " on v.lineage_id = c.lineage_id and v.tag = ? and v.hash = c.hash where c.namespace = ?",
                 (repo["tag"] or "", namespace),
             ).fetchone()["n"]
-        return {"chunks": int(chunks), "vectors": int(vectors), "coverage": round(vectors / chunks, 4) if chunks else 0.0}
+        out = {"chunks": int(chunks), "vectors": int(vectors), "coverage": round(vectors / chunks, 4) if chunks else 0.0}
+        self._cache[("counts", namespace)] = out
+        return dict(out)
 
     def lineage_bytes(self, lineage):
+        """正文/向量占用。sum(length(...)) 在 16 万块上实测 0.5 s，同样必须缓存。"""
+        hit = self._cache.get(("bytes", lineage))
+        if hit is not None:
+            return dict(hit)
         with self.lock:
             b = self.db.execute("select coalesce(sum(length(body)),0) as n from blobs where lineage_id = ?", (lineage,)).fetchone()["n"]
             v = self.db.execute("select coalesce(sum(length(v)),0) as n from vectors where lineage_id = ?", (lineage,)).fetchone()["n"]
-        return {"bodyBytes": int(b), "vectorBytes": int(v), "totalBytes": int(b) + int(v)}
+        out = {"bodyBytes": int(b), "vectorBytes": int(v), "totalBytes": int(b) + int(v)}
+        self._cache[("bytes", lineage)] = out
+        return dict(out)
 
     def vector_count(self, lineage, tag=None):
         if tag:
@@ -454,6 +484,7 @@ class IndexStore:
             for tag, h in dead_v:
                 self.db.execute("delete from vectors where lineage_id = ? and tag = ? and hash = ?", (lineage, tag, h))
             self.db.commit()
+            self._invalidate()  # gc 改了数据 → 计数/体积缓存失效
         return {"blobs": len(dead_b), "vectors": len(dead_v)}
 
     def adopt(self, from_lineage, to_lineage, hashes=None):
@@ -483,6 +514,7 @@ class IndexStore:
                     (to_lineage, r["tag"], r["hash"], r["dim"], r["v"], now),
                 )
             self.db.commit()
+            self._invalidate()  # adopt 改了数据 → 计数/体积缓存失效
         return {"blobs": len(b), "vectors": len(v)}
 
     def overview(self):
