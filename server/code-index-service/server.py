@@ -225,6 +225,11 @@ def repo_status(namespace):
     out.update(store.counts(namespace))
     out.update(store.lineage_bytes(repo["lineage_id"]))
     out.update(governor.status(namespace))
+    out["limits"] = {
+        "maxVectorsPerLineage": MAX_VECTORS_PER_LINEAGE,
+        "maxTotalGb": round(MAX_TOTAL_BYTES / 1024**3, 2),
+        "retentionDays": RETENTION_DAYS,
+    }
     return out, 200
 
 
@@ -404,7 +409,9 @@ class Handler(BaseHTTPRequestHandler):
                     if cap:
                         return self._send(507, cap)
                     if payload["missing"]:
-                        governor.kick(ns)
+                        # 外部预热（seed）时客户端自己算向量，别让服务端再算一遍
+                        if not req.get("noEmbed"):
+                            governor.kick(ns)
                     knn.invalidate(ns)
                     return self._send(200, payload)
                 if action == "chunks":
@@ -412,6 +419,30 @@ class Handler(BaseHTTPRequestHandler):
                     if r["accepted"]:
                         governor.kick(ns)
                     return self._send(200, r)
+                if action == "vectors":
+                    # 外部算好的向量直接灌进来（"用快机器预热"的路径）：
+                    # 服务端不再重复嵌入，接完就生效。tag 必须与服务端当前模型一致，
+                    # 否则这批向量会被闸门当成别的模型产物（等于白算）。
+                    repo = store.repo(ns)
+                    if not repo:
+                        return self._send(404, {"error": "unknown-namespace"})
+                    tag = req.get("tag") or repo["tag"] or state["info"].get("tag")
+                    if tag != state["info"].get("tag"):
+                        return self._send(409, {"error": "tag-mismatch", "serverTag": state["info"].get("tag"), "got": tag})
+                    pairs = []
+                    for item in req.get("vectors") or []:
+                        raw = base64.b64decode(item["v_b64"])
+                        vec = np.frombuffer(raw, dtype=np.float32)
+                        if vec.shape[0] == 0:
+                            continue
+                        pairs.append((item["hash"], vec))
+                    if pairs:
+                        store.put_vectors(repo["lineage_id"], tag, pairs)
+                        knn.invalidate(ns)
+                    cap = ensure_capacity(repo["lineage_id"])
+                    if cap:
+                        return self._send(507, cap)
+                    return self._send(200, {"accepted": len(pairs), "dim": int(pairs[0][1].shape[0]) if pairs else 0, **store.counts(ns)})
                 if action == "embed":
                     if isinstance(req.get("rate"), (int, float)):
                         governor.set_rate(req["rate"])

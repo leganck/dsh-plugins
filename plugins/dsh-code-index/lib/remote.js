@@ -534,6 +534,19 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
         rethrow(e)
       }
     },
+    /**
+     * 直接把**本机算好的向量**灌进服务端（"用快机器预热"路径）。
+     * @param {string} namespace
+     * @param {Array<{hash:string, v_b64:string}>} vectors
+     * @param {string} [tag] 必须与服务端当前模型一致，否则 409
+     */
+    async uploadVectors(namespace, vectors, tag) {
+      try {
+        return await client.request('POST', repoUrl(namespace, 'vectors'), { vectors, tag }, { timeoutMs: Math.max(timeoutMs, 60000) })
+      } catch (e) {
+        rethrow(e)
+      }
+    },
     /** 触发后台嵌入（服务端会自动限流；rate 可选地覆盖） */
     async kickEmbed(namespace, { rate } = {}) {
       try {

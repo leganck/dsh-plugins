@@ -134,10 +134,15 @@ def main():
     check("vectors = 0", body.get("vectors") == 0)
 
     print("\n[2] 未变更短路（1 个 RTT，不传清单）")
-    st, body2 = sync(NS, {"repoState": "state-1", "mode": "diff", "revision": 1})
+    st, body2 = sync(NS, {"repoState": "state-1", "mode": "diff", "revision": 1, "chunkCount": 5})
     check("unchanged = true", body2.get("unchanged") is True, body2)
     check("revision 不变", body2.get("revision") == 1)
     check("missing 为空", body2.get("missing") == [])
+
+    print("\n[2b] 指纹相同但块数不一致 → 不得短路（服务端不能凭指纹认为内容相同）")
+    st, body2b = sync(NS, {"repoState": "state-1", "mode": "full", "chunkCount": 0, "chunkFp": "fp1", "upsert": manifest(files, "state-1b")["upsert"], "remove": []})
+    check("未被短路", body2b.get("unchanged") is not True, body2b)
+    check("服务端块数仍为 5", body2b.get("chunks") == 5, body2b.get("chunks"))
 
     print("\n[3] 上传正文（幂等）")
     bodies = [{"hash": h, "body": b} for cs in files.values() for h, b, _s, _e in cs]
@@ -161,7 +166,7 @@ def main():
     print("\n[6] 增量：只缺新增块")
     files["a.java"].append(("h6", "class A2 { }", 6, 9))
     st, body3 = sync(NS, manifest(files, "state-2"))
-    check("revision = 2", body3.get("revision") == 2, body3.get("revision"))
+    check("revision 递增到 3（2b 已推进过一次）", body3.get("revision") == 3, body3.get("revision"))
     check("只缺 h6", body3.get("missing") == ["h6"], body3.get("missing"))
     req("POST", f"/v1/repos/{NS}/chunks", {"bodies": [{"hash": "h6", "body": "class A2 { }"}]})
     stt = wait_vectors(NS, 6)

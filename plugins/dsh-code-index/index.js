@@ -33,7 +33,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-17.17'
+export const BUILD = '2026-10-18.1'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -225,6 +225,15 @@ const DEFAULTS = {
    */
   remote: null,
   vectorStore: 'local',
+  /**
+   * **变更上报的触发方式**（默认关）。
+   *
+   * 主触发仍是 `code_index`（agent 驱动），上报用"仓库指纹 + 变更清单"，已经是增量的。
+   * `watch: true` 时额外用 `fs.watch` 监听上次建过库的仓库：保存后静默聚合到
+   * `debounceMs`，再在后台跑一次增量同步 —— 对应 Cursor 的 watcher + 周期性 doUpdate
+   * （它默认 ≥60 s 且有自我抑制，这里同理：一次只跑一轮，跑的过程中不重入）。
+   */
+  sync: { watch: false, debounceMs: 30000 },
   rerankBackend: 'local',
   /** `rerankBackend: 'remote'` 时的远端地址与超时（与 embedding.remote 同构） */
   rerankRemote: { url: null, timeoutMs: 8000, apiKey: null, fallbackLocal: true },
@@ -271,6 +280,7 @@ function normalizeConfig(raw = {}) {
   // 两处 remote 都是**嵌套对象**：浅合并会把默认值整块顶掉，必须单独深合一层
   // `remote` 已提到顶层（0.8.0）；`embedding.remote` 继续接受，合并时顶层优先
   cfg.remote = { ...DEFAULTS.embedding.remote, ...(rawEmb.remote ?? {}), ...(raw.remote ?? {}) }
+  cfg.sync = { ...DEFAULTS.sync, ...(raw.sync ?? {}) }
   cfg.embedding.remote = cfg.remote
   cfg.rerankRemote = { ...DEFAULTS.rerankRemote, ...(raw.rerankRemote ?? {}) }
 
@@ -415,6 +425,12 @@ function normalizeConfig(raw = {}) {
   }
   if (!Number.isInteger(cfg.remote.uploadBatch) || cfg.remote.uploadBatch < 1) {
     throw new ConfigError(`config.remote.uploadBatch 必须是 >= 1 的整数，收到 ${JSON.stringify(cfg.remote.uploadBatch)}`)
+  }
+  if (typeof cfg.sync.watch !== 'boolean') {
+    throw new ConfigError(`config.sync.watch 必须是 true/false，收到 ${JSON.stringify(cfg.sync.watch)}`)
+  }
+  if (!Number.isInteger(cfg.sync.debounceMs) || cfg.sync.debounceMs < 1000) {
+    throw new ConfigError(`config.sync.debounceMs 必须是 >= 1000 的整数（毫秒），收到 ${JSON.stringify(cfg.sync.debounceMs)}`)
   }
   if (cfg.vectorStore !== 'local' && cfg.vectorStore !== 'remote') {
     throw new ConfigError(`config.vectorStore 必须是 'local' 或 'remote'，收到 ${JSON.stringify(cfg.vectorStore)}`)
@@ -729,7 +745,7 @@ function applyInner(ctx, rawConfig = {}) {
   }
 
   // ---------------------------------------------------------------- code_index
-  registerTool({
+  const codeIndexTool = {
     name: 'code_index',
     description:
       '建立或增量刷新某个代码仓库的检索索引（本地 SQLite：FTS5 全文 + 可选向量）。首次较慢（向量部分按仓库大小，实测 GPU 约 4–17 分钟/仓库），之后只处理变化的文件，通常秒级。'
@@ -789,6 +805,7 @@ function applyInner(ctx, rawConfig = {}) {
                 repoId: repoIdOf(repoRoot, config.remote.repoId),
                 url: gitOriginUrl(repoRoot),
                 lineage: config.remote.lineage,
+                rateLimit: config.remote.rateLimit,
                 uploadBatch: config.remote.uploadBatch,
               }
             : null,
@@ -821,12 +838,71 @@ function applyInner(ctx, rawConfig = {}) {
             `  ⚠️ 向量不完整：${r.stats.vectors}/${r.stats.chunks} 块有向量 —— 语义召回只覆盖一部分；传 max_embed 再跑一次可续算`,
           )
         }
+        ensureWatch(repoRoot)
         return textResult({ repoRoot, dbPath, ...r }, lines.join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
     },
-  })
+  }
+  registerTool(codeIndexTool)
+
+  // ---------------------------------------------------------------- 文件变更监听（sync.watch）
+  // 与 Cursor 的对应关系：它用 watcher 标记 + 周期性 doUpdate（≥60 s、有自我抑制），
+  // 我们同样是"防抖聚合 + 跑的时候不重入"，区别是默认**关**：主触发仍是显式 code_index。
+  const watchers = new Map()
+  const WATCH_IGNORE = /(^|\/)(\.git|node_modules|dist|target|build|\.dsh-index|__pycache__)(\/|$)/
+  async function runWatchSync(repoRoot, entry) {
+    if (entry.running) return
+    entry.running = true
+    const t0 = Date.now()
+    try {
+      const r = await codeIndexTool.execute({ path: repoRoot }, {})
+      const head = (r?.content?.[0]?.text ?? '').split('\n').find((l) => l.startsWith('索引完成'))
+      ctx.logger?.info?.(`dsh-code-index: 自动同步完成（${Date.now() - t0} ms）${head ? '：' + head : ''}`)
+    } catch (e) {
+      ctx.logger?.warn?.(`dsh-code-index: 自动同步失败：${String(e?.message ?? e).slice(0, 160)}`)
+    } finally {
+      entry.running = false
+    }
+  }
+  function ensureWatch(repoRoot) {
+    if (!config.sync.watch || watchers.has(repoRoot)) return
+    const entry = { watcher: null, timer: null, running: false }
+    try {
+      entry.watcher = fs.watch(repoRoot, { recursive: true }, (_evt, filename) => {
+        if (!filename) return
+        const rel = String(filename).replace(/\\/g, '/')
+        if (WATCH_IGNORE.test(rel)) return
+        if (entry.timer) return // 防抖窗口内的后续事件合并掉
+        entry.timer = setTimeout(() => {
+          entry.timer = null
+          void runWatchSync(repoRoot, entry)
+        }, config.sync.debounceMs)
+        entry.timer.unref?.()
+      })
+      entry.watcher.on?.('error', (e) => ctx.logger?.warn?.(`dsh-code-index: watcher 出错：${e?.message}`))
+    } catch (e) {
+      ctx.logger?.warn?.(`dsh-code-index: 无法监听 ${repoRoot}：${e?.message}`)
+      return
+    }
+    watchers.set(repoRoot, entry)
+    ctx.logger?.info?.(`dsh-code-index: 已监听 ${repoRoot}（防抖 ${config.sync.debounceMs} ms）`)
+  }
+  ctx.effect(
+    () => () => {
+      for (const entry of watchers.values()) {
+        try {
+          entry.watcher?.close()
+        } catch {
+          /* 已关闭 */
+        }
+        if (entry.timer) clearTimeout(entry.timer)
+      }
+      watchers.clear()
+    },
+    'dsh-code-index: watchers',
+  )
 
   // ---------------------------------------------------------------- code_search
   registerTool({
