@@ -234,6 +234,32 @@ remote:
 | 同一仓库第二个克隆 | **0 块新嵌入**（内容哈希命中） |
 | 首次建库（1,503 块，限速 20/s） | 73 s（限速就是"别打满 GPU"的开关） |
 
+**变更上报（对照 Cursor，不上 Merkle）**
+
+| 触发 | 行为 |
+|---|---|
+| `code_index`（默认） | 算仓库指纹 → 与服务端比对；一致就只发 `{repoState, chunkCount, revision}`（**1 个 RTT、0 字节正文**） |
+| 指纹不一致 | 只发**变更文件**的块清单 → 服务端回 `missing` → 只上传这些正文 |
+| `sync.watch: true`（默认关） | `fs.watch` 监听上次建过库的仓库，保存后按 `debounceMs`（≥1000 ms，默认 30 s）聚合，后台跑一次增量同步；跑的过程中不重入 |
+| `revision` 冲突 | 服务端 409 → 客户端改发全量清单自愈（多客户端/服务端重置） |
+
+为什么不用 Merkle：它省的是"整棵树传到云端"，而我们本来就只发变更。实测建树 117 ms/4 万文件、
+增量 0.001 ms/文件，但本地全量核对在未变更时只要 2 ms —— 协议复杂度换不到收益。
+
+**用快机器预热（`tools/seed-vectors.mjs`）**
+
+本机建库比 NAS 快（33.05 vs 26.8 块/s），大仓首次初始化可以让本机算、服务端只存：
+
+```sh
+node tools/seed-vectors.mjs --repo D:/oss/elasticsearch --url https://dsh-embed.taek.site \
+     --model-dir D:/dsh-models/bge-base-zh-v1.5 --deps-dir D:/dsh-code-index/embed-deps \
+     --index-base D:/dsh-bench-tmp/index-oss
+# 补一次全量清单（本地已同步过、服务端是空的）：加 --reset
+```
+
+实测：2,666 块 1.5 分钟（31.3 块/s）；16 万块约 90 分钟。灌入前会校验两边 `tag` 一致，
+不一致直接拒绝（否则等于把另一份模型的向量混进索引）。
+
 **三条边界，必须如实理解**：
 
 1. **"跨仓库复用"= 同仓库的多分支/多克隆**。实测无关项目之间块重合 **0.00%**（4 个仓库两两比对），

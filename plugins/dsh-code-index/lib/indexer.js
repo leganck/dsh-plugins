@@ -165,6 +165,8 @@ export async function buildIndex({
       url: remote.url,
       tag: remote.tag,
       lineage: remote.lineage ?? null,
+      noEmbed: !!remote.noEmbed,
+      rateLimit: remote.rateLimit ?? null,
       fingerprint,
       changedFiles: remoteChanged,
       removed,
@@ -280,33 +282,50 @@ export function computeRepoState(store) {
  * @param {import('./store.js').Store} o.store
  * @param {object} o.client createRemoteIndex() 的返回值
  */
-export async function syncRemote({ store, client, repoId, url, tag, lineage = null, fingerprint, changedFiles, removed, uploadBatch = 256, log = () => {} }) {
+export async function syncRemote({ store, client, repoId, url, tag, lineage = null, noEmbed = false, rateLimit = null, fingerprint, changedFiles, removed, uploadBatch = 256, log = () => {} }) {
   const namespace = `${repoId}@${fingerprint}`
   const state = computeRepoState(store)
   const lastState = store.getMeta('remote_repo_state')
   const lastRev = store.getMeta('remote_revision')
-  const base = { repoId, chunkFp: fingerprint, url, tag, repoState: state, lineage: lineage ?? undefined }
+  const base = {
+    repoId,
+    chunkFp: fingerprint,
+    url,
+    tag,
+    repoState: state,
+    lineage: lineage ?? undefined,
+    noEmbed,
+    // 指纹必须**连块数一起**交给服务端：只有指纹一致、块数也一致，才算"内容确实一样"。
+    // 否则"本地早已建好、本轮 0 变更"的空清单会让服务端记下指纹却没有内容（实测踩过）。
+    chunkCount: store.stats().chunks,
+  }
 
   let res
-  const skipManifest = lastState === state && lastRev !== undefined && lastRev !== null
+  const firstContact = lastRev === undefined || lastRev === null
+  const skipManifest = lastState === state && !firstContact
   if (skipManifest) {
     // 指纹一致：只发指纹 + revision，服务端直接回 unchanged（连清单都不用比对）
     res = await client.sync(namespace, { ...base, mode: 'diff', revision: Number(lastRev) })
+  } else if (firstContact) {
+    // **首次连这台服务端：状态未知**，必须发全量清单。
+    // 否则"本地索引早就建好、本轮 0 变更"会发一份空清单，服务端据此认为库里没有块，
+    // 于是 missing=0 —— 表现是"同步成功但一个向量都没算"（ES 16 万块那次就是这么踩到的）。
+    res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
   } else {
     try {
-      res = await client.sync(namespace, {
-        ...base,
-        mode: 'diff',
-        revision: lastRev === undefined || lastRev === null ? undefined : Number(lastRev),
-        upsert: changedFiles,
-        remove: removed,
-      })
+      res = await client.sync(namespace, { ...base, mode: 'diff', revision: Number(lastRev), upsert: changedFiles, remove: removed })
     } catch (e) {
       if (e.code !== 'revision-conflict') throw e
       // 服务端的 revision 与本地记录不一致（多客户端/服务端重置）→ 全量自愈
       log(`远端 revision 冲突（服务端 ${e.revision}），改走全量清单`)
       res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
     }
+  }
+  // 自愈：服务端报告 0 块但本地确有块 → 它被重置过，补一次全量。
+  // 注意**必须也覆盖 unchanged 分支**：本地 meta 记着"已同步"，服务端却空了，短路会一直骗自己。
+  if ((res.chunks ?? 0) === 0 && store.stats().chunks > 0) {
+    log('服务端报告 0 块但本地有索引 → 补发全量清单')
+    res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
   }
 
   // 只上传服务端缺向量的那些块的正文（幂等：已存在的会被服务端计入 deduped）
@@ -321,7 +340,7 @@ export async function syncRemote({ store, client, repoId, url, tag, lineage = nu
       uploaded += r.accepted ?? 0
     }
   }
-  if (missing.length) await client.kickEmbed(namespace)
+  if (missing.length && !noEmbed) await client.kickEmbed(namespace, rateLimit ? { rate: rateLimit } : {})
 
   store.setMeta('remote_repo_state', state)
   store.setMeta('remote_revision', String(res.revision))
@@ -332,6 +351,8 @@ export async function syncRemote({ store, client, repoId, url, tag, lineage = nu
     revision: res.revision,
     unchanged: !!res.unchanged,
     missing: missing.length,
+    /** 缺向量的块 hash 列表（seed 工具要按它算/灌向量） */
+    missingHashes: missing,
     uploaded,
     coverage: res.coverage ?? null,
     chunks: res.chunks ?? null,

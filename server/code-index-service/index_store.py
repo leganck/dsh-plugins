@@ -40,6 +40,7 @@ create table if not exists repos (
   revision integer not null default 0,
   tag text,
   repo_state text,
+  repo_state_chunks integer,
   updated_at integer not null
 );
 create table if not exists chunks (
@@ -128,6 +129,10 @@ class IndexStore:
         self.db.execute("pragma journal_mode = wal")
         self.db.execute("pragma synchronous = normal")
         self.db.executescript(SCHEMA)
+        # 幂等迁移：早期 0.8.0 的库里 repos 没有 repo_state_chunks 这一列
+        cols = {r["name"] for r in self.db.execute("pragma table_info(repos)").fetchall()}
+        if "repo_state_chunks" not in cols:
+            self.db.execute("alter table repos add column repo_state_chunks integer")
         self.db.commit()
 
     # ---------------------------------------------------------------- 血统 / 命名空间
@@ -199,8 +204,18 @@ class IndexStore:
         # 表现是"刚 adopt 过的向量又变成缺失"。这个坑由自测用例抓出来。
         lineage = cur["lineage_id"]
 
-        # ① 状态指纹短路：一致就立刻回，**连 chunkFp 都不需要**（客户端只发 1 个哈希 + revision）
-        if repo_state and repo_state == (cur["repo_state"] or ""):
+        # ① 状态指纹短路：指纹一致**且块数一致**才立刻回。
+        # 只比指纹是不够的：指纹是客户端算的，若上一次同步是"空清单"（客户端本地早已建好索引、
+        # 本轮 0 变更），服务端会把指纹记下来却一块内容都没有 —— 之后两端指纹永远相同，
+        # 服务端就永远短路、永远 missing=0。实测被 ES 16 万块的预热直接踩中。
+        cur_chunks = cur.get("repo_state_chunks")
+        client_chunks = payload.get("chunkCount", -1)
+        if (
+            repo_state
+            and repo_state == (cur["repo_state"] or "")
+            and cur_chunks is not None
+            and int(cur_chunks) == int(client_chunks)
+        ):
             return {
                 "revision": cur["revision"],
                 "unchanged": True,
@@ -240,8 +255,9 @@ class IndexStore:
                     )
 
             self.db.execute(
-                "update repos set revision = revision + 1, repo_state = ?, tag = coalesce(?, tag), updated_at = ? where namespace = ?",
-                (repo_state, tag, now, namespace),
+                "update repos set revision = revision + 1, repo_state = ?, tag = coalesce(?, tag), updated_at = ?,"
+                " repo_state_chunks = (select count(*) from chunks where namespace = ?) where namespace = ?",
+                (repo_state, tag, now, namespace, namespace),
             )
             self.db.execute("update lineages set last_seen = ? where id = ?", (now, lineage))
             self.db.commit()

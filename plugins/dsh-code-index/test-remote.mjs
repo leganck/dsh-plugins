@@ -282,7 +282,11 @@ console.log('\n[6] 配置校验（apply 会大声失败）')
   const e14 = tryApply({ remote: { url: 'https://h.example', uploadBatch: 0 } })
   check('uploadBatch 非正 → 拒绝', e14 && /uploadBatch/.test(e14.message), e14?.message)
   const e15 = tryApply({ sync: { debounceMs: 10 } })
-  check('未实现的 sync 块 → 明确拒绝（不做静默忽略）', e15 && /未知配置项：sync/.test(e15.message), e15?.message)
+  check('debounceMs 过小 → 拒绝（防抖下限 1 s）', e15 && /debounceMs/.test(e15.message), e15?.message)
+  const e16 = tryApply({ sync: { watch: 'yes' } })
+  check('watch 非布尔 → 拒绝', e16 && /sync\.watch/.test(e16.message), e16?.message)
+  const e17 = tryApply({ sync: { watch: true, debounceMs: 5000 } })
+  check('watch + 合法防抖 → 通过', e17 === null, e17?.message)
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
