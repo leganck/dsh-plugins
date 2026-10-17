@@ -94,11 +94,26 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
     defaultTopK: 10
     maxEmbedPerRun: 0                                   # 默认 0 = 建库不补算向量；>0 才自动补算（重负载，见上）
     embedding:
-      backend: "auto"                                   # auto | cpu | gpu | off
+      backend: "auto"                                   # auto | cpu | gpu | remote | off（建库/索引侧）
+      queryBackend: null                                # null = 跟 backend；可单独指定查询侧（见下）
       modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"
       threads: 6
       cachePath: null                                   # 默认 ~/.dsh/index/vectors.db（与实验版共用）
       depsDir: null                                     # 默认 %LOCALAPPDATA%/dsh-code-index/embed-deps
+      remote:                                           # backend=remote 时用（默认不配）
+        url: "https://dsh-embed.example.com"            # 服务端见 deploy/nas-dsh-embed/
+        timeoutMs: 8000
+        apiKey: null                                     # 服务端设了 API_KEY 才需要
+        tag: null                                        # 向量标签；留空用服务端自述
+        fallbackLocal: true                              # 仅当两边标签一致时才真的回退
+    rerank: "off"                                        # off | fast（top-10）| quality（top-20）
+    rerankBackend: "local"                               # local | remote
+    rerankModelDir: null                                 # 默认 ~/.dsh/models/bge-reranker-base
+    rerankRemote:                                        # rerankBackend=remote 时用
+      url: null                                          # 留空则复用 embedding.remote.url
+      timeoutMs: 8000
+      apiKey: null
+      fallbackLocal: true
 ```
 
 ### `excludeDirs` vs `excludePaths`：两种排除，别混用
@@ -128,6 +143,65 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 - **`code_index_status` 共用同一份排除规则**（否则会把已排除文件永远报成"过期"），
   并在输出里显示 `已排除：…` 供确认。
 - 排除**单个文件**也可以（`excludePaths: ["src/Legacy.java"]`）。
+
+## 算力放哪：本机 / 分档 / 远端（0.7.0 起）
+
+默认**全部在本机**（装好即用，不依赖任何网络）。两个正交的开关可以把算力挪走：
+
+| 开关 | 管什么 | 取值 |
+|---|---|---|
+| `embedding.backend` | **建库/索引侧**的向量 | `auto`（默认）| `cpu` | `gpu` | `remote` | `off` |
+| `embedding.queryBackend` | **查询侧**的向量（默认跟随 backend） | 同上（`null` = 跟随） |
+| `rerank` | 开不开重排、候选多少 | `off`（默认）| `fast` | `quality` |
+| `rerankBackend` | 重排在哪算 | `local`（默认）| `remote` |
+
+### 为什么要分"建库侧"和"查询侧"
+
+实测（同一台机器、同一份 bge-base fp16、同一个向量标签）：
+
+| 场景 | 批次 | 本机 DML | 本机 CPU |
+|---|---|---|---|
+| 建库（长批） | 8–32 | **33 块/s** | 3.4 块/s |
+| 查询（batch=1） | 1 | 45–68 ms | **26–40 ms** |
+
+DirectML 每次 `session.run` 有约 **45 ms 的固定开销**（提交 + 同步 + 回读），
+所以在 batch=1 的查询上它反而输给 CPU；而长批时 GPU 的吞吐是 CPU 的 8–10 倍。
+两者用的是**同一份模型文件** → 同一个向量标签 → 索引里的向量对两边都有效。所以：
+
+```yaml
+embedding:
+  backend: auto        # 建库走 GPU
+  queryBackend: cpu    # 查询走 CPU（本机实测快 1.1–1.7 倍）
+```
+
+### 远端（可选）
+
+`deploy/nas-dsh-embed/` 是配套的服务端（`/embed` + `/rerank`，`GET /` 自述向量 `tag`）。
+实测口径（局域网、开发机 RX 6750 XT、服务端 Tesla P4 / CUDA 12 / ORT 1.19.2）：
+
+| 动作 | 本机 | 远端 | 建议 |
+|---|---|---|---|
+| 单条查询嵌入 | 45 ms（DML）/ 26 ms（CPU） | **15.8 ms**（含网络） | 差别不大，**别搬** |
+| 建库向量（512 token 长块） | **33 块/s** | 26.8 块/s | 本机更快，**别搬** |
+| 重排每候选 | 36 ms（DML） | **4.8 ms** | **值得搬**（快 7.5×） |
+
+也就是：**只有重排值得放到另一台机器**。
+
+```yaml
+rerank: quality
+rerankBackend: remote
+embedding:
+  remote:
+    url: "https://dsh-embed.example.com"   # rerankRemote.url 留空即可复用
+    fallbackLocal: true                     # 服务端连不上时用本机重排器
+```
+
+三条硬规则（都有测试钉住，见 `test-remote.mjs`）：
+
+1. **远端不可用绝不让检索失败** —— 向量通道降级为纯关键词、重排退回 RRF 顺序，原因写进结果。
+2. **向量标签 `tag` 必须对得上**（`模型名-模型文件内容哈希-精度`，服务端与插件同一算法）。
+   对得上 ⇒ 切换后端**不用重建索引**；对不上 ⇒ **不回退**（回退等于把两种来源的向量混进一个索引）。
+3. **远端超时默认 8 s**，只用来兜住"那台机器睡了"。
 
 ## 默认嵌入模型（0.6.0 起）
 

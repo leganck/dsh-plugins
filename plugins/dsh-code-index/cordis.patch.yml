@@ -4,8 +4,8 @@
 # 该包从 profile 的 node_modules 解析。
 #
 # 这里只放**可移植的默认值**；机器相关或团队相关的取值（roots 白名单、模型目录、
-# 索引位置）请在你自己 profile 的 cordis.patch.yml 里按 id 覆盖 —— 用户补丁层
-# 在所有 bundle 层之后应用，且能跨插件升级保留。
+# 索引位置、远端地址）请在你自己 profile 的 cordis.patch.yml 里按 id 覆盖 ——
+# 用户补丁层在所有 bundle 层之后应用，且能跨插件升级保留。
 - insert:
     - id: code-index
       name: '@local/dsh-code-index'
@@ -13,4 +13,18 @@
         indexDirBase: ~/.dsh/code-index
         embedding:
           backend: auto
-          modelDir: ~/.dsh/models/bge-small-zh-v1.5
+          # **不要**在这里写 modelDir：留空才会用随包提供的 bge-base（<包目录>/model），
+          # 写了它会顶掉随包模型，装完反而"没模型可用"。
+          #
+          # 查询侧可以单独指定后端（本机实测：DML 建库 30 ms/块，但 batch=1 的查询
+          # 因每次调用 ~45 ms 固定开销，反而 CPU 更快；两份用的是同一份模型、同一标签）：
+          # queryBackend: cpu
+          #
+          # 远端（可选，默认关）：把嵌入/重排交给另一台带 GPU 的机器，
+          # 服务端见 deploy/nas-dsh-embed/（自带 /embed + /rerank，自述向量 tag）
+          # remote:
+          #   url: https://dsh-embed.example.com
+          #   fallbackLocal: true
+        # 重排：off | fast（top-10）| quality（top-20）
+        # rerank: quality
+        # rerankBackend: local | remote（remote 时地址可复用 embedding.remote.url）
