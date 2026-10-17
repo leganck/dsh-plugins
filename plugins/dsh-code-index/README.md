@@ -131,8 +131,9 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 
 ## 默认嵌入模型（0.6.0 起）
 
-**`bge-base-zh-v1.5`（int8）随包提供**，装在 `<插件目录>/model`，装上即用。
+**`bge-base-zh-v1.5`（**fp16**）随包提供**，装在 `<插件目录>/model`，装上即用。
 103 题实测比原来的 `bge-small` 高 **+11 个百分点**（hit@3 43% → 54%），查询 22 → 34 ms；代价是索引慢约 7 倍。
+⚠️ 该模型的 **int8 导出会让向量空间塌缩**（无关文本 cosine 0.806 vs fp16 0.464，实测），所以随包的是 fp16。
 ⚠️ 换模型会让已有向量作废 → 升级后首次 `code_index` 会全量重嵌（676 块≈5 分钟；详见 INSTALL.md）。
 
 ## 配置怎么选（实测矩阵）
@@ -163,6 +164,29 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
    - 最快且明显强于默认 → 换 bge-base-zh-v1.5（54% @3，查询 34 ms，索引慢 7×；fp16 可跑 DirectML，但曾见瞬时 TDR —— 已加探测+CPU 兜底）
 
 复现：`node tools/config-matrix.mjs`（自备三个嵌入模型 + 重排模型；缺哪个自动跳过对应行）。
+
+### 开源语料复现（任何一个仓库都能跑）
+
+上表是早期在一个私有 Java 业务模块上测的。为了能被任意人复现，仓库里另带了一份**开源语料**的题库：
+
+| 项 | 值 |
+|---|---|
+| 语料 | [`macrozheng/mall`](https://github.com/macrozheng/mall)（Spring Boot 电商示例）→ **665 文件 / 2626 块** |
+| 题库 | `tools/cases/oss-mall-30.json`（30 题中文自然语言，答案 = 仓库里真实存在的类/参数，已用 `tools/verify-cases.mjs` 全量核验） |
+| 实测（bge-small-zh-v1.5，fp16/DirectML） | 文档嵌入 **63.3 s**（24 ms/块）；**hit@3 = 13/30（43%）**、hit@8 = 17/30、hit@40 = 26/30 |
+
+`hit@3 43%` 与私有语料上测到的同模型结果**一致**，说明这套方法不是只对某一个仓库成立。
+
+```bash
+# 1) 建纯全文索引（秒级，不补算向量）
+node tools/build-oss-index.mjs /path/to/your-repo
+# 2) 换你自己的题库（格式：[[问题, 期望命中的文件路径片段, 依据], ...]，先用 verify-cases 核一遍）
+node tools/verify-cases.mjs tools/cases/oss-mall-30.json /path/to/your-repo
+# 3) 跑各模型对照（会顺带把文档向量按语料缓存到 %TEMP%）
+node tools/ab-embedding-models.mjs --index <上一步输出的 index.db> --cases tools/cases/oss-mall-30.json
+# 4) 全配置矩阵（必须显式 --index：题库与索引必须同一语料）
+node tools/config-matrix.mjs --index <同一 index.db> --cases tools/cases/oss-mall-30.json
+```
 
 ## 文件结构
 
