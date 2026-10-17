@@ -101,7 +101,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
       cachePath: null                                   # 默认 ~/.dsh/index/vectors.db（与实验版共用）
       depsDir: null                                     # 默认 %LOCALAPPDATA%/dsh-code-index/embed-deps
       remote:                                           # backend=remote 时用（默认不配）
-        url: "https://dsh-embed.example.com"            # 服务端见 deploy/nas-dsh-embed/
+        url: "https://dsh-embed.example.com"            # 服务端见 server/code-index-service/
         timeoutMs: 8000
         apiKey: null                                     # 服务端设了 API_KEY 才需要
         tag: null                                        # 向量标签；留空用服务端自述
@@ -176,7 +176,7 @@ embedding:
 
 ### 远端（可选）
 
-`deploy/nas-dsh-embed/` 是配套的服务端（`/embed` + `/rerank`，`GET /` 自述向量 `tag`）。
+`server/code-index-service/` 是配套的服务端（`/embed` + `/rerank`，`GET /` 自述向量 `tag`；0.8.0 起还自带 `/v1` 索引层）。
 实测口径（局域网、开发机 RX 6750 XT、服务端 Tesla P4 / CUDA 12 / ORT 1.19.2）：
 
 | 动作 | 本机 | 远端 | 建议 |
@@ -202,6 +202,47 @@ embedding:
 2. **向量标签 `tag` 必须对得上**（`模型名-模型文件内容哈希-精度`，服务端与插件同一算法）。
    对得上 ⇒ 切换后端**不用重建索引**；对不上 ⇒ **不回退**（回退等于把两种来源的向量混进一个索引）。
 3. **远端超时默认 8 s**，只用来兜住"那台机器睡了"。
+
+## 远端索引：`vectorStore: remote`（0.8.0 起，默认关）
+
+默认 `local`：向量索引在本机 SQLite，行为与之前完全一致。
+切到 `remote` 后**本机只保留 BM25**，向量与 kNN 都在服务端：
+
+```
+本机：切块 + BM25(top-40) ─┐
+                           ├─ RRF(k=20) → 结果     ← 融合在客户端；服务端挂了只是语义召回消失
+远端：embed → kNN(top-40) ─┘
+```
+
+服务端在仓库根目录 [`server/code-index-service/`](../../server/code-index-service/)，
+自测 41 项、客户端桩测试 45 项。
+
+```yaml
+vectorStore: remote
+remote:
+  url: "https://dsh-embed.example.com"
+  repoId: null        # 默认由 git origin URL 推导；同一仓库的不同克隆/机器算出同一个值
+  rateLimit: 10       # 服务端嵌入限速（块/秒）
+```
+
+**实测（同语料、同一份 bge-base fp16）**
+
+| 项 | 结果 |
+|---|---|
+| 端到端混合检索（1,503 块，局域网） | **≈19 ms**（远端 embed 7.4 + kNN 0.1 + 往返 ≈10 + 本地融合 0.9） |
+| 未变更仓库再同步 | **1 个 RTT、0 字节正文**（仓库指纹一致） |
+| 同一仓库第二个克隆 | **0 块新嵌入**（内容哈希命中） |
+| 首次建库（1,503 块，限速 20/s） | 73 s（限速就是"别打满 GPU"的开关） |
+
+**三条边界，必须如实理解**：
+
+1. **"跨仓库复用"= 同仓库的多分支/多克隆**。实测无关项目之间块重合 **0.00%**（4 个仓库两两比对），
+   同项目跨分支 ~98%。服务端因此按**血统**（git origin URL）分存储；fork 想共用需显式 `remote.lineage`
+   或服务端 `POST /v1/lineages/{id}/adopt`。
+2. **建库搬过去会更慢**：本机 33.05 块/s vs NAS P4 26.8 块/s。远端赢在查询延迟与重排（快 7.5×），
+   以及"本机零重依赖、多人共享一份索引"。
+3. **纯远程没有离线语义检索**：服务端不可达时只剩 BM25。若需要兜底，把 `vectorStore` 切回 `local`
+   （本机代码与模型都还在）。
 
 ## 默认嵌入模型（0.6.0 起）
 

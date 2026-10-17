@@ -21,7 +21,6 @@
     "index.js",
     "lib",
     "tools",
-    "deploy",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

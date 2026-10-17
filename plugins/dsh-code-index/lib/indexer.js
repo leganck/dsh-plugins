@@ -63,6 +63,13 @@ export async function buildIndex({
   chunking = {},
   depsDir,
   depsFallbackDirs = [],
+  /**
+   * 远端索引（`vectorStore: 'remote'` 时传入）：
+   *   { client, repoId, url, tag, uploadBatch? }
+   * 传了就**不做本地嵌入**，改为把块清单/正文推给服务端、由服务端算向量。
+   */
+  remote = null,
+  onProgress = null,
 }) {
   const t0 = Date.now()
   const requestedMode = budget.mode ?? 'incremental'
@@ -122,6 +129,8 @@ export async function buildIndex({
   /** 实际用到的策略 → 文件数（如实报告，方便发现"以为在用 AST 其实在降级"） */
   const strategyFiles = new Map()
   const fallbackReasons = []
+  /** 远端模式下要推给服务端的变更文件清单（只含变更文件，不是整库） */
+  const remoteChanged = []
   for (const f of changed) {
     try {
       const { text, sha } = readForIndex(f.abs)
@@ -129,6 +138,13 @@ export async function buildIndex({
       store.replaceChunks(f.rel, r.chunks)
       store.upsertFile(f.rel, f.mtime, f.size, sha)
       chunksWritten += r.chunks.length
+      if (remote) {
+        remoteChanged.push({
+          path: f.rel,
+          hash: sha,
+          chunks: r.chunks.map((c) => ({ hash: c.hash, start: c.startLine, end: c.endLine })),
+        })
+      }
       strategyFiles.set(r.strategy, (strategyFiles.get(r.strategy) ?? 0) + 1)
       if (r.fellBack && r.reason && fallbackReasons.length < 5 && !fallbackReasons.includes(r.reason)) {
         fallbackReasons.push(r.reason)
@@ -139,13 +155,37 @@ export async function buildIndex({
   }
   for (const rel of removed) store.dropFile(rel)
 
+  // ---- 远端索引：推清单 → 只传缺失正文 → 服务端后台嵌入 ----
+  let remoteInfo = null
+  if (remote) {
+    remoteInfo = await syncRemote({
+      store,
+      client: remote.client,
+      repoId: remote.repoId,
+      url: remote.url,
+      tag: remote.tag,
+      lineage: remote.lineage ?? null,
+      fingerprint,
+      changedFiles: remoteChanged,
+      removed,
+      uploadBatch: remote.uploadBatch ?? 256,
+      log: onProgress ?? (() => {}),
+    })
+  }
+
   // ---- 向量补算（只算缺的）----
   let embedded = 0
   let embedNote = ''
   const stats0 = store.stats()
   // 待补总量用 stats 差分算出（O(1)），不复用 chunksWithoutVectors —— 后者要按 limit 取行
   const pendingTotal = Math.max(0, stats0.chunks - stats0.vectors)
-  if (!embedder?.ok) {
+  if (remote) {
+    const r = remoteInfo ?? {}
+    embedNote = r.unchanged
+      ? `远端索引已是最新（revision ${r.revision}）：清单指纹一致，未上传任何正文`
+      : `已同步到远端（revision ${r.revision}）：缺向量 ${r.missing} 块，本轮上传正文 ${r.uploaded} 条；` +
+        `服务端后台嵌入中，覆盖率 ${((r.coverage ?? 0) * 100).toFixed(0)}%（再跑 code_index 可查看进度）`
+  } else if (!embedder?.ok) {
     embedNote = `向量未生成：${embedder?.reason ?? 'embedder 未配置'}`
   } else if (maxEmbed <= 0) {
     // 预算为 0 时此前会说"向量已是最新"，把"压根没尝试"说成"已经完整" —— 如实报告，
@@ -194,6 +234,8 @@ export async function buildIndex({
     vectorsAfter: s.vectors,
     cacheEntries: embedder?.cache ? embedder.cache.count() : null,
     embedNote,
+    /** 远端索引同步结果（vectorStore='remote' 时有值） */
+    remote: remoteInfo,
     /** 实际使用的切块策略 → 文件数；以及降级原因（最多 5 条去重） */
     strategies: Object.fromEntries(strategyFiles),
     chunkFallbacks: fallbackReasons,
@@ -211,4 +253,88 @@ export async function buildIndex({
 /** 清理索引目录（供 code_index action=drop 使用） */
 export function dropIndex(store) {
   store.db.exec('delete from chunks; delete from chunks_fts; delete from vectors; delete from files;')
+}
+
+// ---------------------------------------------------------------------------
+// 远端索引同步（vectorStore: 'remote'）
+//
+// 与 Cursor 的差别：它用 Merkle 树省"整棵树上云"的流量；我们本来就只发变更，
+// 所以用**一个仓库指纹 + 变更清单**就够了（实测全量核对 703 ms/2088 文件，
+// 未变更时 2 ms；建 Merkle 树 117 ms/4 万文件，收益换不来协议复杂度）。
+//
+// 流程：指纹一致 → 只发 {repoState, revision}（1 个 RTT、0 字节正文）
+//       指纹不一致 → 发变更文件的块清单 → 服务端回"我缺哪些 hash" → 只传这些正文
+//       revision 冲突 → 改发全量清单（客户端丢了本地状态时的自愈路径）
+// ---------------------------------------------------------------------------
+
+/** 仓库指纹：排序后的 "path\0sha" 汇总。任何文件增删改都会改变它。 */
+export function computeRepoState(store) {
+  const rows = [...store.fileState().entries()]
+    .map(([p, v]) => `${p}\u0000${v.sha ?? ''}`)
+    .sort()
+  return sha256(rows.join('\n'))
+}
+
+/**
+ * @param {object} o
+ * @param {import('./store.js').Store} o.store
+ * @param {object} o.client createRemoteIndex() 的返回值
+ */
+export async function syncRemote({ store, client, repoId, url, tag, lineage = null, fingerprint, changedFiles, removed, uploadBatch = 256, log = () => {} }) {
+  const namespace = `${repoId}@${fingerprint}`
+  const state = computeRepoState(store)
+  const lastState = store.getMeta('remote_repo_state')
+  const lastRev = store.getMeta('remote_revision')
+  const base = { repoId, chunkFp: fingerprint, url, tag, repoState: state, lineage: lineage ?? undefined }
+
+  let res
+  const skipManifest = lastState === state && lastRev !== undefined && lastRev !== null
+  if (skipManifest) {
+    // 指纹一致：只发指纹 + revision，服务端直接回 unchanged（连清单都不用比对）
+    res = await client.sync(namespace, { ...base, mode: 'diff', revision: Number(lastRev) })
+  } else {
+    try {
+      res = await client.sync(namespace, {
+        ...base,
+        mode: 'diff',
+        revision: lastRev === undefined || lastRev === null ? undefined : Number(lastRev),
+        upsert: changedFiles,
+        remove: removed,
+      })
+    } catch (e) {
+      if (e.code !== 'revision-conflict') throw e
+      // 服务端的 revision 与本地记录不一致（多客户端/服务端重置）→ 全量自愈
+      log(`远端 revision 冲突（服务端 ${e.revision}），改走全量清单`)
+      res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+    }
+  }
+
+  // 只上传服务端缺向量的那些块的正文（幂等：已存在的会被服务端计入 deduped）
+  const missing = res.missing ?? []
+  let uploaded = 0
+  for (let i = 0; i < missing.length; i += uploadBatch) {
+    const part = missing.slice(i, i + uploadBatch)
+    const bodies = store.bodiesByHashes(part)
+    const payload = [...bodies.entries()].map(([hash, body]) => ({ hash, body }))
+    if (payload.length) {
+      const r = await client.uploadChunks(namespace, payload)
+      uploaded += r.accepted ?? 0
+    }
+  }
+  if (missing.length) await client.kickEmbed(namespace)
+
+  store.setMeta('remote_repo_state', state)
+  store.setMeta('remote_revision', String(res.revision))
+  store.setMeta('remote_namespace', namespace)
+
+  return {
+    namespace,
+    revision: res.revision,
+    unchanged: !!res.unchanged,
+    missing: missing.length,
+    uploaded,
+    coverage: res.coverage ?? null,
+    chunks: res.chunks ?? null,
+    vectors: res.vectors ?? null,
+  }
 }

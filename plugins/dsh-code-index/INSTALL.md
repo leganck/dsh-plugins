@@ -359,7 +359,7 @@ rerank: quality   # off（默认）| fast（top-10，约 +474 ms）| quality（t
 
 ```sh
 # 目录结构、CUDA 12 + ORT 1.19.2 的原因、compose 示例都在：
-plugins/dsh-code-index/deploy/nas-dsh-embed/README.md
+server/code-index-service/README.md
 ```
 
 起好后本机先量一遍，**再决定搬哪一段**（不要凭印象）：
