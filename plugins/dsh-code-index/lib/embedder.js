@@ -195,10 +195,14 @@ export async function createEmbedder({
   if (resolved === 'gpu' && !hasFp16) resolved = 'cpu'
   let modelFile = resolved === 'gpu' ? 'model_fp16.onnx' : 'model_int8.onnx'
   if (!fs.existsSync(path.join(dir, modelFile))) {
-    // gpu 档要 fp16 但只有 int8 时也别直接失败 —— 退到 int8/CPU，并在原因里说清
+    // 需要的那个精度不在时**不要直接失败**，换成目录里现有的那个：
+    //   gpu 档要 fp16 但只有 int8 → 用 int8/CPU
+    //   cpu 档默认要 int8 但只有 fp16（随包形态就是这种）→ 用 fp16/CPU（fp16 在 CPU 上可跑）
     if (hasInt8) {
       modelFile = 'model_int8.onnx'
       resolved = 'cpu'
+    } else if (hasFp16) {
+      modelFile = 'model_fp16.onnx'
     } else {
       return { ok: false, reason: `未找到模型文件 ${modelFile}（目录 ${dir}）` }
     }
