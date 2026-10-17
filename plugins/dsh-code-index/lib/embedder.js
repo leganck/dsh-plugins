@@ -297,7 +297,15 @@ export async function createEmbedder({
     // 若按后端取精度，一旦运行期从 GPU 迁到 CPU，tag 就会变 → 同一索引里混两种 tag（而它们其实是同源向量）。
     modelTag: `${modelName}-${modelFingerprint(dir, modelFile)}-${modelFile.includes('fp16') ? 'fp16' : 'int8'}`,
     dim: KNOWN_DIMS[modelName] ?? null,
-    batch: batch ?? (usedBackend === 'gpu' ? 12 : 48),
+    /**
+     * 批大小。GPU 分支从 12 降到 **8**：实测 GTX 960(2 GB) 上 batch=12/24 会在 DML 上
+     * **必崩**（`DML GPU readback failed 0x887A0006` = DXGI_ERROR_DEVICE_REMOVED，TDR），
+     * batch≤8 稳定；而 bge 的序列长度差异大，padding 会让「大批」反而更慢
+     * （实测每块：b=2 34 ms / b=4 87 ms / b=8 104 ms，b=1 46 ms）。
+     * 更小的显存只会更早崩，所以默认取安全区；显存大的机器可用配置调高。
+     * 运行期若仍崩，`runBatch` 会自动折半并把 `this.batch` 永久调小（见下）。
+     */
+    batch: batch ?? (usedBackend === 'gpu' ? 8 : 48),
     cache,
     cacheEntries: cache ? cache.count() : 0,
     /** 嵌入文本；返回 Float32Array[]，顺序与输入一致 */
@@ -314,16 +322,28 @@ export async function createEmbedder({
       for (let i = 0; i < out.length; i++) if (out[i] === null) todo.push(i)
       if (todo.length) {
         const order = todo.slice().sort((a, b) => input[a].length - input[b].length)
+        // 折半重试成功后把批大小永久调小：否则每一批都要先撞一次 TDR 再折半，
+        // 在真实建库（几百批）上等于把 GPU 白烧一遍。只记录一次。
+        let shrunkLogged = false
+        const onShrink = () => {
+          if (this.batch <= 1) return
+          const next = Math.max(1, Math.floor(this.batch / 2))
+          if (!shrunkLogged) {
+            shrunkLogged = true
+            log(`GPU 批次过大导致推理失败，批大小 ${this.batch} → ${next} 后继续（后续批次不再重试）`)
+          }
+          this.batch = next
+        }
         for (let i = 0; i < order.length; i += this.batch) {
           const idx = order.slice(i, i + this.batch)
           const batchTexts = idx.map((j) => input[j])
           let vecs
           try {
-            vecs = await runBatch(session, tokenizer, ort, batchTexts)
+            vecs = await runBatch(session, tokenizer, ort, batchTexts, { onShrink })
           } catch (e) {
             // DML 在真实负载（长序列/大批）下会崩（实测 `DML GPU readback failed` / DEVICE_REMOVED），
             // 而启动时的探测（小批短序列）未必能提前发现 —— 曾经因此让整轮建库第 0 块就中断、把索引向量清成 0。
-            // 这里迁到 CPU 对**同一批**重试一次，保证建库/检索能跑完。
+            // 折半也救不回来时才迁到 CPU，对**同一批**重试一次，保证建库/检索能跑完。
             if (usedBackend !== 'gpu' || cpuMoved) throw e
             cpuMoved = true
             log(`GPU 推理失败（${String(e?.message ?? e).slice(0, 90)}），迁到 CPU 继续`)
@@ -342,8 +362,16 @@ export async function createEmbedder({
   }
 }
 
-/** 跑一批；失败自动减半，单条仍失败抛错（由调用方降级） */
-async function runBatch(session, tokenizer, ort, texts, depth = 0) {
+/**
+ * 跑一批；失败自动折半（并把调用方的批大小永久调小），单条仍失败时把**真实错误**抛给调用方。
+ *
+ * 历史 bug（0.6.2 及以前）：这里曾引用 `usedBackend` / `cpuMoved` / `modelFile` / `hasInt8` /
+ * `openSession` / `log` —— 它们全是 `createEmbedder` 的内部变量，在模块级函数里并不存在。
+ * 后果：任何一次真实推理失败都被替换成 `ReferenceError: usedBackend is not defined`，
+ * 真正的 DML 错误被吞掉，降级动作也没执行（只白做了 6 层折半重试）。
+ * 现在：本函数**不读写任何外部状态**，降级（GPU→CPU）只由 `embed()` 的 catch 负责。
+ */
+async function runBatch(session, tokenizer, ort, texts, { depth = 0, maxDepth = 4, onShrink } = {}) {
   try {
     const enc = await tokenizer(texts, { padding: true, truncation: true, max_length: MAX_TOKENS })
     const ids = enc.input_ids
@@ -365,20 +393,7 @@ async function runBatch(session, tokenizer, ort, texts, depth = 0) {
       else if (name === 'token_type_ids' && enc.token_type_ids)
         feeds[name] = new ort.Tensor('int64', enc.token_type_ids.data, enc.token_type_ids.dims)
     }
-    let res
-    try {
-      res = await session.run(feeds)
-    } catch (e) {
-      if (usedBackend !== 'gpu' || cpuMoved) throw e
-      // DML 在真实负载下会崩（实测 `DML GPU readback failed` / DEVICE_REMOVED），
-      // 而探测（小批短序列）未必能提前发现 → 这里**迁到 CPU 并对同一批重试一次**，
-      // 让建库/检索继续跑完，而不是整轮失败（曾经因此把索引的向量清成 0）。
-      cpuMoved = true
-      log(`GPU 推理失败（${String(e?.message ?? e).slice(0, 80)}），迁到 CPU 继续`)
-      modelFile = hasInt8 ? 'model_int8.onnx' : 'model_fp16.onnx'
-      await openSession(['cpu'])
-      res = await session.run(feeds)
-    }
+    const res = await session.run(feeds)
     const t = res.last_hidden_state ?? res[Object.keys(res)[0]]
     const [, seq, dim] = t.dims
     const vecs = []
@@ -388,10 +403,14 @@ async function runBatch(session, tokenizer, ort, texts, depth = 0) {
     }
     return vecs
   } catch (e) {
-    if (texts.length > 1 && depth < 6) {
+    if (texts.length > 1 && depth < maxDepth) {
+      onShrink?.()
       const half = Math.max(1, Math.floor(texts.length / 2))
-      return [...(await runBatch(session, tokenizer, ort, texts.slice(0, half), depth + 1)),
-              ...(await runBatch(session, tokenizer, ort, texts.slice(half), depth + 1))]
+      const opts = { depth: depth + 1, maxDepth, onShrink }
+      return [
+        ...(await runBatch(session, tokenizer, ort, texts.slice(0, half), opts)),
+        ...(await runBatch(session, tokenizer, ort, texts.slice(half), opts)),
+      ]
     }
     throw e
   }
