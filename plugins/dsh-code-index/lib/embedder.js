@@ -215,6 +215,7 @@ export async function createEmbedder({
   const base = { graphOptimizationLevel: 'all', intraOpNumThreads: threads, interOpNumThreads: 1 }
   let session
   let usedBackend = resolved
+  let cpuMoved = false
   const openSession = async (eps) => {
     session = await ort.InferenceSession.create(path.join(dir, modelFile), { ...base, executionProviders: eps })
     const first = Array.isArray(eps) ? eps[0] : eps
@@ -292,7 +293,9 @@ export async function createEmbedder({
      * 内容哈希让"同 tag ⇔ 同一份模型（含分词器）"，是跨机器一致性的唯一可靠依据。
      * （不能用 mtime/size 代替：文件在机器之间复制时 mtime 必然变。）
      */
-    modelTag: `${modelName}-${modelFingerprint(dir, modelFile)}-${usedBackend === 'gpu' ? 'fp16' : 'int8'}`,
+    // 精度取**文件名**而不是后端：同一份文件无论跑 DML 还是 CPU 都是同一批向量，
+    // 若按后端取精度，一旦运行期从 GPU 迁到 CPU，tag 就会变 → 同一索引里混两种 tag（而它们其实是同源向量）。
+    modelTag: `${modelName}-${modelFingerprint(dir, modelFile)}-${modelFile.includes('fp16') ? 'fp16' : 'int8'}`,
     dim: KNOWN_DIMS[modelName] ?? null,
     batch: batch ?? (usedBackend === 'gpu' ? 12 : 48),
     cache,
@@ -313,7 +316,21 @@ export async function createEmbedder({
         const order = todo.slice().sort((a, b) => input[a].length - input[b].length)
         for (let i = 0; i < order.length; i += this.batch) {
           const idx = order.slice(i, i + this.batch)
-          const vecs = await runBatch(session, tokenizer, ort, idx.map((j) => input[j]))
+          const batchTexts = idx.map((j) => input[j])
+          let vecs
+          try {
+            vecs = await runBatch(session, tokenizer, ort, batchTexts)
+          } catch (e) {
+            // DML 在真实负载（长序列/大批）下会崩（实测 `DML GPU readback failed` / DEVICE_REMOVED），
+            // 而启动时的探测（小批短序列）未必能提前发现 —— 曾经因此让整轮建库第 0 块就中断、把索引向量清成 0。
+            // 这里迁到 CPU 对**同一批**重试一次，保证建库/检索能跑完。
+            if (usedBackend !== 'gpu' || cpuMoved) throw e
+            cpuMoved = true
+            log(`GPU 推理失败（${String(e?.message ?? e).slice(0, 90)}），迁到 CPU 继续`)
+            modelFile = hasInt8 ? 'model_int8.onnx' : 'model_fp16.onnx'
+            await openSession(['cpu'])
+            vecs = await runBatch(session, tokenizer, ort, batchTexts)
+          }
           if (cache && useCache && keys) cache.put(idx.map((j, n) => [keys[j], vecs[n]]))
           idx.forEach((j, n) => {
             out[j] = vecs[n]
@@ -348,7 +365,20 @@ async function runBatch(session, tokenizer, ort, texts, depth = 0) {
       else if (name === 'token_type_ids' && enc.token_type_ids)
         feeds[name] = new ort.Tensor('int64', enc.token_type_ids.data, enc.token_type_ids.dims)
     }
-    const res = await session.run(feeds)
+    let res
+    try {
+      res = await session.run(feeds)
+    } catch (e) {
+      if (usedBackend !== 'gpu' || cpuMoved) throw e
+      // DML 在真实负载下会崩（实测 `DML GPU readback failed` / DEVICE_REMOVED），
+      // 而探测（小批短序列）未必能提前发现 → 这里**迁到 CPU 并对同一批重试一次**，
+      // 让建库/检索继续跑完，而不是整轮失败（曾经因此把索引的向量清成 0）。
+      cpuMoved = true
+      log(`GPU 推理失败（${String(e?.message ?? e).slice(0, 80)}），迁到 CPU 继续`)
+      modelFile = hasInt8 ? 'model_int8.onnx' : 'model_fp16.onnx'
+      await openSession(['cpu'])
+      res = await session.run(feeds)
+    }
     const t = res.last_hidden_state ?? res[Object.keys(res)[0]]
     const [, seq, dim] = t.dims
     const vecs = []
