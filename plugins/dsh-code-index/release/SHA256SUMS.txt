@@ -1,1 +1,1 @@
-7958c18d400300a39e73e478296c9e2dcf2bc60bfc757690c16b19d80a7af7f2  local-dsh-code-index-0.6.1.tgz
+eeb8c13fb56372540a389f4fd6083c248d10b4551b0df824a6cca58c2c4d61eb  local-dsh-code-index-0.6.2.tgz
