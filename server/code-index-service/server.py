@@ -38,6 +38,7 @@ import base64
 import gzip
 import json
 import os
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,6 +62,9 @@ EMBED_BATCH = int(F.get("EMBED_BATCH", "8"))
 RERANK_BATCH = int(F.get("RERANK_BATCH", "8"))
 RERANK_MAX_TOKENS = int(F.get("RERANK_MAX_TOKENS", "256"))
 KNN_MAX_BYTES = int(float(F.get("KNN_MAX_BYTES", str(2 * 1024**3))))
+# 启动后台预热：嵌入会话、重排 CUDA 内核、最大命名空间的 kNN 矩阵。
+# 实测冷启首查 2.4 s、首次重排 2.5 s（内核编译），预热后第一个用户查询就是热路径。
+WARMUP = F.get("WARMUP", "1") not in ("0", "false", "no")
 RETENTION_DAYS = int(F.get("RETENTION_DAYS", "30"))
 MAX_VECTORS_PER_LINEAGE = int(F.get("MAX_VECTORS_PER_LINEAGE", "500000"))
 MAX_TOTAL_BYTES = int(float(F.get("MAX_TOTAL_GB", "20")) * 1024**3)
@@ -159,6 +163,46 @@ def build():
     governor = _load("governor").EmbedGovernor(store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log)
     governor.start()
     log(f"index store ready: db={DB_PATH} rate={EMBED_RATE}/s batch={EMBED_BATCH} knnMax={KNN_MAX_BYTES}B")
+    if WARMUP:
+        threading.Thread(target=_warmup, name="warmup", daemon=True).start()
+
+
+def _warmup():
+    """把三条冷路径提前跑热：嵌入会话、重排内核、最大的 kNN 矩阵。
+
+    代价是启动后 ~3 s 的 CPU/GPU 忙；收益是**第一个真人查询**不再吃 2.4 s（kNN 矩阵）
+    或 2.5 s（rerank 内核编译）。任一步失败都只记日志，绝不影响服务可用性。
+    """
+    import time as _t
+
+    _t.sleep(0.5)
+    try:
+        t0 = _t.time()
+        embedder.embed(["warmup"], is_query=True)
+        log(f"warmup: embed {(_t.time() - t0) * 1000:.0f} ms")
+    except Exception as e:
+        log(f"warmup: embed 失败（忽略）{type(e).__name__}: {e}")
+    if reranker is not None:
+        try:
+            t0 = _t.time()
+            reranker.score("warmup", ["warmup text"])
+            log(f"warmup: rerank {(_t.time() - t0) * 1000:.0f} ms")
+        except Exception as e:
+            log(f"warmup: rerank 失败（忽略）{type(e).__name__}: {e}")
+    try:
+        row = store.db.execute(
+            "select r.namespace, r.tag, (select count(*) from chunks c where c.namespace = r.namespace) as n"
+            " from repos r order by n desc limit 1"
+        ).fetchone()
+        if row and row["n"] and row["tag"]:
+            t0 = _t.time()
+            hashes, mat, meta = knn.get(row["namespace"], row["tag"])
+            if mat.shape[0]:
+                q = embedder.embed(["warmup"], is_query=True)[0]
+                knn.topk(mat, q, 10)   # topk 是 KnnCache 的 staticmethod，不是模块函数
+            log(f"warmup: knn {row['namespace'][:24]}… n={mat.shape[0]} {(_t.time() - t0) * 1000:.0f} ms")
+    except Exception as e:
+        log(f"warmup: knn 失败（忽略）{type(e).__name__}: {e}")
 
 
 # ------------------------------------------------------------------ 业务

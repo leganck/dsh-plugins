@@ -203,6 +203,26 @@ embedding:
    对得上 ⇒ 切换后端**不用重建索引**；对不上 ⇒ **不回退**（回退等于把两种来源的向量混进一个索引）。
 3. **远端超时默认 8 s**，只用来兜住"那台机器睡了"。
 
+## 发布打包：两个产物
+
+```sh
+node build-release.mjs              # 两个都打
+node build-release.mjs --no-model   # 只打不带模型的（150 KB 级）
+```
+
+| 产物 | 大小 | 适用 |
+|---|---|---|
+| `release/local-dsh-code-index-<v>.tgz` | **0.2 MB**（44 文件） | `vectorStore: remote` 的用户：本机不需要 194 MB 模型 |
+| `release/local-dsh-code-index-<v>-local-model.tgz` | **178 MB**（49 文件，随包 fp16 模型） | 全本机、装完即用、不联网 |
+
+实现要点：
+
+- 用 `npm pack --ignore-scripts` **绕过 prepack**（否则两个包都会带上模型）；
+- 带模型那个先显式 `tools/pack-model.mjs stage`，打完立刻 `clean`（仓库里不留二进制）；
+- 打完用 `tar -tzf` **验证包里真的有 `model/model_fp16.onnx`**，不只信文件名；
+- `release/*.tgz` 被 `.gitignore` 忽略，只提交 `release/SHA256SUMS.txt`；
+- 装后验证：`node verify-install.mjs --pkg <解包后的 package 目录>`（19 项，含"包里没有捆 onnxruntime"）。
+
 ## 远端索引：`vectorStore: remote`（0.8.0 起，默认关）
 
 默认 `local`：向量索引在本机 SQLite，行为与之前完全一致。

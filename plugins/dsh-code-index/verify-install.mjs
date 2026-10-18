@@ -64,7 +64,9 @@ check('含 tools/migrate-embedding-tag.mjs（缓存 key 迁移）', fs.existsSyn
     check('fetch-model 可加载且清单完整', names.includes('bge-small-zh-v1.5') && names.includes('bge-reranker-base'), names.join(','))
     check(
       'fetch-model 的每个文件都配了体积下限（防"0 字节当成功"）',
-      Object.values(t.MODELS).every((m) => Object.values(m.onnx).every((f) => Number(m.minBytes?.[f]) > 0)),
+      // onnx 的某个变体可能是**多文件**（external data：图 + 权重，如 qwen3 的 fp16），
+      // 先摊平再逐个查下限，否则数组会被当成文件名、查不到下限而误报。
+      Object.values(t.MODELS).every((m) => Object.values(m.onnx).flat().every((f) => Number(m.minBytes?.[f]) > 0)),
     )
   } catch (e) {
     check('fetch-model 可加载且清单完整', false, String(e.message).slice(0, 100))
