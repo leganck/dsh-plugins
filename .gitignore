@@ -15,7 +15,6 @@ node_modules/
 
 # 临时提交消息文件（用 git commit -F 时生成，不该进仓库）
 _msg*.txt
-_msg*.txt
 
 # Python（服务端）
 __pycache__/

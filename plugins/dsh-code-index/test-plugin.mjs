@@ -26,10 +26,12 @@ const arg = (k, d) => {
   const i = argv.indexOf(k)
   return i >= 0 ? argv[i + 1] : d
 }
-const repo = arg('--repo') ?? ['D:\\Code\\your-repo', 'D:\\Code\\sample-repo'].find((p) => fs.existsSync(p))
+/** 与 test.mjs 同一口径：显式 --repo → 本机常见路径 → 自动夹具（CI 走最后一级） */
+let repo = arg('--repo') ?? ['D:\\Code\\your-repo', 'D:\\Code\\sample-repo'].find((p) => fs.existsSync(p))
 if (!repo || !fs.existsSync(repo)) {
-  console.error('找不到可测仓库，请用 --repo 指定')
-  process.exit(1)
+  const { makeFixtureRepo } = await import('../../scripts/ci-fixture.mjs')
+  repo = makeFixtureRepo()
+  console.log('· 没给 --repo，使用自动夹具仓库：' + repo)
 }
 
 let pass = 0

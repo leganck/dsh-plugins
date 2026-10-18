@@ -37,7 +37,8 @@ const dst = path.join(releaseDir, `${baseName}.tgz`)
 fs.renameSync(out, dst)
 console.log(`  ✅ ${path.basename(dst)}  ${mb(fs.statSync(dst).size)}`)
 
-// 校验和（本版本产物 + 历史保留）
+// 校验和：只记 release/ 里**实际存在**的产物（正常情况下就是当前版本）；
+// 历史版本不在这里累积 —— 它们靠自己的 tag / GitHub Release 资产。
 const lines = []
 for (const file of fs.readdirSync(releaseDir).filter((f) => f.endsWith('.tgz')).sort()) {
   const full = path.join(releaseDir, file)

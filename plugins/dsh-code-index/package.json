@@ -34,6 +34,23 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "title": {
+        "en": "Code Index",
+        "zh": "代码索引"
+      },
+      "description": {
+        "en": "Repository retrieval: local SQLite FTS5/BM25 keyword search plus optional remote semantic search and rerank, with AST chunking, directory map and change tracking.",
+        "zh": "代码库检索：本地 SQLite FTS5/BM25 关键词检索 + 可选远端语义检索/重排，含 AST 切块、目录地图与变更追踪。"
+      },
+      "category": "retrieval",
+      "labels": [
+        "keyword-search",
+        "semantic-search",
+        "ast"
+      ],
+      "icon": "./icon.svg"
     }
   },
   "peerDependencies": {
@@ -49,7 +66,30 @@
     }
   },
   "scripts": {
-    "test": "node test-remote.mjs && node test.mjs && node test-plugin.mjs --repo D:\\Code\\your-repo",
-    "test:remote": "node test-remote.mjs"
-  }
+    "test": "node test-remote.mjs && node test.mjs && node test-plugin.mjs",
+    "test:remote": "node test-remote.mjs",
+    "release": "node build-release.mjs"
+  },
+  "author": "leganck",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leganck/dsh-plugins.git",
+    "directory": "plugins/dsh-code-index"
+  },
+  "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-code-index",
+  "bugs": {
+    "url": "https://github.com/leganck/dsh-plugins/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "bundle",
+    "plugin",
+    "code-search",
+    "bm25",
+    "sqlite-fts5",
+    "embeddings",
+    "rag"
+  ]
 }

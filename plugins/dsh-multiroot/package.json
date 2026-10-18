@@ -1,0 +1,82 @@
+{
+  "name": "@local/dsh-multiroot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH bundle: Cursor-style multi-root workspace — a root registry resolved from .dshworkspace.json, plus root-scoped tools. Scaffold: registry + workspace_roots today; root_write/root_edit/root_run are designed but not implemented.",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "docs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "title": {
+        "en": "Multiroot",
+        "zh": "多根工作空间"
+      },
+      "description": {
+        "en": "Cursor-style multi-root workspace: a root registry resolved from .dshworkspace.json. Scaffold — the registry and workspace_roots tool are implemented; root-scoped write/edit/run are designed only.",
+        "zh": "Cursor 式多根工作空间：根注册表由 .dshworkspace.json 解析。脚手架阶段——注册表与 workspace_roots 已实现，按根读写/执行仅有设计。"
+      },
+      "category": "workspace",
+      "labels": [
+        "multi-root",
+        "scaffold"
+      ],
+      "icon": "./icon.svg"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "author": "leganck",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leganck/dsh-plugins.git",
+    "directory": "plugins/dsh-multiroot"
+  },
+  "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-multiroot",
+  "bugs": {
+    "url": "https://github.com/leganck/dsh-plugins/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "bundle",
+    "plugin",
+    "workspace",
+    "multi-root",
+    "monorepo"
+  ],
+  "icon": "./icon.svg"
+}

@@ -1,0 +1,36 @@
+{
+  "name": "dsh-plugins",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH bundles by leganck: code-index (repository retrieval), memory-archive (verbatim session archive), multiroot (Cursor-style multi-root workspace).",
+  "license": "MIT",
+  "author": "leganck",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leganck/dsh-plugins.git"
+  },
+  "homepage": "https://github.com/leganck/dsh-plugins",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "bundle",
+    "plugins"
+  ],
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "workspaces": [
+    "plugins/*"
+  ],
+  "scripts": {
+    "test": "pnpm -r --if-present test",
+    "test:market": "node market/build-index.mjs --check",
+    "market": "node market/build-index.mjs",
+    "market:check": "node market/build-index.mjs --check",
+    "release": "node scripts/release-all.mjs",
+    "ci:fixture": "node scripts/ci-fixture.mjs",
+    "check:yaml": "node scripts/check-yaml.mjs"
+  }
+}

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <!-- 归档：三层叠放的段落 + 底部托盘 -->
+  <path d="M7 3h8l3 3v7H7z" />
+  <path d="M7 16h11M7 19h11" />
+  <path d="M4 5v11l3 3" />
+</svg>

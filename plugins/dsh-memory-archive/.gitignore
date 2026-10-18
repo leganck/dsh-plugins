@@ -1,0 +1,3 @@
+# 发布包是构建产物，不进 git（安装走插件源 / 分发走 Releases）
+release/*
+!release/SHA256SUMS.txt

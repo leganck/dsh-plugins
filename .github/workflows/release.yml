@@ -1,0 +1,116 @@
+name: release
+
+# 打 tag 即发布：`code-index-v0.10.1` / `memory-archive-v1.2.0`
+#
+# 为什么用 windows-latest：memory-archive 的打包脚本是 PowerShell（build-plugin-dist.ps1），
+# 里面用了 `Compress-Archive`、`npm pack` 与自测；在它原生环境里跑最稳。
+# code-index 是纯 node，在 Windows 上跑同样没问题。
+#
+# 为什么用 GitHub Releases 而不是把 tgz 提交进 git：
+#   - `install_bundle` 的 target 支持 **http(s) 的 .tgz**（plugin-manager 的 TARBALL_SPEC，
+#     注释原文 "A tarball, on disk or over HTTP"），所以 Release 资产 URL 可直接安装；
+#   - 插件源（Discover）那条路走 git 源（commit 钉死），不需要产物；
+#   - 仓库里只留 SHA256SUMS.txt 作为校验记录，二进制不进历史。
+on:
+  push:
+    tags:
+      - code-index-v*
+      - memory-archive-v*
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # tag → 插件目录，并强制 **tag 版本 == package.json 版本**（防手滑打错号）
+      - name: 解析 tag 并校验版本
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^(?<plugin>[a-z][a-z-]*)-v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "tag 不合法：$tag（期望 <plugin>-v<semver>，如 code-index-v0.10.1）"
+          }
+          $plugin = $Matches.plugin
+          $version = $Matches.version
+          $dir = "dsh-$plugin"
+          $pkgPath = "plugins/$dir/package.json"
+          if (-not (Test-Path $pkgPath)) { throw "找不到 $pkgPath（tag 里的插件名与目录名对不上？）" }
+          $pkgVersion = (Get-Content $pkgPath -Raw | ConvertFrom-Json).version
+          if ($pkgVersion -ne $version) {
+            throw "tag 版本 $version 与 $pkgPath 的 $pkgVersion 不一致 —— 先改 package.json 再打 tag"
+          }
+          "plugin=$dir"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "plugin=$dir version=$version"
+
+      - name: 安装 workspace（零依赖，仅建链接）
+        run: pnpm install --no-frozen-lockfile
+
+      # 打包脚本自己会跑自测（memory-archive 的脚本第 1 步就是 ALL PASSED 才继续）
+      - name: 打包
+        shell: pwsh
+        run: node scripts/release-all.mjs ${{ steps.meta.outputs.plugin }}
+
+      - name: 断言产物齐全
+        shell: pwsh
+        run: |
+          $dir = "plugins/${{ steps.meta.outputs.plugin }}/release"
+          $version = "${{ steps.meta.outputs.version }}"
+          Get-ChildItem $dir -File | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          $tgz = @(Get-ChildItem $dir -Filter '*.tgz' -File)
+          if ($tgz.Count -eq 0) { throw "没有 .tgz 产物：$dir" }
+          if (-not ($tgz | Where-Object { $_.Name -like "*$version*" })) {
+            throw "产物名里没有版本号 $version —— 检查 package.json 与打包脚本"
+          }
+          if (-not (Test-Path "$dir/SHA256SUMS.txt")) { throw "没有 SHA256SUMS.txt" }
+          # 校验和必须与刚打出的产物一致（脚本自己算的，这里再核一遍）
+          Get-Content "$dir/SHA256SUMS.txt" | Where-Object { $_.Trim() } | ForEach-Object {
+            $hash = ($_ -split '\s+')[0]
+            $name = ($_ -split '\s+')[1]
+            $file = Join-Path $dir $name
+            if (-not (Test-Path $file)) { throw "SHA256SUMS.txt 里提到的产物不存在：$name" }
+            $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $hash) { throw "校验和不符：$name" }
+          }
+
+      - name: 创建 Release 并上传资产
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $dir = "plugins/${{ steps.meta.outputs.plugin }}/release"
+          $version = "${{ steps.meta.outputs.version }}"
+          # 只上传**本版本**的产物：万一目录里混进旧版本文件，也不要一起发出去
+          $assets = @(Get-ChildItem $dir -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' -and $_.Name -like "*$version*" } | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) { throw "没有匹配版本 $version 的产物可上传：$dir" }
+          $assets += (Join-Path $dir 'SHA256SUMS.txt')
+          # 单引号 here-string：正文里有 ``` 代码围栏，双引号 here-string 会把反引号当转义符吃掉
+          $notes = @'
+          由 ``.github/workflows/release.yml`` 自动打包并校验。
+
+          安装（`install_bundle` 支持 http(s) 的 .tgz）：
+          ```text
+          plugin_manager(action: "install_bundle", target: "<本页资产的下载 URL>")
+          ```
+          或者通过插件源（Discover）安装，见仓库 README 的「插件源（market）」一节。
+          '@
+          gh release create "${{ github.ref_name }}" @assets --title "${{ github.ref_name }}" --notes $notes

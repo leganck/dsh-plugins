@@ -7,12 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://git.example.com/your-org/dsh-plugins.git",
+    "url": "git+https://github.com/leganck/dsh-plugins.git",
     "directory": "plugins/dsh-memory-archive"
   },
-  "homepage": "https://git.example.com/your-org/dsh-plugins/-/tree/main/plugins/dsh-memory-archive",
+  "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-memory-archive",
   "bugs": {
-    "url": "https://git.example.com/your-org/dsh-plugins/-/issues"
+    "url": "https://github.com/leganck/dsh-plugins/issues"
   },
   "keywords": [
     "dsh",
@@ -25,10 +25,11 @@
     "context"
   ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^22.19 || >=24"
   },
   "scripts": {
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "release": "pwsh -NoProfile -File build-plugin-dist.ps1"
   },
   "exports": {
     ".": "./index.js",
@@ -43,13 +44,30 @@
     "INSTALL.md",
     "CHANGELOG.md",
     "LICENSE",
-    "install.ps1",
     "test.mjs",
     "tools/*.mjs"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "title": {
+        "en": "Memory Archive",
+        "zh": "会话记忆归档"
+      },
+      "description": {
+        "en": "For every compaction, writes a greppable segment file with the verbatim shadowed turns, maintains an index, and injects a pointer so early tool output stays reachable.",
+        "zh": "每次压缩把被折叠的逐字轮次写成可 grep 的段落文件，维护索引并注入指针，让早期工具输出在长会话里仍可检索。"
+      },
+      "category": "context",
+      "labels": [
+        "compaction",
+        "archive"
+      ],
+      "icon": "./icon.svg"
     }
-  }
+  },
+  "author": "leganck",
+  "icon": "./icon.svg"
 }
