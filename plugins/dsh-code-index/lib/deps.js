@@ -62,7 +62,18 @@ export const DEP_GROUPS = {
     // 按我们的教训"整个元数据对象传给 setLanguage"实测可用（识别出 class_declaration / method_declaration）。
     { name: 'tree-sitter-groovy', version: '0.1.2' },
   ],
+  /**
+   * 按语言拆开的**可选**语法组：`code_index` 检测到仓库里有对应扩展名、但没装时会提示，
+   * 用户只装自己要的那一个（2.7 / 5.8 / 10.8 MB），而不是被绑着下一个 19 MB 的大礼包。
+   * 版本必须与 tree-sitter@0.21.1 同年代（最新 0.25.x 的 peer 是 ^0.25，会逼着升级运行时）。
+   */
+  'parser-go': [{ name: 'tree-sitter-go', version: '0.21.2' }],
+  'parser-python': [{ name: 'tree-sitter-python', version: '0.21.0' }],
+  'parser-rust': [{ name: 'tree-sitter-rust', version: '0.21.0' }],
 }
+
+/** 三个可选语法组一起装（= 老版本"全装 parser"的行为） */
+DEP_GROUPS['parser-extra'] = [...DEP_GROUPS['parser-go'], ...DEP_GROUPS['parser-python'], ...DEP_GROUPS['parser-rust']]
 
 /** 兼容旧调用名（= embed 组） */
 export const EMBED_PACKAGES = DEP_GROUPS.embed

@@ -28,6 +28,9 @@ export const GRAMMARS = {
   typescript: { pkg: 'tree-sitter-typescript', pick: 'typescript' },
   tsx: { pkg: 'tree-sitter-typescript', pick: 'tsx' },
   groovy: { pkg: 'tree-sitter-groovy', pick: null },
+  go: { pkg: 'tree-sitter-go', pick: null },
+  python: { pkg: 'tree-sitter-python', pick: null },
+  rust: { pkg: 'tree-sitter-rust', pick: null },
 }
 
 /** 默认参数（可被配置逐项覆盖）
@@ -64,7 +67,15 @@ export const DEFAULT_BY_EXT = {
    */
   '.groovy': { strategy: 'ast', grammar: 'groovy', ...P, maxLines: 200 },
   '.gradle': { strategy: 'ast', grammar: 'groovy', ...P, maxLines: 200 },
-
+  /**
+   * Go / Python / Rust：语法包存在（与运行时 0.21.x 同年代），但我们**默认不装**，
+   * 由 `code_index` 检测到就提示，用户点了才下（见 lib/parser-hints.js）。
+   * 没装时这些扩展名照样能建库 —— chunker 会降级 heuristic 并如实报告原因。
+   */
+  '.go': { strategy: 'ast', grammar: 'go', ...P },
+  '.py': { strategy: 'ast', grammar: 'python', ...P },
+  '.pyi': { strategy: 'ast', grammar: 'python', ...P },
+  '.rs': { strategy: 'ast', grammar: 'rust', ...P },
   // ── 语言内部混排 / 非括号语言：固定窗口（保守） ──
   '.vue': { strategy: 'window', windowLines: 60 },
   '.xml': { strategy: 'window', windowLines: 60 },

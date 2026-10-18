@@ -19,6 +19,7 @@ import { sha256 } from './hash.js'
 import { walkRepo, diffFiles, readForIndex, DEFAULT_INCLUDE, DEFAULT_EXCLUDE_DIRS, DEFAULT_MAX_FILE_BYTES } from './scan.js'
 import { resolveChunkConfig } from './strategies.js'
 import { getParser } from './chunk-ast.js'
+import { detectMissingGrammars } from './parser-hints.js'
 
 /**
  * 本仓库**实际会用到、且确实加载成功**的 AST 语法（用于切块指纹）。
@@ -121,6 +122,8 @@ export async function buildIndex({
   // 否则给一个 Go 仓库装 tree-sitter 也会改指纹 → 换命名空间 → 白白重嵌全部向量。
   const scanned = walkRepo(repoRoot, opts)
   const astCapability = usedAstGrammars(scanned, chunking ?? {}, depsDir, depsFallbackDirs)
+  // 「打开新目录就提示装语言扩展」：本仓库需要、但当前装不上的语法（不偷偷装，只报结论）
+  const parserMissing = detectMissingGrammars(scanned, chunking ?? {}, { depsDir, depsFallbackDirs })
   /**
    * 切块指纹 = 配置 **+ 本仓库实际会用到的可用语法**。
    *
@@ -281,6 +284,9 @@ export async function buildIndex({
     embedNote,
     /** 远端索引同步结果（vectorStore='remote' 时有值） */
     remote: remoteInfo,
+    /** 需要但没装的语法（给 code_index 的安装提示用） */
+    parserMissing,
+    scannedFiles: scanned.length,
     /** 实际使用的切块策略 → 文件数；以及降级原因（最多 5 条去重） */
     strategies: Object.fromEntries(strategyFiles),
     chunkFallbacks: fallbackReasons,
