@@ -1,0 +1,21 @@
+# 多根工作空间（骨架）。根定义优先从 `.dshworkspace.json` 发现，
+# 也可以用下面的内联 roots 兜底（两者都给时文件优先）。
+- insert:
+    - id: multiroot
+      name: '@local/dsh-multiroot'
+      config:
+        # 显式指定定义文件；null = 从会话目录向上查找 .dshworkspace.json
+        definitionFile: null
+        # 内联根定义（等价于文件里的 roots）：
+        # roots:
+        #   - id: app
+        #     path: .
+        #   - id: oss
+        #     path: D:/oss/microservice-a
+        #   - id: spec
+        #     path: C:/Users/legan/Documents/spec
+        #     readonly: true
+        roots: []
+        # 主根 id；缺省 = 第一个根
+        primary: null
+        maxUpLevels: 12

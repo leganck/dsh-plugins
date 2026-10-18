@@ -1,25 +1,27 @@
-# DSH 插件仓（记忆 + 索引加速）
+# DSH 插件仓（记忆 + 索引加速 + 多根工作空间）
 
-本仓库收录两个 DSH 插件，外加一个可选的远端检索服务：
+本仓库是一个**多插件仓库**：三个 DSH 插件 + 一个可选的远端检索服务。
+所有插件零运行时依赖，版本以各自的 `package.json` 为准（下表不再写死版本号，避免漂移）。
 
-| 插件 | 版本 | 作用 | 依赖 |
-|---|---|---|---|
-| [`plugins/dsh-memory-archive`](plugins/dsh-memory-archive/) | 1.2.0 | **记忆**：每次压缩（compaction）把被折叠的**逐字**轮次写成 `segment_NNN.md`，并维护 `INDEX.md`，同时向会话注入指针，让早期工具输出在长会话里可被重新检索 | 无（纯 node 内置模块） |
-| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | 0.10.1 | **索引加速**：本地 SQLite FTS5/BM25 + 可选**远端**语义检索/重排（RRF 融合），五个工具 `code_index` / `code_search` / `code_map` / `code_index_status` / `code_index_deps` | 无（parser 组为可选增强，按需装） |
+| 插件 | 作用 | 依赖 |
+|---|---|---|
+| [`plugins/dsh-memory-archive`](plugins/dsh-memory-archive/) | **记忆**：每次压缩（compaction）把被折叠的**逐字**轮次写成 `segment_NNN.md`，并维护 `INDEX.md`，同时向会话注入指针，让早期工具输出在长会话里可被重新检索 | 无（纯 node 内置模块） |
+| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | **索引加速**：本地 SQLite FTS5/BM25 + 可选**远端**语义检索/重排（RRF 融合），五个工具 `code_index` / `code_search` / `code_map` / `code_index_status` / `code_index_deps` | 无（parser 组为可选增强，按需装） |
+| [`plugins/dsh-multiroot`](plugins/dsh-multiroot/) | **多根工作空间**（脚手架）：`.dshworkspace.json` 声明多个根目录，`workspace_roots` 工具列出根 id/路径/只读/主根 | 无 |
 
 > 0.10.0 起 code-index 为 **remote-only**：本地不再有嵌入模型与重排模型，
 > 向量与重排都交给 [`server/code-index-service`](server/code-index-service/)；
 > 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，零模型）。
 > 远端不可用会自动退化 + 60 秒冷却后重试，不需要重启。
 
-## 为什么这两个放一起
+## 为什么这些放一起
 
 它们解决的是同一个问题的两面：**长会话里"信息在但找不到"**。
 
 - 记忆插件负责**会话历史**：压缩会丢逐字内容，它把逐字内容重新变成可 grep 的档案。
 - 索引插件负责**代码库**：grep 循环找代码慢，它用关键词+语义两路召回并排序。
 
-两个插件都是"把一次性成本换成可复用资产"：记忆插件写归档，索引插件把向量与索引交给远端服务长期复用（本机只留 FTS5）。
+前两个插件都是"把一次性成本换成可复用资产"：记忆插件写归档，索引插件把向量与索引交给远端服务长期复用（本机只留 FTS5）；多根插件则把"一个会话只能看一个目录"这件事变成可声明的注册表。
 
 ## 快速开始
 
@@ -37,7 +39,7 @@ plugin_manager(action: "install_bundle", target: "<release/*.tgz 或包目录的
 需要在 profile 补丁层按 id 覆盖成 `disabled: false` 并重启应用，`plugin_manager` 才可用。
 另外本 profile 由应用独占管理，`dsh plugin --profile …` CLI 那条路不可用。
 
-**安装期依赖**：两个插件都没有 `dependencies`（code-index 的 parser 组、记忆插件的依赖都不在安装期拉取），
+**安装期依赖**：三个插件都没有 `dependencies`（code-index 的 parser 组是运行期按需装，记忆插件与多根插件只用 node 内置模块），
 所以安装是纯 JS、秒级，不会触发 `pendingBuilds`。code-index 需要 AST 切块时再
 `code_index_deps action=install group=parser`（约 61 MB，按需）。
 
@@ -96,44 +98,73 @@ node plugins/dsh-code-index/verify-install.mjs
 ## 目录结构
 
 ```
-market/                         插件源（Discover 索引）：index.json + 生成器
+package.json                    仓库根：workspaces + 统一脚本（test / market / release）
+pnpm-workspace.yaml             工作区：只收 plugins/*（server 是 Python，不纳入）
+.npmrc                          关掉 peer 自动安装（否则 install 会去拉一整份 DSH）
+LICENSE / .nvmrc                授权与 Node 版本
+scripts/
+  ci-fixture.mjs                确定性夹具仓库（测试没给 --repo 时自动用它）
+  release-all.mjs               遍历插件、跑各自的 scripts.release
+  validate-market.mjs           用官方校验器验 market/index.json（format 1）
+  check-yaml.mjs                所有 cordis.patch.yml + CI 工作流的语法检查
+.github/workflows/ci.yml        矩阵：三插件自测 + 插件源一致 + 配置语法
+market/                         插件源（Discover 索引）：index.json + 生成器（自动发现 plugins/*）
 plugins/
   dsh-memory-archive/
     index.js                    插件入口（apply(ctx, config)）
     build-plugin-dist.ps1       打包：npm pack → tgz/zip/sha256 → release/
-    release/                    随 tag 分发的静态产物（1.2.0）
+    release/                    SHA256SUMS.txt 进 git；tgz/zip 是构建产物、不进 git
     tools/                      reindex / verify-segments / verify-evicted / backfill-session
-    test.mjs                    自测（106 项）
+    test.mjs                    自测
   dsh-code-index/
     index.js                    插件入口 + 五个工具
     lib/                        store / chunker / scan / query / search / indexer / remote / repo
     tools/                      远端同步与题库校验（remote-index-sync / build-oss-index / verify-cases）
     release/                    发布校验记录（SHA256SUMS.txt；tgz 是构建产物、不进 git）
     verify-install.mjs          装后验证：包加载 + 五工具注册 + roots 白名单 + parser 状态
-    test.mjs                    核心自测（95 项：FTS/切块/扫描排除/增量）
-    test-plugin.mjs             插件接口自测（74 项）
-    test-remote.mjs             远端地址/重排/配置校验（30 项，不需模型/网络）
+    test.mjs                    核心自测（FTS/切块/扫描排除/增量；缺 --repo 时用夹具）
+    test-plugin.mjs             插件接口自测（缺 --repo 时用夹具）
+    test-remote.mjs             远端地址/重排/配置校验（不需模型/网络）
+  dsh-multiroot/
+    index.js                    插件入口：配置校验 + 注册 workspace_roots
+    lib/registry.js             根注册表（发现 / 校验 / 规范化）
+    docs/analysis/              多根工作空间调研与实现设计（从仓库根 docs/analysis 迁入）
+    test.mjs                    自测
 server/
   code-index-service/           远端索引服务（Python）：/v1 索引层 + /embed + /rerank
-    selftest.py                 服务端自测（41 项，FAKE_EMBED 模式不需要模型）
-    start.sh / compose.yaml     部署（CUDA 12 + onnxruntime 1.19.2，兼容 Pascal GPU）
-docs/
-  analysis/                     多根工作空间调研存档（未实施）
-  rollback/                     install_bundle 之前的手写补丁回滚备注
+    Dockerfile                  一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
+    compose.yaml (+.gpu/.build) 开箱即用部署（镜像自带嵌入模型）
+    scripts/fetch-models.mjs    拉模型到 models/（构建用，不进 git）
+    selftest.py                 服务端自测（43 项；FAKE_EMBED 模式不需要模型）
+    deploy/legacy/              容器化之前的非容器路径，仅参考
 ```
 
+## 多插件仓库约定（新增插件照做即可）
+
+1. 建目录 `plugins/<name>/`，至少含：`package.json`（`name` 用 `@local/dsh-*`、`dsh.bundle.patch`、
+   `repository.directory`、`engines.node`、`license`）、`cordis.patch.yml`、`index.js`、`README.md`、`test.mjs`；
+2. `package.json` 补 `dsh.market`（`title` / `description` 用本地化对象、`category`、`labels`、`icon`）——
+   插件源与 Discover 直接读它，**不用改生成器**；
+3. `scripts.test` 不许依赖机器路径：需要仓库就用 `scripts/ci-fixture.mjs` 兜底（`--repo` 仍优先）；
+4. 有发布物就声明 `scripts.release`；没有就留空（`pnpm release` 会 skipped，不算失败）；
+5. `pnpm test` 与 `pnpm market:check` 通过即可提交 —— CI 会自动把新插件纳入矩阵。
 
 ## 自测
 
-```powershell
-# 记忆插件
-cd plugins/dsh-memory-archive; node test.mjs
+```bash
+pnpm test                                  # 三个插件全部自测（推荐）
+pnpm market:check                          # 插件源是否与 plugins/* 一致
+node scripts/check-yaml.mjs                # 配置/工作流语法
+node scripts/validate-market.mjs           # 官方 format 1 校验（需先装校验器，见下）
+```
 
-# 索引插件（--repo 指定一个真实仓库）
+索引插件的测试需要一个仓库来扫描，**不传 `--repo` 时会自动建一个确定性夹具仓库**
+（`scripts/ci-fixture.mjs`），所以本机与 CI 都能直接跑：
+
+```bash
 cd plugins/dsh-code-index
-node test.mjs --repo D:\Code\your-repo
-node test-plugin.mjs --repo D:\Code\your-repo
-node test-remote.mjs
+node test.mjs                              # 自动夹具
+node test.mjs --repo D:/Code/your-repo     # 指定真实仓库（显式优先，不会偷偷换夹具）
 ```
 
 ## 插件源（market）
@@ -144,8 +175,53 @@ node test-remote.mjs
 https://raw.githubusercontent.com/leganck/dsh-plugins/main/market/index.json
 ```
 
-发版流程：改插件 → 提交 → `node market/build-index.mjs`（版本取各插件 `package.json`、commit 取 HEAD）→ 提交并推送 `market/index.json`。
+生成器**自动发现** `plugins/*`：版本取各自 `package.json`、commit 取 HEAD、
+展示文案取 `package.json` 里的 `dsh.market`（缺省也能收录，只是文案退化并给出警告）。
+所以**新增插件不需要改生成器**。
+
+```bash
+pnpm market          # 重新生成 market/index.json
+pnpm market:check    # 与仓库里的文件比对，漂移则退出 1（CI 用）
+```
+
+官方校验（与 DSH 本体同一个包）：
+
+```bash
+npm i --no-save @deepseek-ai/dsh-plugin-market-index@0.2.1-rc.2
+node scripts/validate-market.mjs
+```
+
 详见 [`market/README.md`](market/README.md)。
+
+## 服务端镜像（GHCR）
+
+服务端 [`server/code-index-service`](server/code-index-service/) 已容器化，**模型内置、开箱即用**：
+
+```bash
+docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
+  -v dsh-embed-data:/data ghcr.io/leganck/dsh-embed:latest-cpu
+```
+
+| 变体 | 拉取（压缩） | 未压缩 | 内容 / 用途 |
+|---|---|---|---|
+| `latest-cpu` | **≈267 MB** | 485 MB | cpu 底座 + 嵌入模型，**默认推荐** |
+| `latest-gpu` | ≈1.7 GB | 3.06 GB | gpu 底座（CUDA 12 + ORT 1.19.2，Pascal 可用）+ 嵌入模型 |
+| `latest-cpu-rerank` / `latest-gpu-rerank` | ≈759 MB / ≈2.0 GB | 1.06 / 3.63 GB | 再加重排模型（默认不需要：服务端 `rerank` 默认 off） |
+| `base-cpu` / `base-gpu` | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | 只有运行时，模型自己挂载 |
+
+### 镜像体积怎么控制的
+
+1. **默认只内置嵌入模型**（194 MB），重排模型（531 MB）单独出 `-rerank` 变体 ——
+   服务端 `rerank` 默认 `off`，缺模型时 `/health` 报 `rerank_ready=false`、客户端自动回退，功能不缺。
+2. **底座与应用分层**：`base-{cpu,gpu}` 单独构建，模型/代码更新只推上层，用户增量拉取小。
+3. **做体积审计而不是拍脑袋**：`tokenizers --no-deps`（省掉 huggingface_hub 全家桶 ≈40 MB）、
+   装完卸 `sympy/mpmath`（85 MB，实测不影响出向量）——cpu 底座从 388 MB 降到 281 MB。
+4. **不用量化模型**：bge-base 的 int8 导出实测**向量塌缩**；rerank int8 在 CUDA 上算子支持差、
+   CPU 上每候选 250 ms。省下的体积换不来可用性。
+5. **不做"首启自动下载模型"**：破坏离线可用、把网络故障变成启动失败。要小镜像就 `base-*` + 挂载。
+
+发布：`git tag server-v0.1.0 && git push origin server-v0.1.0` → `.github/workflows/publish-image.yml`
+先推 base 再叠模型出 4 个变体，**每个变体都先在容器里跑 `selftest.py`（43 项）通过才推**。
 
 ## 版本与 tag 约定
 
@@ -158,7 +234,35 @@ memory-archive-v1.2.0
 code-index-v0.10.1
 ```
 
-分发产物仍在插件自身的 `release/` 目录（`/-/raw/<tag>/plugins/<plugin>/release/<file>`），旧 tag 继续按其原本路径提供服务。
+打 tag 即发布：[.github/workflows/release.yml](.github/workflows/release.yml) 会
+**解析 tag → 校验版本 → 打包 → 核对 SHA256SUMS → `gh release create` 上传资产**。
+两条硬护栏：tag 里的版本必须**等于**该插件 `package.json` 的 `version`；产物名里必须带这个版本号。
+
+### 三种安装/分发方式（都不依赖把 tgz 提交进 git）
+
+| 方式 | 适合 | 做法 |
+|---|---|---|
+| **插件源（推荐）** | 日常安装、想随时升级 | Plugins → Discover 添加源 `https://raw.githubusercontent.com/leganck/dsh-plugins/main/market/index.json`；索引里的 git 源钉死 commit，装到的就是那个 commit 的目录 |
+| **GitHub Release 资产** | 固定某个版本、离线/内网、不想让它跟着分支变 | 下面这条命令，target 换成对应 tag 的资产 URL |
+| **本地构建** | 自己改代码后试装 | `pnpm release`（遍历插件跑各自的 `scripts.release`），产物在插件 `release/`，git 里只有 `SHA256SUMS.txt` |
+
+```text
+# GitHub Release 资产直接安装（install_bundle 支持 http(s) 的 .tgz）
+plugin_manager(action: "install_bundle",
+  target: "https://github.com/leganck/dsh-plugins/releases/download/code-index-v0.10.1/local-dsh-code-index-0.10.1.tgz")
+```
+
+> ⚠️ 两者的边界别搞混：**插件源（market index）只接受 `npm` 与 `git` 两种 source**，
+> Release 资产 URL 不能写进 `market/index.json`；它只能作为 `install_bundle` 的 target
+> （或手工下载）。反过来，git 源也不需要上传任何产物。
+
+校验下载到的资产：
+
+```powershell
+Get-FileHash .\local-dsh-code-index-0.10.1.tgz -Algorithm SHA256   # 与 SHA256SUMS.txt 对比
+```
+
+新 tag 一律带插件前缀（见上）；历史 tag 保持不动。
 
 ## 索引插件的能力实测（历史口径）
 

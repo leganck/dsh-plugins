@@ -1,0 +1,10 @@
+# 多插件仓库的工作区声明。
+#
+# 只收 plugins/*：`server/code-index-service` 是 Python 部署单元（requirements + compose.yaml），
+# 不属于 pnpm workspace —— 它有独立的 selftest.py 与 start.sh，别混进来。
+packages:
+  - 'plugins/*'
+
+# 插件的 peerDependencies（@deepseek-ai/dsh / cordis）由**宿主**提供。
+# 不关这个开关，pnpm 会把 optional peer 也解析下载 —— 等于为了跑插件测试先拉一整份 DSH（含 node-pty/koffi）。
+autoInstallPeers: false

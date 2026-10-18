@@ -1,0 +1,247 @@
+{
+  "format": 1,
+  "title": {
+    "en": "leganck DSH plugins",
+    "zh": "leganck 的 DSH 插件"
+  },
+  "description": {
+    "en": "Local-first DSH bundles: repository retrieval, verbatim session archive, multi-root workspace.",
+    "zh": "本地优先的 DSH 插件集合：代码库检索、会话逐字归档、多根工作空间。"
+  },
+  "metadata": {
+    "categories": {
+      "context": {
+        "title": {
+          "en": "Context",
+          "zh": "上下文"
+        }
+      },
+      "retrieval": {
+        "title": {
+          "en": "Retrieval",
+          "zh": "检索"
+        }
+      },
+      "workspace": {
+        "title": {
+          "en": "Workspace",
+          "zh": "工作空间"
+        }
+      }
+    },
+    "labels": {
+      "archive": {
+        "title": {
+          "en": "Archive",
+          "zh": "归档"
+        }
+      },
+      "ast": {
+        "title": {
+          "en": "AST chunking",
+          "zh": "AST 切块"
+        }
+      },
+      "compaction": {
+        "title": {
+          "en": "Compaction",
+          "zh": "压缩"
+        }
+      },
+      "keyword-search": {
+        "title": {
+          "en": "Keyword search",
+          "zh": "关键词检索"
+        }
+      },
+      "multi-root": {
+        "title": {
+          "en": "Multi-root",
+          "zh": "多根目录"
+        }
+      },
+      "scaffold": {
+        "title": {
+          "en": "Scaffold",
+          "zh": "脚手架"
+        }
+      },
+      "semantic-search": {
+        "title": {
+          "en": "Semantic search",
+          "zh": "语义检索"
+        }
+      }
+    },
+    "sortKeys": {
+      "published": {
+        "title": {
+          "en": "Published",
+          "zh": "发布时间"
+        },
+        "order": "desc"
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "@local/dsh-code-index",
+      "title": {
+        "en": "Code Index",
+        "zh": "代码索引"
+      },
+      "description": {
+        "en": "Repository retrieval: local SQLite FTS5/BM25 keyword search plus optional remote semantic search and rerank, with AST chunking, directory map and change tracking.",
+        "zh": "代码库检索：本地 SQLite FTS5/BM25 关键词检索 + 可选远端语义检索/重排，含 AST 切块、目录地图与变更追踪。"
+      },
+      "icon": "../plugins/dsh-code-index/icon.svg",
+      "author": "leganck",
+      "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-code-index",
+      "repository": {
+        "url": "https://github.com/leganck/dsh-plugins",
+        "directory": "plugins/dsh-code-index"
+      },
+      "metadata": {
+        "category": "retrieval",
+        "keywords": [
+          "dsh",
+          "deepseek-harness",
+          "cordis",
+          "bundle",
+          "plugin",
+          "code-search",
+          "bm25",
+          "sqlite-fts5",
+          "embeddings",
+          "rag"
+        ],
+        "labels": [
+          "keyword-search",
+          "semantic-search",
+          "ast"
+        ],
+        "sortKeys": {
+          "published": 1792326875
+        }
+      },
+      "versions": [
+        {
+          "version": "0.10.1",
+          "publishTimestamp": 1792326875,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/leganck/dsh-plugins.git",
+            "commit": "f36b833e881c0f70c7cf6efc1da136f5782a9593",
+            "path": "plugins/dsh-code-index"
+          },
+          "engines": {
+            "dsh": "^0.2.0-rc.2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@local/dsh-memory-archive",
+      "title": {
+        "en": "Memory Archive",
+        "zh": "会话记忆归档"
+      },
+      "description": {
+        "en": "For every compaction, writes a greppable segment file with the verbatim shadowed turns, maintains an index, and injects a pointer so early tool output stays reachable.",
+        "zh": "每次压缩把被折叠的逐字轮次写成可 grep 的段落文件，维护索引并注入指针，让早期工具输出在长会话里仍可检索。"
+      },
+      "icon": "../plugins/dsh-memory-archive/icon.svg",
+      "author": "leganck",
+      "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-memory-archive",
+      "repository": {
+        "url": "https://github.com/leganck/dsh-plugins",
+        "directory": "plugins/dsh-memory-archive"
+      },
+      "metadata": {
+        "category": "context",
+        "keywords": [
+          "dsh",
+          "deepseek-harness",
+          "cordis",
+          "bundle",
+          "plugin",
+          "compaction",
+          "archive",
+          "context"
+        ],
+        "labels": [
+          "compaction",
+          "archive"
+        ],
+        "sortKeys": {
+          "published": 1792326875
+        }
+      },
+      "versions": [
+        {
+          "version": "1.2.0",
+          "publishTimestamp": 1792326875,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/leganck/dsh-plugins.git",
+            "commit": "f36b833e881c0f70c7cf6efc1da136f5782a9593",
+            "path": "plugins/dsh-memory-archive"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@local/dsh-multiroot",
+      "title": {
+        "en": "Multiroot",
+        "zh": "多根工作空间"
+      },
+      "description": {
+        "en": "Cursor-style multi-root workspace: a root registry resolved from .dshworkspace.json. Scaffold — the registry and workspace_roots tool are implemented; root-scoped write/edit/run are designed only.",
+        "zh": "Cursor 式多根工作空间：根注册表由 .dshworkspace.json 解析。脚手架阶段——注册表与 workspace_roots 已实现，按根读写/执行仅有设计。"
+      },
+      "icon": "../plugins/dsh-multiroot/icon.svg",
+      "author": "leganck",
+      "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-multiroot",
+      "repository": {
+        "url": "https://github.com/leganck/dsh-plugins",
+        "directory": "plugins/dsh-multiroot"
+      },
+      "metadata": {
+        "category": "workspace",
+        "keywords": [
+          "dsh",
+          "deepseek-harness",
+          "cordis",
+          "bundle",
+          "plugin",
+          "workspace",
+          "multi-root",
+          "monorepo"
+        ],
+        "labels": [
+          "multi-root",
+          "scaffold"
+        ],
+        "sortKeys": {
+          "published": 1792326875
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1792326875,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/leganck/dsh-plugins.git",
+            "commit": "f36b833e881c0f70c7cf6efc1da136f5782a9593",
+            "path": "plugins/dsh-multiroot"
+          },
+          "engines": {
+            "dsh": "^0.2.0-rc.2"
+          }
+        }
+      ]
+    }
+  ]
+}

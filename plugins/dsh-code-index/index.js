@@ -1195,7 +1195,7 @@ function applyInner(ctx, rawConfig = {}) {
   registerTool({
     name: 'code_index_deps',
     description:
-      '管理**可选的语法解析依赖**（tree-sitter + 各语言语法，约 41 MB；不随插件安装）。'
+      '管理**可选的语法解析依赖**（tree-sitter + 各语言语法，实测展开约 60.7 MB；不随插件安装）。'
       + '不装也能用：切块会降级为 heuristic/window；装了 `code_index` 才会按 AST 切块。'
       + 'action：status（默认，只看状态）/ install（下载安装；用 --ignore-scripts，**不执行任何依赖脚本**）/ '
       + 'prune（修剪非本平台的二进制）/ repair（删掉重装）/ remove（删除）。'

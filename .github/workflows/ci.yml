@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 为什么 fetch-depth: 0 —— market/build-index.mjs 用 `git rev-parse HEAD` 和 commit 时间戳
+# 作为每个版本的 publishTimestamp；浅克隆会拿不到（或拿到 grafted commit）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugins:
+    name: test ${{ matrix.plugin }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin:
+          - dsh-multiroot
+          - dsh-memory-archive
+          - dsh-code-index
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # 三个插件都是零运行时依赖；装一下只是为了让 pnpm workspace 的 --filter 生效
+      - run: pnpm install --no-frozen-lockfile
+      - name: 自测（缺 --repo 时由 scripts/ci-fixture.mjs 自动建夹具仓库）
+        run: pnpm --filter "./plugins/${{ matrix.plugin }}" test
+
+  market:
+    name: plugin market index
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # 索引必须与 plugins/* 一致：版本号、commit、展示信息任何一处漂移都会在这里失败
+      - name: index.json 与插件一致
+        run: node market/build-index.mjs --check
+      - name: 官方 format 1 校验
+        run: |
+          npm i --no-save @deepseek-ai/dsh-plugin-market-index@0.2.1-rc.2
+          node scripts/validate-market.mjs
+
+  config:
+    name: yaml + manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 装 js-yaml（真解析，而不是结构 lint）
+        run: npm i --no-save js-yaml
+      - run: node scripts/check-yaml.mjs
+      - name: package.json 必须是合法 JSON 且带 bundle 声明
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            for (const dir of fs.readdirSync("plugins")) {
+              const p = `plugins/${dir}/package.json`;
+              if (!fs.existsSync(p)) continue;
+              const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (!pkg.dsh?.bundle?.patch) { console.error(`✗ ${p} 缺 dsh.bundle.patch`); process.exit(1) }
+              if (!pkg.repository?.directory) { console.error(`✗ ${p} 缺 repository.directory`); process.exit(1) }
+              console.log(`ok ${pkg.name}@${pkg.version}`);
+            }
+          '

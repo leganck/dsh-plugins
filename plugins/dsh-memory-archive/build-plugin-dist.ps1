@@ -11,10 +11,9 @@
     3. npm pack -> dist/<name>-<version>.tgz   (installable via pnpm / dsh plugin add)
     4. Compress-Archive -> dist/dsh-memory-archive-<version>.zip  (copy-the-files form)
     5. writes dist/SHA256SUMS.txt
-    6. copies all three into the tracked release/ dir, so a plain browser link
-       (-/raw/<tag>/release/<file> or the release downloads path) can serve them.
-       The package-registry API URLs need a token and answer a browser with a
-       401 JSON body -- that is NOT a usable download link.
+    6. copies ONLY SHA256SUMS.txt into the tracked release/ dir and clears any
+       leftover binary there: build outputs stay in dist/ (not in git) and ship
+       through GitHub Releases / the plugin market, never as a raw file link.
 
   Run it with the bundled Node/npm, e.g.:
     pwsh -File build-plugin-dist.ps1
@@ -160,23 +159,22 @@ $sums | Set-Content -LiteralPath (Join-Path $dist 'SHA256SUMS.txt') -Encoding as
 $sums | ForEach-Object { Write-Host "  $_" }
 Write-Host ''
 
-# --- 6. copy into the tracked release/ dir -----------------------------------
-Write-Host '--- 6/6 release/ (tracked static files) ---'
+# --- 6. mirror into release/ + checksum record ------------------------------
+Write-Host '--- 6/6 release/ ---'
 $rel = Join-Path $root 'release'
 New-Item -ItemType Directory -Path $rel -Force | Out-Null
+# 与 code-index 同一个约定：release/ 里**只有当前版本**的产物（.tgz/.zip 被 .gitignore 忽略，
+# 不进 git；分发走插件源 / GitHub Release），外加一份进 git 的 SHA256SUMS.txt 作为校验记录。
 $kept = @{}
 Get-ChildItem $dist -File | ForEach-Object {
   $kept[$_.Name] = $true
   Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $rel $_.Name) -Force
   Write-Host "  release/$($_.Name)"
 }
-# Mirror, don't accumulate: an older version's artifact left behind would also be
-# absent from SHA256SUMS.txt, so the directory and the sums file would disagree.
-# The old version stays downloadable through its own tag (`/-/raw/v1.1.0/release/...`).
+# Mirror, don't accumulate: 旧版本产物留着会与 SHA256SUMS.txt 对不上。
 Get-ChildItem $rel -File | Where-Object { -not $kept.ContainsKey($_.Name) } | ForEach-Object {
-  Write-Host "  release/$($_.Name) removed (superseded; still served by its tag)"
+  Write-Host "  release/$($_.Name) removed（被新版本取代）"
   Remove-Item $_.FullName -Force
 }
-Write-Host '  commit release/ -- the release download links resolve to these paths.'
 Write-Host ''
 Write-Host 'done.'

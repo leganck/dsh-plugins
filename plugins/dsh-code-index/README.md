@@ -10,7 +10,7 @@ DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 | `code_search` | 混合检索：BM25 + 向量 → RRF → 「文件:行 + 片段」 | ✅ 可并行 |
 | `code_index_status` | 覆盖情况与新鲜度（文件/块/向量、待更新数量） | ✅ 可并行 |
 | `code_map` | 目录地图：每个目录的文件数/语言/块数/代表符号，冷启动定位用 | ✅ 可并行 |
-| `code_index_deps` | 可选依赖的按需安装/修剪（`embed` / `parser` 两组），默认只报状态 | 串行 |
+| `code_index_deps` | 可选依赖的按需安装/修剪（只剩 tree-sitter 语法组，按语言装），默认只报状态 | 串行 |
 
 ## 为什么用它（本机实测口径）
 
@@ -23,15 +23,17 @@ DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 | 纯向量 | 37.5% |
 | **混合（RRF k=20）** | **55%** |
 
-成本（实测）：
+成本（实测；**0.10.0 起本地模型已移除**，涉及嵌入的行都是 0.9 及更早的本机口径，现在由服务端承担）：
 
 | 环节 | 数字 |
 |---|---|
-| 建 FTS5 索引 | 亚秒级/仓库（1986 文件 0.84 s） |
-| 补向量 | GPU(fp16/DirectML) **约 47 块/s**，CPU 占用 0.25 核；erp-pos 13,889 块 ≈ 4.7 分钟 |
-| 增量刷新 | 未变时 2 ms 级（mtime+size 快扫）；只重算变化块 |
-| 查询 | FTS5 1 ms + 查询嵌入 ~10 ms + kNN ~1 ms |
-| 向量缓存 | 与独立实验版**共用** `~/.dsh/index/vectors.db`（key = `模型标签:sha256(块文本)`） |
+| 建 FTS5 索引（本地） | 亚秒级/仓库（1986 文件 0.84 s） |
+| 增量刷新（本地） | 未变时 2 ms 级（mtime+size 快扫）；只重算变化块 |
+| 纯关键词查询（本地） | FTS5 1 ms 级，零模型、零网络 |
+| 远端查询嵌入 | 7.4–15.8 ms（局域网 / NAS P4 实测） |
+| 远端建库（补向量） | 本机 B300 33.05 块/s；NAS P4 26.8 块/s（限速可调） |
+| 向量复用 | 按**内容哈希**在血统（git origin）内去重；同仓库第二个克隆 **0 块新嵌入** |
+| 历史口径（0.9 及更早，本机模型） | GPU fp16/DirectML 约 47 块/s、CPU 0.25 核、erp-pos 13,889 块 ≈ 4.7 分钟 |
 
 ## 典型用法
 
@@ -46,10 +48,10 @@ code_index(path="D:/Code/your-repo", max_embed=500)         # 再跑，接着补
 code_search(query="订单状态机的实现在哪")               # 向量补齐后自动变成 hybrid
 ```
 
-> ⚠️ **向量补算是重负载**：实测 GPU 约 47 块/s，而它抢占的正是驱动显示的那块显卡——
-> 8227 块曾把整机卡住数分钟（2026-10-16 实测）。所以**默认不自动补算**（配置里没有
-> `maxEmbedPerRun`；只由调用方显式给 `max_embed`），要向量必须显式传 `max_embed`，
-> 建议每次 500~2000 块。没有向量时检索依然可用，
+> ⚠️ **向量补算是重负载**：现在由服务端算（NAS P4 实测约 26.8 块/s，限速 `advanced.remoteRateLimit`
+> 就是"别打满 GPU"的开关；0.9 及更早是本机 47 块/s，8227 块曾把整机卡住数分钟）。
+> 所以**默认不自动补算**（没有 `maxEmbedPerRun`；只由调用方显式给 `max_embed`），
+> 建议每次 500~2000 块、分批续算。没有向量时检索依然可用，
 > 只是退化为纯关键词——`code_search` 会明确告诉你原因与补算方法，不会误报成"配置关了向量"。
 
 `code_search` 输出形如：
@@ -72,7 +74,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
    `window` 29.4% → `heuristic`（纯 JS，零依赖）7.5% → **`ast`（tree-sitter）0.1%**
    （`saas`，8,777 个 Java 文件）；Grails 的 Groovy（144 文件）`heuristic` 31.6% → **`ast` 7.5%**。
    详见 INSTALL.md §2'。
-2. **切块能力也是指纹的一部分**（0.8.1 起）。装了 tree-sitter 之后同一文件会切出**不同边界**；
+3. **切块能力也是指纹的一部分**（0.8.1 起）。装了 tree-sitter 之后同一文件会切出**不同边界**；
    只哈希配置（`strategy:'auto'`）会让库里/服务端同一命名空间混进"旧 heuristic 块 + 新 ast 块"，
    且没有任何信号。现在的指纹 = 配置 + **本仓库实际用到且确实加载成功的语法**：
 
@@ -83,15 +85,15 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
      本机之外手动 npm 安装的则需要重启进程。
 4. **远端不可用时优雅降级**。连不上服务端 → 查询自动退化为纯 FTS5、建库仍完成本地索引，原因写进结果，不会让插件加载失败。
 5. **远端失败有冷却**。连接失败后 60 s 内不再重试（避免每次查询都等满超时），冷却后自动恢复。
-6. **本地零重依赖**。本地不再需要 onnxruntime / transformers / 模型文件；唯一可选依赖是 parser 组（AST 切块）。
-7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录，不会污染 `git status`。
+6. **本地零重依赖**。本地不需要 onnxruntime / transformers / 模型文件；唯一可选依赖是 parser 组（AST 切块，实测展开 60.7 MB）。
+7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录；不配则退回 `<repo>/.dsh-index/`（记得加进 `.gitignore`）。
 8. **roots 白名单**。不在白名单内的路径直接拒绝，**且在创建索引库之前校验**。
 
 ## 配置
 
 ```yaml
 - id: code-index
-  name: "@local/dsh-code-index"          # 官方 tarball 安装后模块名=包名
+  name: "@local/dsh-code-index"          # 插件源 / install_bundle 安装后，模块名 = 包名
   config:
     # —— 用户只需要这 6 个 ——
     roots: ["D:/Code"]                    # 安全白名单；空 = 允许任意路径
@@ -122,6 +124,23 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 > 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，不需要任何模型）。
 > 旧配置（`embedding`、`vectorStore`、`preset`、`rerankBackend`、`excludeDirs/excludePaths`、
 > 顶层 `indexDirBase/chunking/sync` 等）会**直接报错并给出迁移提示**，不会静默降级。
+
+### 从 0.9 及更早迁移：旧键 → 新键
+
+| 旧写法（≤0.9） | 现在怎么写（0.10.x） |
+|---|---|
+| `embedding.backend` / `embedding.modelDir` | 本地模型已移除；语义走 `vectors: remote` + `remote.url`，纯关键词用 `vectors: off` |
+| `preset: basic`（旧开关） | `vectors: off` |
+| `vectorStore: remote` | `vectors: remote`（配了 `remote.url` 时 `auto` 默认就是它） |
+| `rerankBackend: remote` | 重排固定走远端，不用配置；只需 `rerank: fast \| quality` |
+| `rerankRemote.url/apiKey` | 复用 `remote.url` / `remote.apiKey` |
+| `rerankModelDir` | 本地重排已移除 |
+| 顶层 `indexDirBase` | `advanced.indexDirBase` |
+| 顶层 `maxFileBytes` / `windowLines` / `chunking` / `sync` | 全部移到 `advanced.*` |
+| `excludeDirs` / `excludePaths` | 合并成 `exclude`（目录名，或含 `/` 的仓库相对路径） |
+| `defaultTopK` | `code_search` 的 `top_k` 参数 |
+| `maxEmbedPerRun` | `code_index` 的 `max_embed` 参数 |
+| `indexDir` | `advanced.indexDirBase` |
 
 ### `exclude`：一种写法，两种语义
 
@@ -227,7 +246,7 @@ vectors: off
 ```
 
 服务端在仓库根目录 [`server/code-index-service/`](../../server/code-index-service/)，
-自测 41 项、客户端桩测试 45 项。
+自测 43 项（`selftest.py`）、客户端桩测试 30 项（`test-remote.mjs`，本地 HTTP 桩，不需要网络与模型）。
 
 ```yaml
 vectors: remote
@@ -274,7 +293,10 @@ advanced:
 
 ```
 index.js              插件入口：apply(ctx, config) + 五个工具定义 + 加载标记
-lib/store.js          SQLite schema（files / chunks / chunks_fts / vectors / meta）
+lib/store.js          SQLite schema（files / chunks / chunks_fts / vectors / meta）+ FTS/地图/清单查询
+lib/repo.js           仓库身份：repoId / git origin 归一化 / 远端命名空间
+lib/parser-hints.js   "这个仓库本可按语法切块但缺语法包"的检测与提示渲染
+lib/reranker.js       重排档位定义（off / fast / quality 的候选数）
 lib/strategies.js     切块策略表（扩展名 → ast|heuristic|window）+ 配置覆盖解析
 lib/chunker.js        策略分发：ast → heuristic → window 降级链 + 固定窗口实现
 lib/chunk-ast.js      tree-sitter AST 切块（含 bufferSize 与 setLanguage 两个坑的处理）
@@ -292,17 +314,27 @@ verify-install.mjs    装后验证：从已安装包跑通模块加载、工具�
 tools/build-oss-index.mjs  给任意仓库建纯全文索引（评测/演示用）
 tools/verify-cases.mjs     校验题库里的期望文件真实存在
 tools/remote-index-sync.mjs 手动触发远端索引同步
-tools/cases/oss-mall-30.json  开源语料题库（每题含期望文件与依据）
+build-release.mjs     打包发布（tgz 落在 release/，产物不进 git）
+test-remote.mjs       远端地址/重排/配置校验（本地 HTTP 桩）
 ```
 
 ## 测试
 
 ```console
-node test.mjs --repo D:\Code\your-repo          # 核心：建库/检索/增量/切块/排除
-node test-plugin.mjs --repo D:\Code\your-repo   # 契约与接口：五个工具
-node test-remote.mjs                            # 远端地址/重排/配置校验（本地 HTTP 桩）
+# 在插件目录里（或不带 --repo，用自动夹具仓库）
+node test-remote.mjs                            # 30 项：远端地址/重排/配置校验（本地 HTTP 桩）
+node test.mjs                                   # 96 项：建库/检索/增量/切块/排除
+node test-plugin.mjs                            # 74 项：契约与接口、五个工具真实调用
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
+
+# 在仓库根：三个插件一起跑
+pnpm test
 ```
+
+不传 `--repo` 时，两个需要仓库的测试会用 `scripts/ci-fixture.mjs` 建一个确定性夹具仓库
+（.js/.ts/.tsx/.go/.java/.md 各一份），所以本机与 CI 都能直接跑；显式 `--repo` 仍然优先，
+不会被静默换成夹具（有断言守着）。要测真实语料就显式传，例如
+`node test.mjs --repo D:/Code/your-repo`。
 
 ## 按官方 skill 的合规性（cordis-plugin-development）
 

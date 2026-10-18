@@ -62,10 +62,16 @@ const CANDIDATE_REPOS = [
   'D:\\Code\\sample-repo',
 ]
 const repoArg = arg('--repo')
-const repo = repoArg ?? CANDIDATE_REPOS.find((p) => fs.existsSync(p))
-if (!repo || !fs.existsSync(repo)) {
-  console.error('找不到可测仓库，请用 --repo 指定')
-  process.exit(1)
+/**
+ * 仓库来源三级：显式 `--repo` → 本机常见路径 → **自动建确定性夹具**。
+ * 最后这一级是为 CI 和"换台机器"准备的：以前缺 repo 直接 exit(1)，测试就只能在本机跑。
+ */
+let repo = repoArg ?? CANDIDATE_REPOS.find((p) => fs.existsSync(p))
+const repoFromFixture = !(repo && fs.existsSync(repo))
+if (repoFromFixture) {
+  const { makeFixtureRepo } = await import('../../scripts/ci-fixture.mjs')
+  repo = makeFixtureRepo()
+  console.log('· 没给 --repo，使用自动夹具仓库：' + repo)
 }
 
 let pass = 0
@@ -100,6 +106,8 @@ check('报告降级原因', /故意不启用/.test(r1.embedNote), r1.embedNote)
 console.log('\n[2] 关键词检索（FTS5）')
 const sample = walkRepo(repo)[0]
 check('拿到样本文件', !!sample, sample?.rel)
+// 契约：给了 --repo 就必须用它，不许偷偷换成夹具（否则本地测真实语料会被静默替换）
+check('显式 --repo 优先于夹具', !repoArg || !repoFromFixture)
 
 /** 从样本文件里挑一个足够独特的标识符（长 ASCII token），用它做检索基准 */
 function distinctiveTerm(abs) {
@@ -150,7 +158,9 @@ await buildIndex({ store, repoRoot: repo, embedder: { ok: false, reason: 'test' 
 
 // ---------- 5. 删除一个文件 ----------
 console.log('\n[5] 删除文件的清理')
-const dropRel = walkRepo(repo).at(-1).rel
+// 扫描到的文件**不一定都有块**（太短的文件会被切块策略跳过），所以要删一个确实进了索引的文件。
+// 以前直接取 walkRepo 的最后一个，在"最后一个文件恰好被跳过"的仓库上会假失败（夹具仓库就踩到了）。
+const dropRel = [...store.fileState().keys()].at(-1) ?? walkRepo(repo).at(-1).rel
 const dropAbs = path.join(repo, dropRel)
 // 同盘重命名（跨盘 rename 会 EXDEV），索引对扩展名有过滤，改成 .bak 即等于"文件消失"
 const movedTo = dropAbs + '.dsh-test-bak'

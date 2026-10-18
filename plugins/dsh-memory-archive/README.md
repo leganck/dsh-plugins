@@ -1,5 +1,9 @@
 # @local/dsh-memory-archive
 
+> **安装**：主路径是 DSH 插件源（仓库根 `market/index.json`）或 `plugin_manager` 的
+> `install_bundle`；本插件自带的 `install.ps1` 只是**离线兜底**，且已从 `package.json` 的
+> `files` 移除——重新打包后不再随 npm 包（`.tgz`）分发。详见「[安装](#安装)」与 [INSTALL.md](./INSTALL.md)。
+
 给 DSH 补上 Cursor 式「压缩归档 + 指针注入」两件套：
 
 1. **落盘**：每次 compaction 写一份可 grep 的 `segment_NNN.md`（checkpoint 摘要 + 被压缩区间的**原始轮次**），并维护 `INDEX.md`。
@@ -39,6 +43,7 @@ details (exact code, file paths, tool outputs)`，以及 `Do NOT modify these fi
 ├── segment_001.md
 ├── evicted.md        # compaction/prune 摘掉的事件（任何 segment 都不可能有它们）
 └── evicted.jsonl     # evicted 账本：{seq, atSeq, tokens, bytes, writtenAt}
+                      # 日志里已找不到的事件另带 missing: true（只记缺口，不假装归档成功）
 ```
 
 ### INDEX.md 的 Keywords 列
@@ -64,7 +69,10 @@ demo, null, java, Line, order, main, Code, false
 node tools/reindex.mjs --dry-run          # 先看会改什么
 node tools/reindex.mjs                    # 落盘
 node tools/reindex.mjs --session <id>     # 只处理一个会话
+node tools/reindex.mjs --force            # 连已经是最新版本的行走重算
 ```
+
+（还支持 `--archive <归档根>` 指定别的归档目录；每份被重写的文件都留一份 `.bak`。）
 
 **已知取舍**：渲染文本里，转义与路径分隔符同形（同一段里既有 `…\Temp\node_modules\…`
 也有 `…$js=@'\nconst`）。插件只吞掉无歧义的转义，宁可偶尔留下 `nconst` 这种原文可见、
@@ -84,7 +92,7 @@ node tools/reindex.mjs --session <id>     # 只处理一个会话
 ## Turn statistics    # Events by type / Tools used / Tool calls without a response in this span /
                       # Tool results marked as error / Unique target files (N) /
                       # Verbatim-render size estimate / Last assistant response excerpt
-## Summary            # compaction 后端写的 checkpoint 摘要原文
+## Summary (curated by the compaction backend)   # 压缩后端写的 checkpoint 摘要原文
 ## Verbatim turns     # 每个事件一个 `### seq N -- ...` 块，工具调用与返回双向标注配对
 ````
 
@@ -112,7 +120,8 @@ index.jsonl       596 2026/10/13 18:26:16
   `Assistant (tool calls: pwsh, pwsh)`。
 - 工具名与完整参数在正文里逐条一行 `[tool-call: <名>] <arguments 原文>`；`arguments` 是 JSON
   字符串，**不截断**（Redis 风格的长参数也是整行）。
-- 无返回时标注为 `_(tool call <名> has no response in this span)_`。
+- 无返回时：消息里的调用标 `_(tool call <名> has no response in this span)_`；独立的 `tool/call`
+  事件（DSH 当前不产生，仅兼容）标 `_(no matching tool response in this span)_`。
 - 工具返回正文包在动态长度的围栏里（见「已知限制」第 6 条）。
 
 ## 与 Cursor 的对齐状态
@@ -120,7 +129,8 @@ index.jsonl       596 2026/10/13 18:26:16
 | 维度 | Cursor | 本插件 | 状态 |
 |---|---|---|---|
 | 归档时机 / 段编号 | 每次 compaction，`segment_NNN.md` 递增 | 同 | ✅ |
-| 指针四要素 + `if insufficient` 条件 | 有 | 有；存在被 prune 的事件时再多一行指向 `evicted.md` | ✅ |
+| 指针内容 | INDEX 路径 / 新段 / 段通配 / 恢复指令 | 同四项，再加累计规模、本段与近 4 段的关键词；存在被 prune 的事件时多一行指向 `evicted.md` | ✅ |
+| 指针触发条件 | 「摘要不够」（`when the checkpoint summary above is insufficient`） | **任务式**：要精确回忆标识符 / 数值 / 原始工具输出时先 grep（2026-10-17 起有意偏离——旧条件实测永不触发） | ✅ 有意不同 |
 | 文件头“去查别改”提示 | 每个 segment 第 3 行 | 同（`Use read or grep to look up details, but do not modify.`） | ✅ |
 | 工具调用↔返回配对 | 每 turn 独立块 | 每 seq 独立块 + 双向标注（`answered at` / `answers seq` / `error` / 无返回标记） | ✅ |
 | 段统计字段 | Turns / Tools used / Unique target files / Tool errors / size estimate / last assistant excerpt | 事件分布 / Tools used / Unique target files / 报错数 / 无返回数 / size estimate / last assistant excerpt | ✅ |
@@ -134,7 +144,10 @@ index.jsonl       596 2026/10/13 18:26:16
 `grep` 在 `C:\Users\you\.dsh\archive\...\INDEX.md` 命中，`read` 直接读了 `segment_004.md`。
 指针给的就是绝对路径，所以不需要把档案搬进工作区。
 
-## 注入的指针（逐字）
+## 注入的指针（模板与出现条件）
+
+由 `index.js` 的 `noticeText()` 生成。下面是**形状示意**（路径、计数与关键词均为示例；带“条件”的行
+不是每次都有）：
 
 ```text
 <system-reminder>
@@ -144,13 +157,29 @@ A compaction checkpoint was archived to disk together with its verbatim turns.
 - New segment: <archiveDir>/<sessionId>/segment_004.md (compaction <id>, 586 events, 278 tool calls)
 - Every segment: <archiveDir>/<sessionId>/segment_*.md
 - Evicted events (removed from context by compaction/prune, in no segment): <archiveDir>/<sessionId>/evicted.md (18 recovered)
+- Archived so far in this session: 5 segment(s), 5,253 events, 2,442 tool calls — none of it is in your context now
+- Keywords of the new segment: "DEMO-3459", "demoPayBook", "orderInfo", "退款接口"
+- Keywords of earlier segments (grep one of these across `segment_NNN.md` to land on the right one):
+    segment_000.md: "PENDING_PAYMENT", "10060", "demoOrderQuery"
 
-When the checkpoint summary above is insufficient, use grep or read on those files to recover exact
-code, file paths, and tool outputs from the summarized span. Do not modify these files.
+When you need to recall an exact identifier, value, or raw tool output from an earlier turn
+(issue id, status constant, SQL result, a measured number, a file path, a diff), grep these files first:
+the index keywords above are the cheapest way in. Do not modify these files.
 </system-reminder>
 ```
 
-第 4 行**只在有被 prune 的事件时才出现**（`evictedCount > 0`）；`N tool call(s)` 按实际数量单复数。
+各行的出现条件：
+
+- `Evicted events` 行只在 `evictedCount > 0` 时出现；`(N recovered)` 是已落盘、可从日志恢复的条数。
+- `Archived so far in this session` 行只在该会话已有段或事件时出现；它的三个数字按 `en-US` 千分位，
+  而 `New segment` 行里的 `events` / `tool calls` 不带千分位。
+- `Keywords of the new segment` 只在该段有关键词时出现；`Keywords of earlier segments` 只列
+  **除本段外最近 4 段**（每段一行，格式 `<文件>: "词1", "词2"`）。
+- `N tool call(s)` 按实际数量单复数（1 时写 `1 tool call`）。
+- 触发条件是**可判定的任务类型**，不是 Cursor 的“摘要不够”。旧文案
+  (`When the checkpoint summary above is insufficient`) 实测永不触发：归档一直在写，模型从不来读——
+  详见 [CHANGELOG](./CHANGELOG.md) 的 1.2.0 条目与 `test.mjs` 里的回归断言。
+
 投放方式（优先顺序）：
 
 | 路径 | 机制 | 特点 |
@@ -160,31 +189,41 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 | `announce: false` | 不注入 | 只手写归档 |
 
 指针在每个 compaction 之后投递一次，并用 `pendingNotice` 清空保证**不重复**。`compaction/prune`
-只写 `evicted.md` / `evicted.jsonl`，**不投递指针**。
+只写 `evicted.md` / `evicted.jsonl`，**不投递指针**；被摘掉的条数由下一段指针里的
+`Evicted events` 行报告。
 
 ## 安装
 
-三条路径的完整说明、前提、卸载与排错见 **[INSTALL.md](./INSTALL.md)**。速览：
+主路径是 **DSH 插件源**或 **`plugin_manager` 的 `install_bundle`**；`install.ps1` 只是离线兜底。
+完整的前提、卸载与排错见 **[INSTALL.md](./INSTALL.md)**。速览：
 
 | 路径 | 适用 | 做法 |
 |---|---|---|
-| A. 原生 bundle | `dsh plugin` 可用的 profile | `dsh plugin --profile <p> add <包/tarball/git-url>`，再把包名加进 `dsh.profile.bundles` |
-| B. 一键脚本 | `desktop` 等被应用独占管理的 profile | `pwsh -File install.ps1 -Profile desktop`（`-DryRun` 预演，`-Uninstall` 回滚） |
-| C. 手工 | 任意 | 复制包到工作区外 + 在 profile 补丁末尾插入 `memory-archive` 行 + 重启 |
+| A. 插件源（推荐） | 能打开 **Plugins → Discover** 的 profile | 添加源 `https://raw.githubusercontent.com/leganck/dsh-plugins/main/market/index.json`，再装 `@local/dsh-memory-archive`。`market/index.json` 里的版本与 git commit 是钉死的 |
+| B. `install_bundle` | 已启用 `tool-plugin-manager` 的 profile（含被应用独占管理的 `desktop`） | `plugin_manager(action: "install_bundle", target: "<release/*.tgz 或包目录的绝对路径>")`。**优先传 `.tgz`**：pnpm 对目录用 `link:`（源码目录会成为运行时依赖），对 tarball 是实体安装 |
+| C. 离线兜底 | 没有插件源、也不能用 `plugin_manager` | `pwsh -File install.ps1 -Profile desktop`（`-DryRun` 预演，`-Uninstall` 回滚）。**该脚本已从 `package.json` 的 `files` 移除，重新打包出的 npm 包（`.tgz`）不含它**；只在仓库源码目录（按源码树打的 zip 会带上） |
+| D. 手工（最后手段） | 任意 | 复制包到工作区外 + 在 profile 补丁末尾插入 `memory-archive` 行 + 重启 |
 
 要点：
 
 - 本包**已经是 DSH bundle**：`package.json` 声明了 `dsh.bundle.patch`，`cordis.patch.yml` 插入一行
-  `memory-archive`，走 A 时 `name` 用包名 `@local/dsh-memory-archive`（loader 按 Node ESM 解析）。
-- 走 B/C 时 `name` 必须解析到 **`index.js` 本身**（`file:///<绝对路径>/index.js`），
+  `memory-archive`；A/B 路径由包管理器解析，`name` 用包名 `@local/dsh-memory-archive`。
+- B 路径的前置条件：profile 的 `tool-plugin-manager` 行被 shipped patch 置为 `disabled: true`，
+  需要在 profile 补丁层按 id 覆盖成 `disabled: false` 并重启应用。判定是否装好看返回的
+  `application` / `warnings`，不要只看插件自己写的标记。
+- 仓库根 README 记录的实测：装**新** bundle 是 `application: "applied"`（HMR，不必重启）；
+  **替换**已安装包是 `application: "restart-required"`；改已加载插件的**代码**必须重启。
+- 走 C/D 时 `name` 必须解析到 **`index.js` 本身**（`file:///<绝对路径>/index.js`），
   **不需要** pnpm、**不要**改 profile 的 `package.json`。
 - `desktop` profile 被 Electron 应用**独占管理**：`dsh plugin --profile desktop` 与
   `dsh --dump-config --profile desktop` 都会直接失败（`profile "desktop" is managed exclusively
-  by the Electron application`），Web 侧栏没有插件页，`plugin_manager` 工具的对应行在 base bundle
-  里默认 disabled —— 所以该 profile 只能走 B/C。
-- **改配置热生效，改代码必须重启**（见下节）。新装或升级后都要重启。
-- 首次安装 `archiveDir` 建议写**绝对路径且用正斜杠**（`install.ps1` 默认就是这么写的）：旧代码
-  不展开 `~`，会在会话 cwd 下建出字面量 `~` 目录。升级并重启后才可安全用 `~/.dsh/archive`。
+  by the Electron application`），Web 侧栏没有插件页，`tool-plugin-manager` 在 base bundle 里
+  默认 disabled —— 所以该 profile 走 A/B，或 C 兜底。
+- **改配置热生效，改代码必须重启**（见下节）。
+- `.tgz` / `.zip` 是构建产物，**不进 git**（git 里 `release/` 只有 `SHA256SUMS.txt`；磁盘上 release/ 镜像当前版本产物，旧版本会被替换掉）。本地重建在插件
+  目录里跑 `pwsh -NoProfile -File build-plugin-dist.ps1`，产物落在 `release/`。
+- `install.ps1` 默认把 `archiveDir` 写成绝对路径；当前代码本身已展开 `~` / `$DSH_HOME` / `$HOME` /
+  `%VAR%`，所以默认的 `~/.dsh/archive` 可以直接用（只有不展开 `~` 的旧版本才需要绝对路径）。
 
 ## 改配置不用重启，改代码必须重启（实测，别再猜）
 
@@ -195,31 +234,34 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 | 编辑 profile 补丁里的 `archiveDir` | `loadedAt` 被刷新、新值出现 | 配置**热生效**（数秒内）；触发条件是**配置树发生变化**，只改注释不会触发 |
 | 编辑 `index.js`（换了代码） | 无任何变化 | 模块**不会重新 import**，进程一直持有启动时那份代码 |
 
-判别方法：`_loaded.json`（写在 bundle 目录里）除配置回显外，还有几个**只有新代码才会写**的字段。
-当前真实内容（2026-10-13 19:11 重启后）：
+判别方法：`_loaded.json`（默认写在 bundle 目录里，可用 `markerFile` 或
+`DSH_MEMORY_ARCHIVE_MARKER` 重定向）除配置回显外，还有几个**只有新代码才会写**的字段。
+字段形状（值随运行环境变化）：
 
 ```json
-{ "loadedAt": "2026-10-13T11:11:09.120Z",
+{ "loadedAt": "<ISO 时间>",
   "pid": 40256,
   "dshProfile": null,
   "sessionId": null,
-  "archiveDir": "C:/Users/you/.dsh/archive",
-  "archiveDirResolved": "C:/Users/you/.dsh/archive",   // 由插件计算：代码版本指纹
-  "build": "2026-10-13.4",                                  // 同上
-  "capabilities": { "zstd": true },                         // 运行时能力探测
-  "announce": true }
+  "archiveDir": "~/.dsh/archive",
+  "archiveDirResolved": "C:/Users/you/.dsh/archive",
+  "build": "<index.js 的 BUILD 常量>",
+  "capabilities": { "zstd": true },
+  "announce": true,
+  "markerFile": "C:/.../dsh-memory-archive/_loaded.json" }
 ```
 
 `archiveDir` 与 `archiveDirResolved` 的差别本身就是证据：前者是原样回显的配置，**任何版本都会写**；
-后者只有带展开逻辑的版本才写得出来。所以“标记被刷新”不等于“新代码已加载”。
+后者只有带展开逻辑的版本才写得出来。`build` 取自模块里的 `BUILD` 常量（行为一变就 bump），
+**不要拿某个具体值当版本号用**。`capabilities.zstd` 是运行时探测结果，`markerFile` 记录实际写到了哪里。
 
 第二次实测（同日 19:11 重启）：进程启动时间晚于 bundle 里 `index.js` 的 mtime，marker 随即出现
-`build 2026-10-13.4`、`archiveDirResolved` 与 `capabilities.zstd: true` —— 这三项组合起来才是
+`archiveDirResolved` 与 `capabilities.zstd: true` —— 这两项加上刷新后的 `build` 才是
 “新代码已加载”的可用判据。`dshProfile` / `sessionId` 取自环境变量，Electron 宿主里通常为 `null`，
 不是故障。
 
-推论（踩过的坑）：配置里写 `~/.dsh/archive` 而线上仍是旧代码时，`~` 不会被展开，会在会话 cwd 下
-建出**字面量 `~` 目录**。改配置前先确认代码版本，或直接写绝对路径。
+推论（踩过的坑）：不展开 `~` 的旧版本若配置 `~/.dsh/archive`，会在会话 cwd 下建出**字面量 `~`
+目录**。升级并重启后默认值可安全使用；若线上仍是旧代码，先升级，或临时写绝对路径。
 
 ## 验证
 
@@ -233,7 +275,7 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 4. 反向确认：`index.jsonl` 里同一 `compactionId` 只出现一次，且指针只出现一次。
 5. 还原测试期间改过的任何用户设置。
 
-### 线上实测（2026-10-13，重启后 build `2026-10-13.4`）
+### 线上实测（2026-10-13 实测；`build` 值随每次行为变更 bump，不写死在这里）
 
 `_loaded.json` 的 `capabilities.zstd: true` 说明 Electron 宿主的 Node 能解 zstd，所以
 `readSessionLog` 的磁盘回填在真实 app 里可用（此前只做过离线验证）。
@@ -244,8 +286,9 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 说明 effective 是独立算的），`Tool calls issued: 278`，注入的指针里带 `278 tool calls` 与
 `evicted.md (18 recovered)`。
 
-**仍未线上触发**：`compaction/prune` 的落盘（37 个会话里只有 4 个发生过 prune，低频）。
-它由 `verify-evicted.mjs` 和回放真实 prune 事件离线覆盖，线上尚未见到真实触发。
+**仍未线上触发**：`compaction/prune` 的落盘（prune 是低频事件，当时本机多数会话从未发生）。
+它由 `test.mjs` 的 prune 用例、`verify-evicted.mjs` 和回放真实 prune 事件离线覆盖，线上尚未见到
+真实触发。
 
 ### 独立复算（不 import 插件）
 
@@ -253,11 +296,14 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 
 1. `tools/verify-segments.mjs <归档目录> [sessionsRoot]`：从原始会话日志重算每段的事件覆盖、事件数、
    工具调用总数与按名计数、配对标注、目标文件数、脱敏，逐条对比 segment 文本。
-   当前 4 个归档 / 9 个段全部通过。
+   在本机当时那批归档上全部通过（数量随归档增长，不写死）。
 2. `tools/verify-evicted.mjs <归档目录>`：prune 账本与 `evicted.md` 的结构与文本切片校验。
 3. `tools/backfill-session.mjs [--session <id>] [--out <dir>]`：只喂控制事件、正文全部从日志恢复的
    端到端回填。省略 `--session` 时自动取**最近写入**的会话。产出的文件与线上归档**逐字节相同**，
    唯一差异是 `Written` / `writtenAt` 时间戳。
+4. `tools/memory-search.mjs <关键词或正则>`：一次调用完成归档检索。默认在
+   `~/.dsh/archive/session-*/` 的 `segment_*.md` 与 `evicted.md` 里搜；多词按空格分隔 = AND，
+   `--re` 按正则，另有 `--session` / `--dir` / `--limit` / `--context` / `--json`。
 
 ### 验证器自己的两个坑（都曾造成误判，已修）
 
@@ -272,26 +318,42 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 把它移到别的块 → FAIL；块内重复渲染 → FAIL；换入另一条真实参数 → FAIL；
 无损往返（只读写不改内容）→ PASS。每个突变只挂 1 项检查，无连带误伤。
 
-激活标记同样量过（1.1.0 新增）：**改回「总写模块旁」的旧行为 → 5 项 FAIL**；
+激活标记也做过同量级的突变检验：**改回「总写模块旁」的旧行为 → 5 项 FAIL**；
 忽略 `DSH_MEMORY_ARCHIVE_MARKER` → 4 项 FAIL；去掉标记父目录创建 → **正好 1 项 FAIL**。
 其中第一条正是「在已安装的 bundle 里跑自测会删掉 app 的标记」这个缺陷的可复现证据。
 
 ## 配置
 
-`cordis.patch.yml` 里的 row config，全部可选：
+`cordis.patch.yml` 里的 row config，**全部可选**；没写的键取 `index.js` 的 `DEFAULTS`，
+未知字段不会报错也不会生效。按代码里的真实顺序：
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `archiveDir` | `~/.dsh/archive` | 归档根目录。`~`、`$DSH_HOME`/`${DSH_HOME}`、`$HOME`、`%USERPROFILE%` 会被展开；相对路径基于会话 cwd，展开后的绝对路径直接使用。**默认放用户 DSH 目录而非工作区**：segment 是逐字工具输出，不该进代码仓库，也不该被工作区清理波及 |
-| `sessionRoot` | `$DSH_HOME/sessions` | DSH 自己的会话日志根目录，用于回填插件没见到的历史。按 sessionId 在子目录里查找，**不反推 cwd slug**（slug 用 `~0020` 这类转义，不值得复刻） |
-| `readSessionLog` | `true` | 是否允许读原始会话日志。设 `false` 则退回内存读取器 |
-| `includeToolResults` | `true` | 是否把工具返回原文写进 segment |
-| `redact` | `true` | 落盘前掩码 JWT / Bearer / 常见 `token`、`password` 赋值（含工具参数） |
-| `announce` | `true` | 是否把归档指针注入对话 |
-| `maxEventsPerSession` | `20000` | 每会话缓冲事件上限（超出丢最旧） |
-| `maxEventsPerSegment` | `4000` | 单段 verbatim 最多渲染多少条 |
-| `maxSegmentBytes` | `1500000` | 单段字节上限，超出截断并标注 |
-| `markerFile` | `null` | 激活标记写到哪里。默认＝模块旁的 `_loaded.json`。设它（或环境变量 `DSH_MEMORY_ARCHIVE_MARKER`，优先级更高）用于**只读／包管理安装位**，或让自测不碰线上安装目录。相对路径按**模块所在目录**解析，父目录会自动创建 |
+| `archiveDir` | `~/.dsh/archive` | 归档根目录。`~`、`$DSH_HOME` / `${DSH_HOME}`、`$HOME` / `${HOME}`、`%USERPROFILE%`（以及任意已定义的 `%VAR%`）会被展开；相对路径基于**会话 cwd**，展开后的绝对路径直接使用。**默认放用户 DSH 目录而非工作区**：segment 是逐字工具输出，不该进代码仓库，也不该被工作区清理波及 |
+| `sessionRoot` | `$DSH_HOME/sessions` | DSH 自己的会话日志根目录，用于回填插件没见到的历史。按 sessionId 在 `<root>/<任一目录>/<sessionId>/session.v4.jsonl.zstd` 查找，**不反推 cwd slug**（slug 用 `~0020` 这类转义，不值得复刻） |
+| `readSessionLog` | `true` | 是否允许读原始会话日志。设 `false` 则只用内存读取器（先 `session.snapshotEvents()`，再退化为只见实时事件） |
+| `includeToolResults` | `true` | 是否把工具返回原文写进 segment。设 `false` 时 verbatim 里 `tool/call` 与 `tool/result` 都不渲染，并写一行说明 |
+| `redact` | `true` | 落盘前掩码 JWT、`Bearer …`、常见 `api_key` / `access_token` / `password` / `secret` 赋值；`mask()` 作用在整条渲染文本上，**包括工具参数**，摘要与 INDEX 关键词同源 |
+| `announce` | `true` | 是否把归档指针注入对话（经 inbox，缺失时回退到 `decision.messages`） |
+| `maxEventsPerSession` | `20000` | 每会话**内存缓冲**的事件上限，超出丢最旧；只限制缓冲，需要时仍会按需从磁盘日志补齐 |
+| `maxSegmentBytes` | `1500000` | 单段上限：超过即截断正文并追加 `> TRUNCATED at maxSegmentBytes=…`（是否超限按 UTF-8 字节判定） |
+| `maxEventsPerSegment` | `4000` | 单段 verbatim 最多渲染多少条：超出只保留**最后** N 条，并写明丢弃了多少条 |
+| `markerFile` | `null` | 激活标记写到哪里。默认＝模块旁的 `_loaded.json`。设它（或环境变量 `DSH_MEMORY_ARCHIVE_MARKER`，**优先级更高**）用于**只读／包管理安装位**，或让自测不碰线上安装目录。绝对路径原样使用；相对路径按**模块所在目录**解析；父目录会自动创建 |
+
+`cordis.patch.yml` 自带的就是其中 6 个键（其余留在 `DEFAULTS` 里）：
+
+```yaml
+- insert:
+    - id: memory-archive
+      name: '@local/dsh-memory-archive'
+      config:
+        archiveDir: "~/.dsh/archive"   # 引号必需：裸 ~ 在 YAML 里是 null
+        includeToolResults: true
+        redact: true
+        announce: true
+        maxEventsPerSession: 20000
+        maxSegmentBytes: 1500000
+```
 
 ## 已知限制（实测）
 
@@ -322,7 +384,7 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
    `arguments` 是 JSON **字符串**），用 `block.id` == `tool/result.message.toolCallId` 配对
    （实测 412/412 全部配上）。`arguments` 是字符串这点很关键：按对象读会静默得到空列表。
    **这是 2026-10-13 实机踩过的第二个坑**：先前按 `tool/call` 事件统计，于是
-   `Tools used`、INDEX 的 `Tools` 列、`Unique target files` 三处恒为空，而 62 次调用的区间
+   `Tools used`、INDEX 的 `Tool calls` 列、`Unique target files` 三处恒为空，而 62 次调用的区间
    被写成 `0 tool calls`。修后同上区间为 62/62。
 4. **`shadowedRange` 不可信，`shadowedSeqs` 才是权威**（实测 4 次压缩全部不一致）：
    它既不是影子集的 min/max，也不包含影子集，甚至**会倒置**。本会话实测
@@ -345,9 +407,12 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 8. **指针依赖下个 step**：压缩后若会话直接结束，没有下一次 `agent/pre-step`，则指针不投递
    （文件仍已落盘，手动 grep 可用）。实测还有约 1 个 step 的延迟：落盘是异步队列，
    若下一次 `agent/pre-step` 早于写盘完成，指针会顺延到再下一个边界。
+   同一个边界之前发生多次 compaction 时，`pendingNotice` 只保留**最后一条**（前一段的指针不补发，
+   但两段文件都已落盘）。
 9. **已投递的指针不能撤回**：`announce` 消息里带的是写入那一刻的统计数（如 `N tool calls`）。
    若之后重算历史 segment，文件会更新，但已经发出去的指针文本不会变。
-   **补档会让已有段号整体后移**，所以按段号找旧指针会错位——用 `compactionId` 定位才是稳的
+   从日志重放（`tools/backfill-session.mjs`）得到的是**另一份**归档，段号与线上指针里的段号
+   不一定对应——所以按段号找旧指针会错位，用 `compactionId` 定位才是稳的
    （每条指针都带它，INDEX 每行也有它）。
 10. **归档默认在工作区外**（`~/.dsh/archive`），不需要 `.gitignore`。若你把 `archiveDir` 改回
     工作区内，记得自行忽略它。
@@ -358,22 +423,27 @@ code, file paths, and tool outputs from the summarized span. Do not modify these
 
 ## 本地自测
 
-不需要 DSH profile：
+不需要 DSH profile；断言全在临时目录里跑，激活标记也重定向到临时目录，**不碰安装目录**：
 
 ```powershell
+cd plugins/dsh-memory-archive
 node test.mjs
 ```
+
+仓库根也能一次跑全部插件：`pnpm test`。
 
 `test.mjs` 用假 ctx / 假 agent 驱动真实的 `session/event`、`agent/pre-step`、
 `agent.inbox`、`tool/result` 消息形状（含 `message.toolCallId` 与
 `source: { kind: 'tool', callId }`，取自 `dsh-session`、`dsh-agent-loop`、
-`dsh-compaction-basic`、`dsh-agent-instructions` 源码），覆盖 **88 项断言**：
+`dsh-compaction-basic`、`dsh-agent-instructions` 源码），覆盖 **109 项断言**：
 
 产物结构、固定文件头（含“去查别改”提示）、verbatim 工具返回、工具调用↔返回**双向配对**、
 无返回调用的标记与计数、三项 Cursor 同款统计（unique target files / size estimate /
 last assistant excerpt）、JWT 脱敏（含 INDEX 关键词不泄漏）、compactionId 去重、
 resume 不重复归档、畸形 payload 不抛异常、指针经 inbox 投递、指针只投递一次、
-指针文案含 INDEX 路径 / segment 通配 / grep-or-read 指令 / 只读约束、
+指针文案含 INDEX 路径 / segment 通配 / grep-first 指令 / 只读约束、
+**触发条件是任务式（精确标识符/数值/原始输出）且旧 `insufficient` 文案不得回归**、
+**新段与近 4 段的关键词内联、累计规模行**、
 无 inbox 时回退到 `decision.messages`、`announce: false` 抑制指针、
 assistant 消息里的 `tool-call` 块渲染出 name 与 arguments、不在 `shadowedSeqs` 的事件不入段、
 reasoning 文本不倾倒进归档、**工具名/工具数/每消息工具标题/target files 全部按实测形状
@@ -383,7 +453,7 @@ reasoning 文本不倾倒进归档、**工具名/工具数/每消息工具标题
 日志缺失时降级为只见实时）**、**`compaction/prune` 落盘与重复投递去重**、
 **激活标记可重定向（`DSH_MEMORY_ARCHIVE_MARKER` / `markerFile`，父目录自动创建，
 且自测不再触碰安装目录）**
-—— 共 **88 项断言**。
+—— 共 **109 项断言**。最后一行输出是 `ALL 109 CHECKS PASSED`。
 
 > **测试价值的自证**：断言不是“跑绿了”就算数，逐个用**突变检验**量过：
 > 把磁盘读取关掉 → 4 项 FAIL；把多帧解码换成单帧 → 5 项 FAIL；去掉 prune 分支 → 7 项 FAIL；
