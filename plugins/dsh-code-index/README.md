@@ -213,6 +213,28 @@ embedding:
    对得上 ⇒ 切换后端**不用重建索引**；对不上 ⇒ **不回退**（回退等于把两种来源的向量混进一个索引）。
 3. **远端超时默认 8 s**，只用来兜住"那台机器睡了"。
 
+## 新目录的语言扩展提示（0.8.5）
+
+`code_index` 第一次处理某个仓库时，会顺手算一件事：**这个仓库里有多少文件本可以按语法切块、
+但当前缺语法包**。有就提示（每次建库都会提示；`chunking.parserHint: off` 可关）：
+
+```
+💡 有 454/470 个文件本可以按语法切块：.go × 454 个文件 → 缺 tree-sitter-go@0.21.2（约 2.6 MB）
+   装 go：code_index_deps action=install group=parser-go（约 2.6 MB，不执行依赖脚本，装完当次生效）
+   注意：装了会改变切块指纹 → 命名空间换新，但只有**正文真的变了**的块需要重嵌（内容哈希去重）
+```
+
+设计取向：**只提示，不自动装**。原生依赖几十 MB、且会改变切块指纹（→ 命名空间换新），
+这属于"改变索引身份"的操作，必须由人决定。安装按语言分组，不会因为要 Go 就把 Python/Rust 一起拖下来：
+
+| 组 | 包 | 体积 |
+|---|---|---|
+| `parser` | tree-sitter + java/javascript/typescript/groovy | 60.7 MB |
+| `parser-go` | tree-sitter-go@0.21.2 | 2.7 MB |
+| `parser-python` | tree-sitter-python@0.21.0 | 5.8 MB |
+| `parser-rust` | tree-sitter-rust@0.21.0 | 10.8 MB |
+| `parser-extra` | 上面三个 | ≈19 MB |
+
 ## 发布打包：两个产物
 
 ```sh

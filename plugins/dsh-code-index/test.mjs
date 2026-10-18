@@ -818,6 +818,18 @@ console.log('\n[11] 模型下载器')
   check('嵌入模型标注为必需', /必需/.test(MODELS['bge-small-zh-v1.5'].role))
 }
 
+// ---------- 11b. 语言扩展开装提示（parser hints） ----------
+console.log('\n[11b] 语言扩展安装提示')
+const { detectMissingGrammars, renderParserHint } = await import('./lib/parser-hints.js')
+const hintScan = Array.from({ length: 10 }, (_, i) => ({ rel: 'pkg/a' + i + '.go' })).concat([{ rel: 'web/b.js' }])
+const missAll = detectMissingGrammars(hintScan, { strategy: 'auto' }, {}, () => false)
+check('全缺时按文件数排序（go 在前）', missAll[0]?.grammar === 'go' && missAll[0].files === 10, missAll.map((m) => m.grammar + 'x' + m.files).join(','))
+check('同一包的多扩展名会合并', detectMissingGrammars([{ rel: 'a.py' }, { rel: 'b.pyi' }], { strategy: 'auto' }, {}, () => false)[0]?.exts.join(',') === '.py,.pyi')
+const missSome = detectMissingGrammars(hintScan, { strategy: 'auto' }, {}, (gr) => gr === 'javascript')
+check('已装的语法不提示', missSome.length === 1 && missSome[0].grammar === 'go', JSON.stringify(missSome.map((m) => m.grammar)))
+check('全装时无提示', detectMissingGrammars(hintScan, { strategy: 'auto' }, {}, () => true).length === 0)
+check('渲染含安装命令', renderParserHint(missAll, { totalFiles: 11 }).join('\n').includes('code_index_deps action=install group=parser'))
+
 // ---------- 12. 清理 ----------
 console.log('\n[12] 清空索引')
 dropIndex(store)

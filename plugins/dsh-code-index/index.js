@@ -31,9 +31,10 @@ import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
+import { renderParserHint } from './lib/parser-hints.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.4'
+export const BUILD = '2026-10-18.5'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -187,7 +188,12 @@ const DEFAULTS = {
    *   `byExt`：按扩展名覆盖内置表的字段，例如 `{ ".vue": { "strategy": "heuristic" } }`
    * 缺 parser 依赖、或某文件解析失败时会**降级**并在建库结果里报告原因，绝不静默换策略。
    */
-  chunking: { strategy: 'auto', byExt: {} },
+  chunking: {
+    strategy: 'auto',
+    byExt: {},
+    /** `auto`：检测到仓库里有用得上、但没装的语法就提示；`off`：静默 */
+    parserHint: 'auto',
+  },
   defaultTopK: 10,
   /**
    * 单次最多补算多少块的向量。**默认 0 = 不自动补算**：建库只做 FTS5（秒级）。
@@ -817,7 +823,13 @@ function applyInner(ctx, rawConfig = {}) {
           opts: scanOptsOf(config),
           embedder,
           budget: { maxEmbedPerRun: args.max_embed ?? config.maxEmbedPerRun, mode: args.mode ?? 'incremental' },
-          chunking: { ...config.chunking, windowLines: config.windowLines },
+          // **只放真正影响切块的字段**：`parserHint` 这类展示用配置一旦混进来，
+          // 切块指纹会跟着变 → 命名空间莫名换新（实测踩到：energy 因此白换了一次）。
+          chunking: {
+            strategy: config.chunking.strategy,
+            byExt: config.chunking.byExt,
+            windowLines: config.windowLines,
+          },
           depsDir: expandPath(config.embedding.depsDir) ?? undefined,
           depsFallbackDirs: [PLUGIN_DIR],
           remote: remoteMode
@@ -835,6 +847,9 @@ function applyInner(ctx, rawConfig = {}) {
           `索引完成（${r.mode}）${repoRoot}`,
           `  扫描 ${r.scanned} 文件；变更 ${r.changed} / 删除 ${r.removed}；写入 ${r.chunksWritten} 块`,
           `  切块策略：${Object.entries(r.strategies ?? {}).map(([s, n]) => `${s} ${n} 文件`).join('；') || '（本轮无变更文件）'}`,
+          ...(config.chunking?.parserHint === 'off' || !r.parserMissing?.length
+            ? []
+            : renderParserHint(r.parserMissing, { totalFiles: r.scannedFiles ?? r.scanned })),
           remoteMode
             ? `  向量位置：远端 ${config.remote.url}（命名空间 ${r.remote?.namespace ?? '-'}）`
             : `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,

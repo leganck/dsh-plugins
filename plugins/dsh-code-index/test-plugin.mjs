@@ -242,8 +242,8 @@ check('code_index_deps 列出两个依赖组', /\[embed\]/.test(depsText) && /\[
 check('code_index_deps 给出可执行的下一步', /code_index_deps action=install group=/.test(depsText), depsText.split('\n').slice(-1)[0])
 check('code_index_deps 默认不动手（没创建 node_modules）', !fs.existsSync(path.join(testDepsDir, 'node_modules')))
 check(
-  'code_index_deps 的 group 只允许已登记的组',
-  JSON.stringify(deps?.parameters?.properties?.group?.enum) === JSON.stringify(['embed', 'parser', 'all']),
+  'code_index_deps 的 group 枚举覆盖按语言安装组',
+  ['parser', 'parser-go', 'parser-python', 'parser-rust', 'parser-extra', 'embed', 'all'].every((g) => (deps?.parameters?.properties?.group?.enum ?? []).includes(g)),
   JSON.stringify(deps?.parameters?.properties?.group?.enum),
 )
 const badGroup = await deps.execute({ action: 'install', group: 'nope' }, {})

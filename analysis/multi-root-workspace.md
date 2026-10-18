@@ -290,6 +290,8 @@ ctx.systemPrompt.section({
 
 ### M1 —— 插件式多根（≈5 人日，覆盖 90% 需求）
 
+> 详细实现设计（根定义、工具契约、执行管线、代码骨架、测试计划）见 [plugin-multiroot-design.md](plugin-multiroot-design.md)，配套契约细读见 [design/host-tools-contract.md](design/host-tools-contract.md) 与 [design/client-ui-contract.md](design/client-ui-contract.md)。
+
 1. `roots` 定义文件 + 注册表（§4.2）。
 2. `multi_write` / `multi_edit` / `multi_sh` + `workspace_roots`（§4.3）。
 3. 提示词注入（§4.4）。
@@ -297,7 +299,7 @@ ctx.systemPrompt.section({
 5. code-index 接同一份定义（按 C 报告，≈1.0–1.6 人日）：`roots` 从 string[] 升级为 `{id,path}[]`、修 `path.resolve` 基准、跨根 RRF 融合、删除根清理。
 6. **不做**原生树/`@`/终端改造；UI 用插件自己的面板，明确告知用户边界。
 
-### M2 —— 上游提案（≈3 周）
+### M2 —— 上游提案（≈22 人日 / 4–5 周）
 
 按 §5 的顺序提交；插件在 M2 落地后**改读本体根集合**（定义文件保留，双写过渡），M1 的工具可以退化成薄封装或直接删除。
 
