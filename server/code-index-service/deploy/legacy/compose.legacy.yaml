@@ -1,0 +1,31 @@
+services:
+  dsh-embed:
+    image: python:3.11-slim
+    container_name: dsh-embed
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - ./:/app:rw
+    working_dir: /app
+    environment:
+      PORT: "8000"
+      MODEL_DIR: /app/model
+      SERVER_LOG: /app/out/server.log
+      ORT_THREADS: "8"
+      PIP_MIRROR: https://mirrors.aliyun.com/pypi/simple/
+    command: ["sh", "/app/start.sh"]
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.dsh-embed.loadbalancer.server.port=8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+networks:
+  default:
+    name: gateway
+    external: true

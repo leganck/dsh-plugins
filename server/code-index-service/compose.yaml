@@ -1,31 +1,33 @@
+# dsh-embed —— 开箱即用的默认部署（CPU 版，镜像自带嵌入模型）
+#
+#   docker compose up -d
+#   curl -s http://127.0.0.1:18000/health | head -c 400
+#
+# 默认拉 GHCR 上的 latest-cpu（≈0.3 GB，含 bge-base-zh-v1.5 fp16）。
+# 有 NVIDIA 卡、要大规模建库或高并发 → 加 -f compose.gpu.yaml。
+# 要远端重排 → 把 IMAGE 换成 :latest-cpu-rerank / :latest-gpu-rerank。
+#
+# 端口只绑 127.0.0.1：对外暴露请走反代（见 README「反向代理」一节）。
+name: dsh-embed
+
 services:
   dsh-embed:
-    image: python:3.11-slim
+    image: ${IMAGE:-ghcr.io/leganck/dsh-embed:latest-cpu}
     container_name: dsh-embed
     restart: unless-stopped
     ports:
-      - "127.0.0.1:18000:8000"
-    volumes:
-      - ./:/app:rw
-    working_dir: /app
+      - "127.0.0.1:${HOST_PORT:-18000}:8000"
     environment:
-      PORT: "8000"
-      MODEL_DIR: /app/model
-      SERVER_LOG: /app/out/server.log
-      ORT_THREADS: "8"
-      PIP_MIRROR: https://mirrors.aliyun.com/pypi/simple/
-    command: ["sh", "/app/start.sh"]
-    labels:
-      - traefik.enable=true
-      - traefik.http.services.dsh-embed.loadbalancer.server.port=8000
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-networks:
-  default:
-    name: gateway
-    external: true
+      # 镜像已内置合理默认；这里只暴露最常调的几个（同名环境变量会覆盖镜像默认）
+      ORT_THREADS: ${ORT_THREADS:-6}
+      EMBED_RATE: ${EMBED_RATE:-10}
+      API_KEY: ${API_KEY:-}
+      MAX_TOTAL_GB: ${MAX_TOTAL_GB:-20}
+    volumes:
+      # 索引库与日志；升级镜像不丢索引
+      - dsh-embed-data:/data
+    # 健康检查继承自镜像（打 /health，30s 一次）
+
+volumes:
+  dsh-embed-data:
+    name: dsh-embed-data

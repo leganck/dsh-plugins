@@ -1,0 +1,28 @@
+# 构建上下文（默认 `docker build` 用的就是这里）。
+#
+# 模型**故意排除**：它们通过独立 build context 进入镜像
+#   docker buildx build --build-context models=./models --target embed .
+# 这样改一行 Python 不会让 750 MB 模型重新上传/哈希。
+models/
+
+# 运行时产物与历史遗留的宿主依赖（已在镜像里）
+out/
+*.db
+*.db-wal
+*.db-shm
+server.log
+pylib/
+pylib119/
+cuda12/
+
+# 测试与开发杂项
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+.env
+*.log
+Dockerfile
+compose*.yaml
+deploy/
