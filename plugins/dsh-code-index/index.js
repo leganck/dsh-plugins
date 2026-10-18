@@ -24,7 +24,7 @@ import os from 'node:os'
 import { Store } from './lib/store.js'
 import { createEmbedder } from './lib/embedder.js'
 import { createReranker, RERANK_TIERS, RERANK_MAX_TOKENS } from './lib/reranker.js'
-import { createRemoteEmbedder, createRemoteReranker, createRemoteIndex, endpointsOf, describeStatus, REMOTE_DEFAULTS } from './lib/remote.js'
+import { createRemoteEmbedder, createRemoteReranker, createRemoteIndex, endpointsOf, describeStatus } from './lib/remote.js'
 import { depsStatus, installDeps, repairDeps, removeDeps, pruneForeignPlatforms, defaultDepsDir, EMBED_PACKAGES, GROUP_NAMES, DEP_GROUPS } from './lib/deps.js'
 import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strategies.js'
 import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
@@ -33,8 +33,11 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
 import { renderParserHint } from './lib/parser-hints.js'
 
+/** 0.10.0 remote-only：本地只保留 parser（切块）依赖组，embed 组不再安装 */
+const PARSER_GROUPS = GROUP_NAMES.filter((g) => g.startsWith('parser'))
+
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.6'
+export const BUILD = '2026-10-18.8'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -102,11 +105,77 @@ function scanOptsOf(config) {
   }
 }
 
+const REMOTE_DEFAULTS = {
+  url: null,
+  timeoutMs: 8000,
+  apiKey: null,
+  /** 向量标签显式覆盖（服务端自述优先；旧服务端不会自述时才需要） */
+  tag: null,
+  /** 服务端没有 tag 时的兜底模型名 */
+  model: null,
+  fallbackLocal: true,
+  /** ---- 以下只对 vectorStore: 'remote' 有意义 ---- */
+  /** 血统标识覆盖（默认由 git origin URL 推导；fork/镜像想共用一份向量时用它或 lineage） */
+  repoId: null,
+  /** 命名空间覆盖（默认 `<repoId>@<切块指纹>`） */
+  namespace: null,
+  /** 显式指定服务端血统 id（fork / 镜像共用同一份向量时用） */
+  lineage: null,
+  /** 服务端嵌入限速（块/秒）；null = 用服务端默认 */
+  rateLimit: null,
+  /** 每批上传的正文条数 */
+  uploadBatch: 256,
+}
+
+/**
+ * 用户配置面（0.10.0，remote-only）：只保留 6 个键。
+ * 其余由默认值推导；确需调整的放 advanced.*。
+ * 本地模型/本地重排已移除：向量与重排都走远端，关键词检索用本地 FTS5（不需要模型）。
+ */
+const USER_DEFAULTS = {
+  roots: [],
+  remote: { url: null, apiKey: null },
+  vectors: 'auto', // auto（有 remote.url 就用远端）| remote（强制，缺地址报错）| off（纯关键词）
+  rerank: 'off', // off | fast | quality（远端）
+  exclude: [], // 目录名，或含 "/" 的仓库相对路径前缀
+  advanced: {
+    indexDirBase: null,
+    maxFileBytes: 2 * 1024 * 1024,
+    windowLines: 40,
+    depsDir: null, // parser 依赖的受管目录（嵌入式依赖已移除）
+    chunking: { strategy: 'auto', byExt: {} },
+    sync: { watch: false, debounceMs: 30000 },
+    remoteTimeoutMs: 8000,
+    remoteRateLimit: null,
+  },
+}
+const USER_TOP_KEYS = Object.keys(USER_DEFAULTS)
+const USER_REMOTE_KEYS = ['url', 'apiKey']
+const USER_ADVANCED_KEYS = Object.keys(USER_DEFAULTS.advanced)
+
+/** 0.10.0 移除的键 → 迁移提示（不要用一句"未知配置项"打发） */
+const REMOVED_KEYS = {
+  embedding: '本地模型已移除；用 vectors: remote|off',
+  preset: '由 vectors 取代（remote|off）',
+  vectorStore: '由 vectors 取代（remote|off）',
+  rerankBackend: '重排固定走远端',
+  rerankRemote: '复用 remote.url / remote.apiKey',
+  rerankModelDir: '本地重排已移除',
+  indexDirBase: '移到 advanced.indexDirBase',
+  maxFileBytes: '移到 advanced.maxFileBytes',
+  windowLines: '移到 advanced.windowLines',
+  chunking: '移到 advanced.chunking',
+  sync: '移到 advanced.sync',
+  excludeDirs: '合并进 exclude（目录名）',
+  excludePaths: '合并进 exclude（含 / 的仓库相对路径）',
+  defaultTopK: '改用 code_search 的 top_k',
+  maxEmbedPerRun: '改用 code_index 的 max_embed',
+  indexDir: '改用 advanced.indexDirBase',
+}
+
 const DEFAULTS = {
   /** 索引基目录：<base>/<仓库名>-<路径哈希>/index.db，每仓库一库且不落在代码仓库里 */
   indexDirBase: null,
-  /** 单仓库模式：直接把 index.db 放这个目录（多仓库共用一库，慎用） */
-  indexDir: null,
   roots: [],
   maxFileBytes: 2 * 1024 * 1024,
   windowLines: 40,
@@ -151,36 +220,6 @@ const DEFAULTS = {
     batch: null,
     cachePath: null,
     depsDir: null,
-    /**
-     * **远端嵌入**（`backend: 'remote'` 时才用）。默认不配 —— 本机就是默认路线。
-     *
-     * 为什么留成可选而不是默认：本机 bge-base 一查询 34 ms，已经够用；远端多一个
-     * 故障点（网络 / 那台机器开机 / 证书），能赢的场景是"开发机弱、旁边有台带独显的机器"。
-     *
-     * `tag` 是**向量标签**（模型名 + 模型文件内容哈希 + 精度，与本机 `modelTag` 同一算法）。
-     * 服务端在 `GET /` 里自述时就不用手填；手填的用途是"服务端还没升级到会报 tag 的版本"
-     * 或者"你确认两边是同一份模型、但哈希算不出来"。**标签对不上不会回退本机** ——
-     * 回退等于把两种来源的向量混进同一个索引，检索质量会悄悄变差。
-     */
-    remote: {
-      url: null,
-      timeoutMs: 8000,
-      apiKey: null,
-      tag: null,
-      model: null,
-      fallbackLocal: true,
-      // ---- 远端索引（vectorStore: 'remote'）----
-      /** 血统标识覆盖（默认由 git origin URL 推导；fork/镜像想共用一份向量时用它或 lineage） */
-      repoId: null,
-      /** 命名空间覆盖（默认 `<repoId>@<切块指纹>`） */
-      namespace: null,
-      /** 显式指定服务端血统 id（fork / 镜像共用同一份向量时用；见 deploy README） */
-      lineage: null,
-      /** 服务端嵌入限速（块/秒）；null = 用服务端默认 */
-      rateLimit: null,
-      /** 每批上传的正文条数 */
-      uploadBatch: 256,
-    },
   },
   /**
    * 切块策略（表见 lib/strategies.js，对应 Cursor 的 `GetAvailableChunkingStrategies`）：
@@ -194,15 +233,6 @@ const DEFAULTS = {
     /** `auto`：检测到仓库里有用得上、但没装的语法就提示；`off`：静默 */
     parserHint: 'auto',
   },
-  defaultTopK: 10,
-  /**
-   * 单次最多补算多少块的向量。**默认 0 = 不自动补算**：建库只做 FTS5（秒级）。
-   *
-   * 改成 0 的理由（2026-10-16 实测）：原先默认 20000，任何人建任何新仓库的索引都会
-   * 自动跑一次可能数十分钟的重负载且事前不打招呼；用显示 GPU 跑推理时会整机卡顿
-   * （实测 8227 块把机器卡了数分钟）。重活必须先说出来、由调用方显式决定。
-   */
-  maxEmbedPerRun: 0,
   /**
    * 交叉编码器重排（**默认关**）。取值：
    *   `off`（默认）| `fast`（top-10 候选，约 +474 ms/查询）| `quality`（top-20，约 +939 ms）
@@ -226,10 +256,9 @@ const DEFAULTS = {
    * 实测取舍见 README：建库速度本机更快（33 vs 26.8 块/s），但远端换来"多人共享 + 本机零重依赖"。
    */
   /**
-   * 服务端地址与远端相关配置（**0.8.0 起提到顶层**）。
-   * `embedding.remote` 仍被接受（与这里合并，冲突时以顶层为准），用于兼容 0.7.x 配置。
+   * 服务端地址与远端相关配置（0.9.0 起只接受顶层 `remote`，`embedding.remote` 已移除）。
    */
-  remote: null,
+  remote: REMOTE_DEFAULTS,
   vectorStore: 'local',
   /**
    * **变更上报的触发方式**（默认关）。
@@ -241,7 +270,7 @@ const DEFAULTS = {
    */
   sync: { watch: false, debounceMs: 30000 },
   rerankBackend: 'local',
-  /** `rerankBackend: 'remote'` 时的远端地址与超时（与 embedding.remote 同构） */
+  /** `rerankBackend: 'remote'` 时的远端地址与超时（与 remote 同构） */
   rerankRemote: { url: null, timeoutMs: 8000, apiKey: null, fallbackLocal: true },
 }
 
@@ -262,15 +291,121 @@ export class ConfigError extends Error {
 
 const EMBEDDING_KEYS = Object.keys(DEFAULTS.embedding)
 const BACKENDS = ['auto', 'cpu', 'gpu', 'remote', 'off']
+/** `code_search` 未显式给 top_k 时的默认返回条数（原 `defaultTopK` 配置项已并入工具参数） */
+const DEFAULT_TOP_K = 10
 
-function normalizeConfig(raw = {}) {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new ConfigError(`config 必须是对象，收到 ${Array.isArray(raw) ? 'array' : typeof raw}`)
+/**
+ * 把用户配置（6 个键 + advanced）翻译成内部规范形状。
+ * 内部形状沿用历史字段名，避免改动下游 build/search/status 的大量代码。
+ */
+function userConfigToInternal(raw) {
+  const userRemote = raw.remote ?? {}
+  if (userRemote === null || typeof userRemote !== 'object' || Array.isArray(userRemote)) {
+    throw new ConfigError(`config.remote 必须是对象，收到 ${Array.isArray(userRemote) ? 'array' : typeof userRemote}`)
   }
-  const unknown = Object.keys(raw).filter((k) => !(k in DEFAULTS))
-  if (unknown.length) {
-    throw new ConfigError(`未知配置项：${unknown.join(', ')}；可用：${Object.keys(DEFAULTS).join(', ')}`)
+  const unknownRemote = Object.keys(userRemote).filter((k) => !USER_REMOTE_KEYS.includes(k))
+  if (unknownRemote.length) {
+    throw new ConfigError(`未知远端配置：${unknownRemote.map((k) => `remote.${k}`).join(', ')}；可用：remote.url, remote.apiKey`)
   }
+  if (userRemote.url !== undefined && userRemote.url !== null && typeof userRemote.url !== 'string') {
+    throw new ConfigError(`config.remote.url 必须是字符串或 null，收到 ${typeof userRemote.url}`)
+  }
+  if (userRemote.apiKey !== undefined && userRemote.apiKey !== null && typeof userRemote.apiKey !== 'string') {
+    throw new ConfigError(`config.remote.apiKey 必须是字符串或 null，收到 ${typeof userRemote.apiKey}`)
+  }
+
+  const advRaw = raw.advanced ?? {}
+  if (advRaw === null || typeof advRaw !== 'object' || Array.isArray(advRaw)) {
+    throw new ConfigError(`config.advanced 必须是对象，收到 ${Array.isArray(advRaw) ? 'array' : typeof advRaw}`)
+  }
+  const unknownAdv = Object.keys(advRaw).filter((k) => !USER_ADVANCED_KEYS.includes(k))
+  if (unknownAdv.length) {
+    throw new ConfigError(`未知 advanced 配置：${unknownAdv.map((k) => `advanced.${k}`).join(', ')}；可用：advanced.${USER_ADVANCED_KEYS.join(', advanced.')}`)
+  }
+  const adv = {
+    ...USER_DEFAULTS.advanced,
+    ...advRaw,
+    chunking: { ...USER_DEFAULTS.advanced.chunking, ...(advRaw.chunking ?? {}) },
+    sync: { ...USER_DEFAULTS.advanced.sync, ...(advRaw.sync ?? {}) },
+  }
+
+  const requestedVectors = raw.vectors ?? 'auto'
+  if (requestedVectors !== 'auto' && requestedVectors !== 'remote' && requestedVectors !== 'off') {
+    throw new ConfigError(`config.vectors 必须是 'auto' / 'remote' / 'off'，收到 ${JSON.stringify(requestedVectors)}`)
+  }
+  const hasRemoteUrl = Boolean(String(userRemote.url ?? '').trim())
+  // auto：有地址就走远端，没有就纯关键词；remote：强制远端（缺地址大声失败）
+  const vectors = requestedVectors === 'off' ? 'off' : requestedVectors === 'remote' ? 'remote' : hasRemoteUrl ? 'remote' : 'off'
+  if (requestedVectors === 'remote' && !hasRemoteUrl) {
+    throw new ConfigError('config.vectors = remote 时必须给 remote.url（不想连远端就用 auto 或 off）')
+  }
+  const rerank = raw.rerank ?? 'off'
+
+  const exclude = raw.exclude ?? []
+  if (!Array.isArray(exclude)) {
+    throw new ConfigError(`config.exclude 必须是字符串数组，收到 ${Array.isArray(exclude) ? 'array' : typeof exclude}`)
+  }
+  const excludeDirs = []
+  const excludePaths = []
+  for (const item of exclude) {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new ConfigError(`config.exclude 的元素必须是非空字符串，收到 ${JSON.stringify(item)}`)
+    }
+    if (path.isAbsolute(item)) {
+      throw new ConfigError(`config.exclude 只能是目录名或仓库相对路径，不能是绝对路径：${JSON.stringify(item)}`)
+    }
+    const rel = normalizeRelPrefix(item)
+    if (rel.split('/').includes('..')) {
+      throw new ConfigError(`config.exclude 不能包含 '..'：${JSON.stringify(item)}`)
+    }
+    if (/[\\/]/.test(item)) excludePaths.push(rel)
+    else excludeDirs.push(item)
+  }
+
+  return {
+    roots: raw.roots ?? [],
+    vectors,
+    vectorsMode: requestedVectors,
+    indexDirBase: adv.indexDirBase,
+    maxFileBytes: adv.maxFileBytes,
+    windowLines: adv.windowLines,
+    excludeDirs,
+    excludePaths,
+    chunking: adv.chunking,
+    sync: adv.sync,
+    embedding: { backend: 'off', depsDir: adv.depsDir },
+    vectorStore: vectors === 'remote' ? 'remote' : 'local',
+    rerank,
+    rerankBackend: 'remote',
+    rerankRemote: {
+      url: userRemote.url ?? null,
+      timeoutMs: adv.remoteTimeoutMs,
+      apiKey: userRemote.apiKey ?? null,
+      fallbackLocal: false,
+    },
+    remote: {
+      url: userRemote.url ?? null,
+      apiKey: userRemote.apiKey ?? null,
+      timeoutMs: adv.remoteTimeoutMs,
+      rateLimit: adv.remoteRateLimit,
+      fallbackLocal: false,
+    },
+  }
+}
+
+function normalizeConfig(userRaw = {}) {
+  if (userRaw === null || typeof userRaw !== 'object' || Array.isArray(userRaw)) {
+    throw new ConfigError(`config 必须是对象，收到 ${Array.isArray(userRaw) ? 'array' : typeof userRaw}`)
+  }
+  const removed = Object.keys(userRaw).filter((k) => k in REMOVED_KEYS)
+  if (removed.length) {
+    throw new ConfigError(`配置项已移除：${removed.map((k) => `${k}（${REMOVED_KEYS[k]}）`).join('；')}`)
+  }
+  const unknownUser = Object.keys(userRaw).filter((k) => !USER_TOP_KEYS.includes(k))
+  if (unknownUser.length) {
+    throw new ConfigError(`未知配置项：${unknownUser.join(', ')}；可用：${USER_TOP_KEYS.join(', ')}`)
+  }
+  const raw = userConfigToInternal(userRaw)
   const rawEmb = raw.embedding ?? {}
   if (rawEmb === null || typeof rawEmb !== 'object' || Array.isArray(rawEmb)) {
     throw new ConfigError(`config.embedding 必须是对象，收到 ${Array.isArray(rawEmb) ? 'array' : typeof rawEmb}`)
@@ -283,11 +418,9 @@ function normalizeConfig(raw = {}) {
   }
 
   const cfg = { ...DEFAULTS, ...raw, embedding: { ...DEFAULTS.embedding, ...rawEmb } }
-  // 两处 remote 都是**嵌套对象**：浅合并会把默认值整块顶掉，必须单独深合一层
-  // `remote` 已提到顶层（0.8.0）；`embedding.remote` 继续接受，合并时顶层优先
-  cfg.remote = { ...DEFAULTS.embedding.remote, ...(rawEmb.remote ?? {}), ...(raw.remote ?? {}) }
+  // 嵌套对象必须单独深合一层（浅合并会把默认值整块顶掉）
+  cfg.remote = { ...REMOTE_DEFAULTS, ...(raw.remote ?? {}) }
   cfg.sync = { ...DEFAULTS.sync, ...(raw.sync ?? {}) }
-  cfg.embedding.remote = cfg.remote
   cfg.rerankRemote = { ...DEFAULTS.rerankRemote, ...(raw.rerankRemote ?? {}) }
 
   const intAtLeast1 = (value, key) => {
@@ -295,15 +428,8 @@ function normalizeConfig(raw = {}) {
       throw new ConfigError(`config.${key} 必须是 >= 1 的整数，收到 ${JSON.stringify(value)}`)
     }
   }
-  intAtLeast1(cfg.defaultTopK, 'defaultTopK')
   intAtLeast1(cfg.windowLines, 'windowLines')
   intAtLeast1(cfg.embedding.threads, 'embedding.threads')
-  // maxEmbedPerRun 允许 0（= 不自动补算向量），这是默认值；只拒绝负数与小数
-  if (!Number.isInteger(cfg.maxEmbedPerRun) || cfg.maxEmbedPerRun < 0) {
-    throw new ConfigError(
-      `config.maxEmbedPerRun 必须是 >= 0 的整数（0 = 建库时不补算向量），收到 ${JSON.stringify(cfg.maxEmbedPerRun)}`,
-    )
-  }
   if (typeof cfg.maxFileBytes !== 'number' || cfg.maxFileBytes <= 0) {
     throw new ConfigError(`config.maxFileBytes 必须是正数，收到 ${JSON.stringify(cfg.maxFileBytes)}`)
   }
@@ -338,9 +464,6 @@ function normalizeConfig(raw = {}) {
   }
   if (cfg.indexDirBase !== null && typeof cfg.indexDirBase !== 'string') {
     throw new ConfigError(`config.indexDirBase 必须是字符串或 null，收到 ${typeof cfg.indexDirBase}`)
-  }
-  if (cfg.indexDir !== null && typeof cfg.indexDir !== 'string') {
-    throw new ConfigError(`config.indexDir 必须是字符串或 null，收到 ${typeof cfg.indexDir}`)
   }
   if (cfg.embedding.depsDir !== null && cfg.embedding.depsDir !== undefined && typeof cfg.embedding.depsDir !== 'string') {
     throw new ConfigError(`config.embedding.depsDir 必须是字符串或 null，收到 ${typeof cfg.embedding.depsDir}`)
@@ -378,7 +501,7 @@ function normalizeConfig(raw = {}) {
     )
   }
 
-  // ---- 远端推理（embedding.remote / rerankRemote）----
+  // ---- 远端推理（remote / rerankRemote）----
   // 这两块的错误信息必须**点名键路径**：远端配置错一个字段的表现是"一直降级成本机"，
   // 不点名就会让人以为是网络问题（本插件在 excludePaths 上就吃过这种亏）。
   const checkRemote = (block, label, allowedKeys) => {
@@ -400,7 +523,8 @@ function normalizeConfig(raw = {}) {
       }
     }
     if (!Number.isInteger(block.timeoutMs) || block.timeoutMs < 100) {
-      throw new ConfigError(`config.${label}.timeoutMs 必须是 >= 100 的整数（毫秒），收到 ${JSON.stringify(block.timeoutMs)}`)
+      // 用户面只有一个超时开关 advanced.remoteTimeoutMs（remote / rerankRemote 都由它映射）
+      throw new ConfigError(`config.advanced.remoteTimeoutMs 必须是 >= 100 的整数（毫秒），收到 ${JSON.stringify(block.timeoutMs)}`)
     }
     if (block.apiKey !== null && typeof block.apiKey !== 'string') {
       throw new ConfigError(`config.${label}.apiKey 必须是字符串或 null，收到 ${typeof block.apiKey}`)
@@ -414,7 +538,7 @@ function normalizeConfig(raw = {}) {
       }
     }
   }
-  checkRemote(cfg.remote, 'remote', Object.keys(DEFAULTS.embedding.remote))
+  checkRemote(cfg.remote, 'remote', Object.keys(REMOTE_DEFAULTS))
   checkRemote(cfg.rerankRemote, 'rerankRemote', Object.keys(DEFAULTS.rerankRemote))
   // 0.8.0 新增字段的类型校验（checkRemote 只覆盖通用字段）
   if (cfg.remote.repoId !== null && typeof cfg.remote.repoId !== 'string') {
@@ -438,24 +562,15 @@ function normalizeConfig(raw = {}) {
   if (!Number.isInteger(cfg.sync.debounceMs) || cfg.sync.debounceMs < 1000) {
     throw new ConfigError(`config.sync.debounceMs 必须是 >= 1000 的整数（毫秒），收到 ${JSON.stringify(cfg.sync.debounceMs)}`)
   }
-  if (cfg.vectorStore !== 'local' && cfg.vectorStore !== 'remote') {
-    throw new ConfigError(`config.vectorStore 必须是 'local' 或 'remote'，收到 ${JSON.stringify(cfg.vectorStore)}`)
+  // 0.10.0：vectorStore 由 vectors 推导（remote|local），不再暴露给用户
+  if (cfg.vectors === 'remote' && !String(cfg.remote.url ?? '').trim()) {
+    throw new ConfigError('config.vectors = remote 时必须给 remote.url（服务端地址）')
   }
-  if (cfg.vectorStore === 'remote' && !String(cfg.remote.url ?? '').trim()) {
-    throw new ConfigError('config.vectorStore = remote 时必须给 config.remote.url（服务端地址）')
+  if (cfg.rerank !== 'off' && cfg.vectors !== 'remote') {
+    throw new ConfigError('config.rerank 需要 vectors: remote（纯关键词模式没有候选集可重排）')
   }
-  // 选了远端却没有地址 → 直接拒绝。否则表现是"每次查询静默降级"，比报错难查得多。
-  if (cfg.embedding.backend === 'remote' && !String(cfg.remote.url ?? '').trim()) {
-    throw new ConfigError('config.embedding.backend = remote 时必须给 config.remote.url（例如 https://dsh-embed.example.com）')
-  }
-  if (cfg.rerankBackend !== 'local' && cfg.rerankBackend !== 'remote') {
-    throw new ConfigError(`config.rerankBackend 必须是 'local' 或 'remote'，收到 ${JSON.stringify(cfg.rerankBackend)}`)
-  }
-  if (cfg.rerankBackend === 'remote' && !String(cfg.rerankRemote.url ?? '').trim()) {
-    // 重排地址缺省时可以复用嵌入的地址（同一台服务同时提供 /embed 与 /rerank）
-    const shared = String(cfg.remote.url ?? '').trim()
-    if (!shared) throw new ConfigError('config.rerankBackend = remote 时必须给 config.rerankRemote.url（或至少配置 embedding.remote.url 复用同一台服务）')
-    cfg.rerankRemote.url = shared
+  if (cfg.rerank !== 'off' && !String(cfg.rerankRemote.url ?? '').trim()) {
+    throw new ConfigError('config.rerank 需要 remote.url（重排与向量共用同一个服务地址）')
   }
   cfg.allowedRoots = cfg.roots.map((r) => path.resolve(String(r).replace(/^~(?=[\\/]|$)/, os.homedir())))
   return cfg
@@ -531,40 +646,20 @@ function applyInner(ctx, rawConfig = {}) {
           pid: process.pid,
           node: process.version,
           pluginDir: path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
-          tools: ['code_index', 'code_search', 'code_index_status', 'code_index_deps'],
+          tools: ['code_index', 'code_search', 'code_map', 'code_index_status', 'code_index_deps'],
           config: {
+            vectors: config.vectors,
+            vectorsMode: config.vectorsMode,
             indexDirBase: config.indexDirBase,
             roots: config.allowedRoots,
-            embedding: {
-              backend: config.embedding.backend,
-              queryBackend: config.embedding.queryBackend,
-              modelDir: expandPath(config.embedding.modelDir) ?? null,
-              // 远端只记**地址与开关**，绝不记 apiKey（标记文件是明文的，会被归档/分享）
-              remote: config.embedding.backend === 'remote' || config.embedding.queryBackend === 'remote'
-                ? { url: config.remote.url, tag: config.remote.tag, fallbackLocal: config.remote.fallbackLocal, apiKeySet: Boolean(config.remote.apiKey) }
-                : null,
-            },
-            vectorStore: config.vectorStore,
+            // 远端只记**地址与开关**，绝不记 apiKey（标记文件是明文的，会被归档/分享）
             remote:
-              config.vectorStore === 'remote' ||
-              config.embedding.backend === 'remote' ||
-              config.embedding.queryBackend === 'remote'
-                ? {
-                    url: config.remote.url,
-                    namespace: config.remote.namespace,
-                    repoId: config.remote.repoId,
-                    fallbackLocal: config.remote.fallbackLocal,
-                    apiKeySet: Boolean(config.remote.apiKey),
-                  }
+              config.vectors === 'remote'
+                ? { url: config.remote.url, timeoutMs: config.remote.timeoutMs, rateLimit: config.remote.rateLimit, apiKeySet: Boolean(config.remote.apiKey) }
                 : null,
             rerank: {
               tier: config.rerank,
-              backend: config.rerankBackend,
-              modelDir: expandPath(config.rerankModelDir) ?? null,
-              remote:
-                config.rerankBackend === 'remote'
-                  ? { url: config.rerankRemote.url, fallbackLocal: config.rerankRemote.fallbackLocal, apiKeySet: Boolean(config.rerankRemote.apiKey) }
-                  : null,
+              remote: config.rerank !== 'off' ? { url: config.rerankRemote.url, apiKeySet: Boolean(config.rerankRemote.apiKey) } : null,
             },
             chunking: { strategy: config.chunking?.strategy ?? 'auto', byExt: Object.keys(config.chunking?.byExt ?? {}) },
             // 扫描范围与预算也要记：否则"加载时到底排除了哪些目录"无法回答 ——
@@ -575,8 +670,6 @@ function applyInner(ctx, rawConfig = {}) {
               excludePaths: config.excludePaths ?? [],
               maxFileBytes: config.maxFileBytes,
               windowLines: config.windowLines,
-              defaultTopK: config.defaultTopK,
-              maxEmbedPerRun: config.maxEmbedPerRun,
             },
           },
           markerFile: path.join(markerDir, '_loaded.json'),
@@ -590,6 +683,26 @@ function applyInner(ctx, rawConfig = {}) {
   }
 
   const stores = new Map()
+
+  // ---- 远端可用性闸门（自动切换）----
+  // 连不上一次后，60 秒内不再尝试：否则服务端关机时**每次查询都要先等满 8 s 超时**，
+  // 关键词检索明明本地就有，却被人为拖慢。冷却期过后自动重试，不需要重启插件。
+  const REMOTE_COOLDOWN_MS = 60_000
+  let remoteDownUntil = 0
+  let remoteDownReason = ''
+  const remoteGateOpen = () => Date.now() >= remoteDownUntil
+  const markRemoteDown = (e) => {
+    remoteDownUntil = Date.now() + REMOTE_COOLDOWN_MS
+    remoteDownReason = String(e?.message ?? e).slice(0, 160)
+  }
+  const markRemoteUp = () => {
+    remoteDownUntil = 0
+    remoteDownReason = ''
+  }
+  const remoteCooldownNote = () => {
+    const left = Math.max(0, Math.ceil((remoteDownUntil - Date.now()) / 1000))
+    return `远端暂时不可用（${remoteDownReason || '连接失败'}），${left}s 内跳过重试、先用纯关键词；冷却后自动恢复`
+  }
 
   // ---------------------------------------------------------------- 工具注册
   // practices.md：「Register every resource inside `apply` with `ctx.effect` or `ctx.on`
@@ -625,7 +738,7 @@ function applyInner(ctx, rawConfig = {}) {
   }
 
   function storeFor(repoRoot) {
-    const dbPath = indexDbPath(repoRoot, { indexDir: config.indexDir, indexDirBase: config.indexDirBase })
+    const dbPath = indexDbPath(repoRoot, { indexDirBase: config.indexDirBase })
     let s = stores.get(dbPath)
     if (!s) {
       s = Store.open(dbPath)
@@ -775,7 +888,7 @@ function applyInner(ctx, rawConfig = {}) {
   const codeIndexTool = {
     name: 'code_index',
     description:
-      '建立或增量刷新某个代码仓库的检索索引（本地 SQLite：FTS5 全文 + 可选向量）。首次较慢（向量部分按仓库大小，实测 GPU 约 4–17 分钟/仓库），之后只处理变化的文件，通常秒级。'
+      '建立或增量刷新某个代码仓库的检索索引（本地 SQLite FTS5 全文 + 可选远端向量）。首次较慢（向量部分由服务端按仓库大小计算），之后只处理变化的文件，通常秒级。'
       + '用 status_only=true 只查看将会有多少文件变化而不写入。',
     parameters: {
       type: 'object',
@@ -786,7 +899,7 @@ function applyInner(ctx, rawConfig = {}) {
         max_embed: {
           type: 'integer',
           description:
-            '本轮最多补算多少块的向量。**默认 0 = 不补算**，建库只做全文索引（秒级）。要启用语义检索就显式给一个正整数（建议 500~2000 分批跑，可续算）；补算是重负载，可能占满 GPU/CPU 数分钟并让整机变卡。',
+            '本轮最多让服务端补算多少块的向量。**默认 0 = 不补算**，建库只做全文索引（秒级）。要启用语义检索就显式给一个正整数（建议按服务端算力分批跑，可续算）。',
         },
       },
       required: [],
@@ -814,15 +927,16 @@ function applyInner(ctx, rawConfig = {}) {
         }
 
         const remoteMode = config.vectorStore === 'remote'
-        const embedder = remoteMode
-          ? { ok: false, reason: 'vectorStore=remote：向量由服务端计算（本机只保留 BM25）' }
-          : await getEmbedder()
+        // 0.10.0 remote-only：本地不再计算向量。vectors=off 时退化为纯关键词（本地 FTS5）。
+        const embedder = null
+        const keywordOnly = !remoteMode
+        const keywordReason = ''
         const r = await buildIndex({
           store,
           repoRoot,
           opts: scanOptsOf(config),
           embedder,
-          budget: { maxEmbedPerRun: args.max_embed ?? config.maxEmbedPerRun, mode: args.mode ?? 'incremental' },
+          budget: { maxEmbedPerRun: args.max_embed ?? 0, mode: args.mode ?? 'incremental' },
           // **只放真正影响切块的字段**：`parserHint` 这类展示用配置一旦混进来，
           // 切块指纹会跟着变 → 命名空间莫名换新（实测踩到：energy 因此白换了一次）。
           chunking: {
@@ -843,6 +957,11 @@ function applyInner(ctx, rawConfig = {}) {
               }
             : null,
         })
+        if (remoteMode) {
+          // 远端是否真的可达，以本轮同步结果为准：失败进入冷却，成功则解除
+          if (r.remoteError) markRemoteDown(new Error(r.remoteError))
+          else markRemoteUp()
+        }
         const lines = [
           `索引完成（${r.mode}）${repoRoot}`,
           `  扫描 ${r.scanned} 文件；变更 ${r.changed} / 删除 ${r.removed}；写入 ${r.chunksWritten} 块`,
@@ -852,11 +971,16 @@ function applyInner(ctx, rawConfig = {}) {
             : renderParserHint(r.parserMissing, {
                 totalFiles: r.scannedFiles ?? r.scanned,
                 vectorStore: config.vectorStore,
+                embeddings: !keywordOnly,
               })),
-          remoteMode
-            ? `  向量位置：远端 ${config.remote.url}（命名空间 ${r.remote?.namespace ?? '-'}）`
-            : `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,
-          `  ${r.embedNote}`,
+          // 没有嵌入能力时（未配置 / 缺依赖 / 缺模型 / 后端 off）默认就走关键词：
+          // **这不是故障，是默认形态** —— 不要拿"缺 onnxruntime、缺模型"刷屏。
+          keywordOnly
+            ? `  模式：纯关键词（关键词检索；本机未启用嵌入${keywordReason}）`
+            : remoteMode
+              ? `  向量位置：远端 ${config.remote.url}（命名空间 ${r.remote?.namespace ?? '-'}）`
+              : `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,
+          keywordOnly ? null : `  ${r.embedNote}`,
           `  用时 ${(r.elapsedMs / 1000).toFixed(1)}s；库 ${dbPath}`,
         ]
         // 降级必须显式可见：以为在用 AST、实际在跑启发式，是"检索质量悄悄变化"的典型来源
@@ -869,16 +993,16 @@ function applyInner(ctx, rawConfig = {}) {
         if (r.embeddingTag) lines.push(`  向量模型：${r.embeddingTag}`)
         for (const why of r.chunkFallbacks ?? []) lines.push(`  ⚠️ ${why}`)
         if (r.fileErrors.length) lines.push(`  读取失败 ${r.fileErrors.length} 个：${r.fileErrors.join('; ')}`)
-        if (!remoteMode && !embedder.ok) lines.push(`  ⚠️ 向量通道未启用，当前是纯关键词检索：${embedder.reason}`)
+        // 上面已有一行「模式：纯关键词」，这里不重复报（缺依赖/缺模型是默认形态，不是故障）
         else if (!remoteMode && r.stats.vectors < r.stats.chunks) {
           // 让"向量没补完"显式可见：8227 块 / 0 向量这种人眼容易划过去，
           // 而它直接决定语义召回是否存在（实测曾有会话因此以为配置关了向量）
           lines.push(
-            `  ⚠️ 向量不完整：${r.stats.vectors}/${r.stats.chunks} 块有向量 —— 语义召回只覆盖一部分；传 max_embed 再跑一次可续算`,
+            keywordOnly || r.stats.vectors === 0 ? '' : `  ⚠️ 向量不完整：${r.stats.vectors}/${r.stats.chunks} 块有向量 —— 语义召回只覆盖一部分；传 max_embed 再跑一次可续算`,
           )
         }
         ensureWatch(repoRoot)
-        return textResult({ repoRoot, dbPath, ...r }, lines.join('\n'))
+        return textResult({ repoRoot, dbPath, ...r }, lines.filter((l) => l !== null).join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
@@ -947,9 +1071,9 @@ function applyInner(ctx, rawConfig = {}) {
   registerTool({
     name: 'code_search',
     description:
-      '在本仓库的代码索引里做混合检索（关键词 BM25 + 语义向量，RRF 融合），返回排好序的「文件:行 + 片段」。'
+      '在本仓库的代码索引里做混合检索（本地关键词 BM25 + 远端语义向量，RRF 融合），返回排好序的「文件:行 + 片段」。'
       + '第一次查询前需要先跑 code_index。适合“XX 逻辑在哪实现 / 哪个文件处理了 YY”这类问题；'
-      + '查找确切字符串（日志、错误码原文）用 grep 更快。',
+      + '查找确切字符串（日志、错误码原文）用 grep 更快。vectors=off 时退化为纯关键词。',
     isConcurrencySafe: () => true,
     parameters: {
       type: 'object',
@@ -998,7 +1122,10 @@ function applyInner(ctx, rawConfig = {}) {
           let remoteMeta = null
           let remoteError = null
           const t0 = Date.now()
-          try {
+          if (!remoteGateOpen()) {
+            // 冷却期内直接跳过：省掉必然超时的等待
+            remoteError = remoteCooldownNote()
+          } else try {
             const res = await getRemoteIndex().search(namespace, args.query, {
               k: 40,
               rerankCandidates: remoteRerank,
@@ -1020,12 +1147,14 @@ function applyInner(ctx, rawConfig = {}) {
                 : null,
               reason: res.reason ?? null,
             }
+            markRemoteUp()
           } catch (e) {
             remoteError = String(e?.message ?? e).slice(0, 200)
+            markRemoteDown(e)
           }
           const localReranker = tier && config.rerankBackend === 'local' ? await getReranker() : null
           r = await searchFusedRemote(store, args.query, {
-            topK: args.top_k ?? config.defaultTopK,
+            topK: args.top_k ?? DEFAULT_TOP_K,
             remoteHits,
             remoteMeta,
             reranker: localReranker,
@@ -1033,12 +1162,13 @@ function applyInner(ctx, rawConfig = {}) {
             excludePaths,
             boostPrefix,
           })
-          if (remoteError) r.note = [r.note, `远端不可达，已退化为纯关键词：${remoteError}`].filter(Boolean).join('；')
+          if (remoteError) r.note = [r.note, `远端不可用，已退化为纯关键词：${remoteError}`].filter(Boolean).join('；')
         } else {
-          const embedder = await getQueryEmbedder()
+          // vectors=off：纯关键词（本地 FTS5），不需要任何模型
+          const embedder = null
           const reranker = await getReranker()
           r = await hybridSearch(store, embedder, args.query, {
-            topK: args.top_k ?? config.defaultTopK,
+            topK: args.top_k ?? DEFAULT_TOP_K,
             mode: args.mode ?? 'auto',
             reranker: tier ? reranker : null,
             rerankCandidates: tier?.candidates ?? 0,
@@ -1047,6 +1177,9 @@ function applyInner(ctx, rawConfig = {}) {
             boostPrefix,
           })
         }
+        // 纯关键词模式下的 note 必然是「向量通道未启用」这类说明 —— 那是设计如此，不是故障。
+        // 远端模式的降级 note 必须保留（否则"服务端挂了"会被悄悄吞掉）。
+        if (config.vectorStore !== 'remote') r.note = ''
         if (!r.results.length) {
           return textResult(
             { repoRoot, mode: r.mode, terms: r.terms, results: [], rerank: r.rerank },
@@ -1108,44 +1241,38 @@ function applyInner(ctx, rawConfig = {}) {
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         const remoteMode = config.vectorStore === 'remote'
-        const embedder = remoteMode ? { ok: false, reason: 'vectorStore=remote（向量在服务端）' } : await getEmbedder()
-        const queryEmbedder = !remoteMode && config.embedding.queryBackend ? await getQueryEmbedder() : embedder
-        const describe = (e) => {
-          if (!e?.ok) return `未启用 —— ${e?.reason ?? '未知'}`
-          if (e.backend === 'remote') return `remote ${e.remote?.url ?? ''}（${describeStatus(e.remote?.status)}）`
-          return `${e.backend}/${e.modelFile}`
-        }
+        // 0.10.0 remote-only：vectors=off 就是纯关键词（本地 FTS5），不涉及任何模型
+        const keywordOnly = !remoteMode
         const lines = [
           `索引：${repoRoot}`,
           `  库文件 ${dbPath}（${(s.dbBytes / 1048576).toFixed(1)} MB）`,
-          `  覆盖 ${s.files} 文件 / ${s.chunks} 块${remoteMode ? '' : ` / ${s.vectors} 向量`}`,
+          `  覆盖 ${s.files} 文件 / ${s.chunks} 块`,
           `  最后建库：${store.getMeta('last_build_at') ? new Date(Number(store.getMeta('last_build_at'))).toLocaleString() : '从未'}`,
           remoteMode
             ? store.stats().chunks === 0
               ? `  向量位置：远端 ${config.remote.url}（本机只保留 BM25；命名空间在建库后由切块指纹确定）`
               : `  向量位置：远端 ${config.remote.url}（命名空间 ${namespaceFor(repoRoot, store)}；本机只保留 BM25）`
-            : `  嵌入器（建库）：${describe(embedder)}${embedder.ok ? `（缓存 ${embedder.cacheEntries} 条）` : ''}`,
-          // 建库与查询可以走不同后端（本机实测：DML 建库快 8×，但 batch=1 查询 CPU 更快）——
-          // 两档只在"向量标签一致"时才有意义，所以标签必须并排显示
-          !remoteMode && queryEmbedder !== embedder ? `  嵌入器（查询）：${describe(queryEmbedder)}` : '',
-          // 索引里的向量由哪个模型产出：与当前模型不一致时向量通道会被闸门挡住（见 lib/search.js）
-          remoteMode ? '' : `  索引向量模型：${store.getMeta('embedding_tag') ?? '未记录（旧版本建的库）'}${embedder.ok ? `　当前模型：${embedder.modelTag}` : ''}`,
-        ].filter(Boolean)
+            : `  模式：纯关键词（本地 FTS5；vectors=${config.vectorsMode}${config.vectorsMode === 'auto' ? ' → 未配 remote.url' : ''}）`,
+        ]
         if (remoteMode) {
           // 远端状态是"索引到底建了多少"的唯一真相来源：本地只知道清单，不知道向量进度。
           // 但**本机还没建库时命名空间是 `@default`（没有 chunkFp）**，去问服务端必然 404 ——
           // 那不是"远端坏了"，而是"还没开始"。直接给出下一步，别报错吓人。
           if (store.stats().chunks === 0) {
             lines.push('  远端索引：本机尚未建库（先跑 code_index，命名空间由切块配置的指纹决定）')
+          } else if (!remoteGateOpen()) {
+            lines.push(`  ${remoteCooldownNote()}`)
           } else try {
             const rs = await getRemoteIndex().status(namespaceFor(repoRoot, store))
+            markRemoteUp()
             lines.push(
               `  远端索引：revision ${rs.revision}；${rs.chunks} 块 / ${rs.vectors} 向量（覆盖 ${((rs.coverage ?? 0) * 100).toFixed(0)}%）；待嵌 ${rs.pending ?? '?'}`,
               `  远端嵌入：${rs.paused ? '已暂停' : '运行中'}（${rs.rate} 块/s）；血统占用 ${((rs.totalBytes ?? 0) / 1048576).toFixed(0)} MB（向量上限 ${rs.limits?.maxVectorsPerLineage ?? '-'} / 血统）`,
             )
             if (rs.repoId) lines.push(`  血统：${rs.repoId}（追踪的远端：${normalizeRemoteUrl(gitOriginUrl(repoRoot)) || '无 git（本机血统）'}）`)
           } catch (e) {
-            lines.push(`  ⚠️ 远端不可用：${String(e?.message ?? e).slice(0, 160)}`)
+            markRemoteDown(e)
+            lines.push(`  ⚠️ 远端不可用：${String(e?.message ?? e).slice(0, 160)}（${Math.ceil(REMOTE_COOLDOWN_MS / 1000)}s 内跳过重试）`)
           }
         }
         let st = null
@@ -1153,11 +1280,10 @@ function applyInner(ctx, rawConfig = {}) {
           st = scanStatus(store, repoRoot, scanOptsOf(config))
           lines.push(`  新鲜度：${st.stale ? `过期（${st.changed} 改 / ${st.removed} 删）` : '最新'}；候选文件 ${st.scanned}`)
         }
-        // 重排状态：只报"配置值"，**不在这里加载模型**（status 必须是轻量的，不该为了显示去建 531 MB 会话）
+        // 重排状态：只报"配置值"，不在这里连接远端
         if (RERANK_TIERS[config.rerank]) {
-          const where = config.rerankBackend === 'remote' ? `远端 ${config.rerankRemote.url}（连不上会回退本机）` : '本机'
           lines.push(
-            `  重排：${config.rerank}（候选 ${RERANK_TIERS[config.rerank].candidates} 个，${where}，首次用到时才加载模型/连接）`,
+            `  重排：${config.rerank}（候选 ${RERANK_TIERS[config.rerank].candidates} 个，远端 ${config.rerankRemote.url}，不降级到本机）`,
           )
         } else {
           lines.push('  重排：off')
@@ -1165,20 +1291,13 @@ function applyInner(ctx, rawConfig = {}) {
         // 排除规则要可见：用户改完配置最需要确认的就是"到底排掉了没有"
         const excl = [...config.excludePaths.map((p) => `路径 ${normalizeRelPrefix(p)}`), ...config.excludeDirs.map((d) => `目录名 ${d}`)]
         if (excl.length) lines.push(`  已排除：${excl.join('、')}（另有内置 ${'node_modules/build/.git 等'}）`)
-        // 向量完整性显式提示：这一行决定了"语义召回到底有没有在工作"
-        if (embedder.ok && s.chunks > 0 && s.vectors < s.chunks) {
-          lines.push(
-            `  ⚠️ 向量不完整：${s.vectors}/${s.chunks} 块有向量（${((s.vectors / s.chunks) * 100).toFixed(0)}%）—— 当前检索只有关键词 + 部分语义，传 max_embed=<正整数> 跑 code_index 可补算`,
-          )
-        }
         return textResult(
           {
             repoRoot,
             dbPath,
             stats: s,
             scan: st,
-            vectorStore: config.vectorStore,
-            embedder: embedder.ok ? { backend: embedder.backend, model: embedder.modelFile, cacheEntries: embedder.cacheEntries } : { ok: false, reason: embedder.reason },
+            vectors: config.vectorStore,
           },
           lines.join('\n'),
         )
@@ -1236,10 +1355,10 @@ function applyInner(ctx, rawConfig = {}) {
   registerTool({
     name: 'code_index_deps',
     description:
-      '管理代码索引插件的**可选嵌入依赖**（onnxruntime-node + @huggingface/transformers；解压约 240–460 MB）。'
-      + '这两个依赖**不随插件安装**——插件装好即可用（纯关键词检索），只有真正需要向量检索时才用本工具按需下载。'
-      + 'action：status（默认，只看状态）/ install（下载安装；用 --ignore-scripts，**不执行任何依赖脚本**，因此不需要构建审批）/ '
-      + 'prune（修剪非本平台的二进制，实测省约 223 MB）/ repair（删掉重装）/ remove（删除）。'
+      '管理**可选的语法解析依赖**（tree-sitter + 各语言语法，约 41 MB；不随插件安装）。'
+      + '不装也能用：切块会降级为 heuristic/window；装了 `code_index` 才会按 AST 切块。'
+      + 'action：status（默认，只看状态）/ install（下载安装；用 --ignore-scripts，**不执行任何依赖脚本**）/ '
+      + 'prune（修剪非本平台的二进制）/ repair（删掉重装）/ remove（删除）。'
       + '只安装到插件自管的受管目录，不改 profile、不改 package.json。install/repair 需要网络，可能耗时数分钟。',
     parameters: {
       type: 'object',
@@ -1247,8 +1366,8 @@ function applyInner(ctx, rawConfig = {}) {
         action: { type: 'string', enum: ['status', 'install', 'prune', 'repair', 'remove'], description: '默认 status。' },
         group: {
           type: 'string',
-          enum: [...GROUP_NAMES, 'all'],
-          description: `依赖组：embed（向量嵌入，约 661 MB 未修剪 / 264 MB 修剪后）| parser（tree-sitter 语法解析，约 41 MB）| all。默认 embed。`,
+          enum: [...PARSER_GROUPS, 'all'],
+          description: `依赖组：parser（Java/JS/TS/Groovy，约 41 MB）| parser-go | parser-python | parser-rust | parser-extra（go+python+rust）| all。默认 parser。`,
         },
         registry: { type: 'string', description: '可选的 npm registry（省略则沿用本机 npm 配置）。' },
       },
@@ -1259,26 +1378,31 @@ function applyInner(ctx, rawConfig = {}) {
     async execute(args) {
       try {
         const action = args.action ?? 'status'
-        const group = args.group ?? 'embed'
-        if (group !== 'all' && !GROUP_NAMES.includes(group)) {
-          return fail(`未知依赖组：${group}（可用：${GROUP_NAMES.join(', ')}, all）`)
+        const group = args.group ?? 'parser'
+        if (group !== 'all' && !PARSER_GROUPS.includes(group)) {
+          return fail(`未知依赖组：${group}（可用：${PARSER_GROUPS.join(', ')}, all）`)
         }
         const depsDir = expandPath(config.embedding.depsDir) ?? defaultDepsDir()
-        const lines = [`依赖目录：${depsDir}`, `依赖组：${Object.entries(DEP_GROUPS).map(([g, l]) => `${g}(${l.length} 包)`).join('、')}`]
+        const lines = [`依赖目录：${depsDir}`, `依赖组：${PARSER_GROUPS.map((g) => `${g}(${DEP_GROUPS[g].length} 包)`).join('、')}`]
         let detail = {}
         if (action === 'install' || action === 'repair') {
           const log = (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`)
           const fn = action === 'install' ? installDeps : repairDeps
-          const r = await fn({ depsDir, registry: args.registry, group, log })
-          lines.push(r.note)
-          if (r.stdout) {
-            const tail = String(r.stdout).trim().split('\n').filter(Boolean).slice(-3)
-            if (tail.length) lines.push(`npm 输出尾部：${tail.join(' | ')}`)
+          const targets = group === 'all' ? ['parser', 'parser-extra'] : [group]
+          let ok = true
+          for (const g of targets) {
+            const r = await fn({ depsDir, registry: args.registry, group: g, log })
+            lines.push(r.note)
+            if (r.stdout) {
+              const tail = String(r.stdout).trim().split('\n').filter(Boolean).slice(-3)
+              if (tail.length) lines.push(`npm 输出尾部：${tail.join(' | ')}`)
+            }
+            ok = ok && r.ok
           }
-          detail = { action, group, ok: r.ok }
+          detail = { action, group, ok }
           // 装完立刻让**本进程**也能用上：chunk-ast 会缓存"解析器加载失败"的结果，
           // 不清的话本次会话里仍然一直在走 heuristic，看起来像"装了没用"（实测踩到）。
-          if (r.ok) {
+          if (ok) {
             const { resetParserCache } = await import('./lib/chunk-ast.js')
             resetParserCache()
             lines.push('已重置解析器缓存：后续建库立即按 AST 切块（无需重启）')
@@ -1292,9 +1416,11 @@ function applyInner(ctx, rawConfig = {}) {
           lines.push(r.note)
           detail = { action, removed: r.removed }
         }
-        const st = depsStatus({ depsDir, alsoDirs: [PLUGIN_DIR], group })
-        lines.push(`\n各组状态（体积合计 ${(st.sizeBytes / 1048576).toFixed(1)} MB）：`)
-        for (const [g, gs] of Object.entries(st.groups)) {
+        const st = depsStatus({ depsDir, alsoDirs: [PLUGIN_DIR], group: group === 'all' ? 'parser' : group })
+        lines.push(`\n各组状态（依赖目录合计 ${(st.sizeBytes / 1048576).toFixed(1)} MB）：`)
+        for (const g of PARSER_GROUPS) {
+          const gs = st.groups[g]
+          if (!gs) continue
           const why = [
             gs.missing.length ? `缺 ${gs.missing.join(', ')}` : '',
             gs.mismatched.length ? `版本不符：${gs.mismatched.join('；')}` : '',
@@ -1309,27 +1435,15 @@ function applyInner(ctx, rawConfig = {}) {
             )
           }
         }
-        const missing = GROUP_NAMES.filter((g) => !st.groups[g]?.installed)
+        const missing = PARSER_GROUPS.filter((g) => !st.groups[g]?.installed)
         lines.push('')
         lines.push(
           missing.length
             ? `下一步：code_index_deps action=install group=${missing.join('|')} —— ` +
                 missing.map((g) => `${g}: ${DEP_GROUPS[g].map((p) => `${p.name}@${p.version}`).join(', ')}`).join('；')
-            : '两组依赖都已就绪：code_index 传 max_embed=<正整数> 可补算向量；AST 切块（策略 ast）可直接使用。',
+            : '语法解析依赖已就绪：code_index 会按 AST 切块（切块策略见 code_index_status）。',
         )
-        // 重排模型是**模型**不是 npm 依赖（与嵌入模型同一约定：模型由 tools/fetch-model.mjs 下）。
-        // 这里只如实报告它是否就位 —— 因为"开了 rerank 但模型没下"会静默降级成不重排。
-        const rrDir = expandPath(config.rerankModelDir) ?? path.join(os.homedir(), '.dsh', 'models', 'bge-reranker-base')
-        const rrHas = (f) => fs.existsSync(path.join(rrDir, f))
-        lines.push('')
-        lines.push(`重排模型（${rrDir}）：`)
-        if (rrHas('model_fp16.onnx')) lines.push('  ✅ model_fp16.onnx（DirectML 推荐，实测每候选 47 ms）')
-        if (rrHas('model_int8.onnx')) lines.push('  ✅ model_int8.onnx（仅 CPU，实测每候选 250 ms）')
-        if (!rrHas('model_fp16.onnx') && !rrHas('model_int8.onnx')) {
-          lines.push(`  ❌ 未下载 —— 下载：node tools/fetch-model.mjs --model bge-reranker-base --quant fp16（531 MB）`)
-        }
-        if (rrHas('tokenizer.json')) lines.push('  ✅ tokenizer.json')
-        return textResult({ depsDir, rerankModelDir: rrDir, ...detail, status: st }, lines.join('\n'))
+        return textResult({ depsDir, ...detail, status: st }, lines.join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
@@ -1345,11 +1459,10 @@ function applyInner(ctx, rawConfig = {}) {
     .join(' ')
 
   ctx.logger?.info?.(
-    `dsh-code-index ${BUILD} 已加载（roots=${config.allowedRoots.length || '任意'}，embedding=${config.embedding.backend}` +
-      `${config.embedding.queryBackend ? `(查询=${config.embedding.queryBackend})` : ''}，` +
-      `rerank=${config.rerank}${config.rerank !== 'off' ? `@${config.rerankBackend}` : ''}，` +
-      `vectorStore=${config.vectorStore}，chunking=${config.chunking.strategy}，deps=${expandPath(config.embedding.depsDir) ?? defaultDepsDir()}）`,
+    `dsh-code-index ${BUILD} 已加载（remote-only：vectors=${config.vectorsMode}${config.vectors === 'remote' ? `@${config.remote.url}` : ''}，roots=${config.allowedRoots.length || '任意'}，` +
+      `rerank=${config.rerank}${config.rerank !== 'off' ? `@远端` : ''}，` +
+      `chunking=${config.chunking.strategy}，deps=${expandPath(config.embedding.depsDir) ?? defaultDepsDir()}）`,
   )
-  ctx.logger?.info?.(`dsh-code-index 切块策略表：${sample}（表见 lib/strategies.js，可用 config.chunking.byExt 覆盖）`)
-  bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_index_status', 'code_index_deps'] })
+  ctx.logger?.info?.(`dsh-code-index 切块策略表：${sample}（表见 lib/strategies.js，可用 advanced.chunking.byExt 覆盖）`)
+  bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_map', 'code_index_status', 'code_index_deps'] })
 }

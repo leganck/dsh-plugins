@@ -58,65 +58,41 @@ dsh plugin --profile desktop ...  →  error: profile "desktop" is managed exclu
     - id: code-index
       name: "file:///<本包绝对路径>/index.js"
       config:
-        indexDirBase: "C:/Users/you/.dsh/code-index"
         roots: ["D:/Code"]
-        embedding:
-          backend: "auto"
-          modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"
+        remote:
+          url: "https://dsh-embed.example.com"
+        vectors: "remote"          # off = 纯关键词（不连服务端）
+        rerank: "off"
+        advanced:
+          indexDirBase: "C:/Users/you/.dsh/code-index"
 ```
 
 插件的配置项会**显式校验并大声失败**（见下文「配置」）：写错键名会让插件行不生效，
 而不是被静默忽略。改完补丁层后**需要重启应用**——cordis 不会重新 import 已加载的模块。
 
-## 2. 嵌入依赖：**按需安装**（不再随插件安装）
+## 2. 语法解析依赖：**按需安装**（不随插件安装）
 
-从 0.3.0 起，重依赖**不写在 package.json 里**，装插件只装纯 JS 部分（tarball 约 50 KB）：
-**不下载任何重依赖、不触发构建脚本审批、秒级完成**。依赖分两组，按需安装到同一个受管目录：
+0.10.0 起本地嵌入已移除，只剩 **parser 组**（tree-sitter 语法，用于 AST 切块）：
 
-| 组 | 内容 | 体积（实测） | 用途 |
-|---|---|---|---|
-| `embed` | `onnxruntime-node@1.30.0`、`@huggingface/transformers@3.8.1` | 661 MB（修剪后 **264 MB**） | 向量嵌入（语义检索） |
-| `parser` | `tree-sitter@0.21.1` + java 0.21.0 / javascript 0.21.4 / typescript 0.21.2 / **groovy 0.1.2** | **60.3 MB**（ts 29.3 + groovy 19.3 + 其它） | AST 切块（语法树） |
+| 组 | 内容 | 体积（实测） |
+|---|---|---|
+| `parser` | `tree-sitter@0.21.1` + java 0.21.0 / javascript 0.21.4 / typescript 0.21.2 / **groovy 0.1.2** | **60.3 MB** |
+| `parser-go` / `parser-python` / `parser-rust` | 单语言语法 | 2.7 / 5.8 / 10.8 MB |
+| `parser-extra` | 上面三个 | ≈19 MB |
 
 ```text
 code_index_deps action=status                        # 默认：只看状态与缺什么
-code_index_deps action=install group=parser          # 装语法解析（60 MB，2 秒）
-code_index_deps action=install group=embed           # 装向量嵌入（约 46 秒）
-code_index_deps action=install group=all             # 两组都装
+code_index_deps action=install group=parser          # 装语法解析（60 MB）
+code_index_deps action=install group=parser-go       # 按语言单独装
+code_index_deps action=install group=all             # parser + parser-extra
 code_index_deps action=prune                         # 修剪非本平台二进制
 code_index_deps action=repair group=all              # 删掉重装
 code_index_deps action=remove                        # 删除
 ```
 
-默认装到 `%LOCALAPPDATA%\dsh-code-index\embed-deps`（可用 `embedding.depsDir` 改；
-POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。实测（2026-10-16，win32-x64）：
-
-| 步骤 | 实测结果 |
-|---|---|
-| `action=install group=embed` | **46 秒**、661.5 MB、**零依赖脚本**、无需任何审批 |
-| `action=install group=parser` | **3 秒**、41 MB（全部走预构建） |
-| `action=prune` | 661.5 → **263.8 MB**（回收 397.7 MB），修剪后嵌入仍可用 |
-
-**为什么不写进 package.json**（0.2.1 实测踩过的三件事）：
-
-1. 装插件就要下载并落盘 463 MB；
-2. pnpm 与 npm **都会拦依赖脚本**，要人类逐包批准（`approvedBuilds` / `allowScripts`）；
-3. 最坏情况撞上服务侧 `idleTimeoutMs`（默认 600 秒）空闲超时：`onnxruntime-node` 的
-   `postinstall` 会 bootstrap `global-agent` 走代理下载，脚本结束后 pnpm 迟迟不退出 →
-   pnpm 自己打了 `Done in 2s` 却被判 `timeout`，**整次安装回滚**。
-
-改成按需之后，这三件事都不再发生。**关键事实**：onnxruntime-node 的 npm 包
-**自带各平台二进制**（`bin/napi-v6/{darwin,linux,win32}/{arm64,x64}`），所以 `--ignore-scripts`
-装完照样可用——实测 `require('onnxruntime-node')` 成功、`env.versions={common:1.30.0,node:1.30.0}`、
-`listSupportedBackends()` 返回 `[cpu(bundled), dml(bundled), webgpu(bundled)]`，**DirectML 在**。
-tree-sitter 同理：四个包都带 `prebuilds/win32-x64`，无需编译。
-
-> 早期版本的这份文档写着"onnxruntime-node 的原生二进制靠 postinstall 下载，必须放行"——
-> **那条是错的**，已删除。那个 postinstall 只是"若缺则从 NuGet 补下载"，不是二进制来源。
-
-**模型**（可选；缺失则退化为纯关键词检索）：`bge-small-zh-v1.5` 的 ONNX 版放到
-`~/.dsh/models/bge-small-zh-v1.5/`，需要 `model_fp16.onnx`(GPU) / `model_int8.onnx`(CPU) /
-`tokenizer.json` / `tokenizer_config.json`。官方 `BAAI/...` 仓库**没有 onnx**。
+默认装到 `%LOCALAPPDATA%\dsh-code-index\embed-deps`（历史目录名；可用 `advanced.depsDir` 改；
+POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。**不装也能用**：切块降级为 heuristic/window，
+检索不受影响；装了 `code_index` 才会按 AST 切块。
 
 ### 2'''. 下载模型：用 `tools/fetch-model.mjs`，**默认走 ModelScope**
 
@@ -264,28 +240,36 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 
 ## 4. 配置
 
-行内 `config` 的全部可用键（**未知键会让插件行不生效**）：
+行内 `config` 的全部可用键（**未知键会让插件行不生效**）。0.10.0 起 remote-only，用户面只有 6 个键：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `indexDirBase` | `null` | `<base>/<仓库名>-<路径哈希>/index.db`，每仓库一库且不落在代码仓库里 |
-| `indexDir` | `null` | 单仓库模式（多仓库共用一个库，慎用） |
 | `roots` | `[]` | 路径白名单；空数组 = 允许任意路径。**校验发生在创建索引库之前** |
-| `maxFileBytes` | 2 MiB | 单文件上限 |
-| `excludeDirs` | `[]` | 排除**目录名**（任意深度）。与内置默认（`node_modules`/`build`/`.git`…）**合并**而非替换 |
-| `excludePaths` | `[]` | 排除**仓库相对路径**（或其前缀），如 `"legacy-grails-service"`、`"docs/2-technical"`；也可精确排除单个文件。**遗留/生成物目录用这个**——按名排除会误伤别处同名目录。必须相对路径，不可是绝对路径、不可含 `..` |
-| `windowLines` | 40 | 切块窗口行数 |
-| `defaultTopK` | 10 | `code_search` 默认返回条数 |
-| `maxEmbedPerRun` | **0** | 单次最多补算多少块向量。**0 = 建库时不补算**（只做 FTS5，秒级）；>0 会在每次 `code_index` 时自动跑重负载。要向量建议用工具参数 `max_embed` 按需分批传，而不是把这个配置调大 |
-| `embedding.backend` | `auto` | `auto` \| `cpu` \| `gpu` \| `off` |
-| `embedding.modelDir` | 随包提供的模型（`<插件目录>/model`，即 bge-base-zh-v1.5 int8） | 模型目录 |
-| `embedding.threads` | 6 | CPU 线程数 |
-| `embedding.batch` | `null` | 批量大小；`null` = 自动（DML 甜点 8–16） |
-| `embedding.cachePath` | `~/.dsh/index/vectors.db` | 内容寻址向量缓存，与 Python 实验版共用 |
-| `embedding.depsDir` | `%LOCALAPPDATA%\dsh-code-index\embed-deps`（POSIX：`~/.cache/…`） | 按需安装的依赖放这里（两组共用）。解析顺序：**受管目录优先，其次包内 `node_modules`**（兼容旧安装形态） |
-| `chunking.strategy` | `auto` | `auto`（按扩展名查策略表）\| `ast` \| `heuristic` \| `window`。用非 auto 会**强制所有文件**用该策略 |
-| `chunking.byExt` | `{}` | 按扩展名覆盖策略表，例如 `{ ".vue": { "strategy": "heuristic" }, ".java": { "targetLines": 60 } }` |
-| `windowLines` | 40 | `window` 策略的窗口行数（`chunking.byExt` 里也可逐扩展名给 `windowLines`） |
+| `remote.url` | `null` | 向量服务地址；`vectors: remote` 时必填 |
+| `remote.apiKey` | `null` | 服务端设了 API_KEY 才需要 |
+| `vectors` | `auto` | `auto`（有 `remote.url` 就走远端，没有则纯关键词）\| `remote`（强制，缺地址报错）\| `off`（纯关键词，本地 FTS5） |
+| `rerank` | `off` | `off` \| `fast`（top-10 候选）\| `quality`（top-20），远端重排 |
+| `exclude` | `[]` | 目录名（任意深度），或含 `/` 的仓库相对路径前缀。与内置默认合并；不可绝对路径、不可含 `..` |
+
+`advanced.*`（部署方调优，不写全用默认）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `advanced.indexDirBase` | `null` | `<base>/<仓库名>-<路径哈希>/index.db`，每仓库一库且不落在代码仓库里 |
+| `advanced.maxFileBytes` | 2 MiB | 单文件上限 |
+| `advanced.windowLines` | 40 | 切块窗口行数 |
+| `advanced.depsDir` | 受管目录 | parser 依赖放这里（不再有嵌入依赖组） |
+| `advanced.chunking.strategy` | `auto` | `auto` \| `ast` \| `heuristic` \| `window` |
+| `advanced.chunking.byExt` | `{}` | 按扩展名覆盖策略表 |
+| `advanced.sync.watch` | `false` | 保存后自动增量 |
+| `advanced.sync.debounceMs` | `30000` | 防抖下限 1 s |
+| `advanced.remoteTimeoutMs` | `8000` | 远端超时（嵌入/索引/重排共用） |
+| `advanced.remoteRateLimit` | `null` | 服务端嵌入限速（块/秒） |
+
+> **0.10.0 移除**：`embedding.*`（本地模型）、`vectorStore`、`preset`、`rerankBackend`、
+> `rerankRemote.*`、`excludeDirs`/`excludePaths`、顶层 `indexDirBase/chunking/sync`、
+> `remote.tag/model/fallbackLocal/repoId/namespace/lineage/uploadBatch`。
+> 旧配置会直接报错并给出迁移提示。
 
 ## 5. 自测
 
@@ -320,36 +304,32 @@ node test-plugin.mjs --repo D:\Code\your-repo   # 契约与接口：45 项
 | 大仓库 4,501 块 | ≈ **34 分钟** |
 | 全部历史 6.7 万块 | ≈ **8.5 小时**（别一次全做）|
 
-不想付这个成本的话：把 `embedding.modelDir` 指回 `~/.dsh/models/bge-small-zh-v1.5` 即可继续用旧模型/旧向量。
+更换嵌入模型由**服务端**负责；客户端不再保存/计算本地向量，因此没有"本地重嵌"成本。
 
-## 可选：开启交叉编码器重排（默认关）
+## 可选：开启远端交叉编码器重排（默认关）
 
 实测（103 题中文自然语言题库、bge-small 候选池 top-20）：**hit@3 42.7% → 59.2%**（quality）/ 57.3%（fast）。
-**它不需要重建索引**（在现有向量之上重排），这是它相对换嵌入模型的核心优势。
+**它不需要重建索引**（在现有向量之上重排）。
 
-```sh
-node tools/fetch-model.mjs --model bge-reranker-base --quant fp16   # 531 MB（DirectML 推荐）
-node tools/fetch-model.mjs --model bge-reranker-base --quant int8   # 266 MB（仅 CPU，慢 5.3 倍）
-```
-
-配置：
+0.10.0 起重排**只有远端实现**（本机重排模型已移除），服务端见 `server/code-index-service/`：
 
 ```yml
-rerank: quality   # off（默认）| fast（top-10，约 +474 ms）| quality（top-20，约 +939 ms）
+vectors: remote
+remote:
+  url: "https://dsh-embed.example.com"
+rerank: quality   # off（默认）| fast（top-10）| quality（top-20）
 ```
 
-| 档位 | 候选 | hit@3 | 每查询延迟 |
-|---|---|---|---|
-| off | — | 42.7% | ~40 ms |
-| fast | 10 | 57.3% | +474 ms |
-| quality | 20 | 59.2% | +939 ms |
-| （对照）int8/CPU | 20 | 62.1% | +4934 ms ✗ |
+| 档位 | 候选 | hit@3（历史实测） |
+|---|---|---|
+| off | — | 42.7% |
+| fast | 10 | 57.3% |
+| quality | 20 | 59.2% |
 
 要点：
-- **必须用 fp16**：int8 的量化算子在 DirectML 上支持差 → 只能 CPU（每候选 250 ms vs 47 ms）
-- 重排失败（缺模型/依赖/DML 不可用）**自动降级为不重排**，并在结果里报因，绝不让搜索失败
-- code_search 输出会写明 重排：quality（20 个候选，1266 ms，gpu/model_fp16.onnx）；未生效时写明原因
-- code_index_deps 的 status 会报告重排模型是否就位
+- 重排失败（远端不可用/服务端未装重排模型）**不降级到本机**，在结果里如实报告原因，不让搜索失败
+- `code_search` 输出会写明重排档位、候选数与远端地址；未生效时写明原因
+- `code_index_status` 报告「重排：quality（… 远端 …）」
 
 ---
 
@@ -372,21 +352,20 @@ node tools/bench-build-vector.mjs --repo D:/oss/some-big-repo --n 8000 \
 #   同一批块、同一份模型：本机与远端的"创建向量"速度对照
 ```
 
-然后只把**值得搬的那一段**切过去（实测结论：只有重排值得搬）：
+然后配置远端（0.10.0 起只有这一种远端写法）：
 
 ```yml
+vectors: remote
+remote:
+  url: "https://dsh-embed.example.com"
+  apiKey: null
 rerank: quality
-rerankBackend: remote
-embedding:
-  remote:
-    url: "https://dsh-embed.example.com"   # rerankRemote.url 留空即复用
-    fallbackLocal: true
 ```
 
 验证切没切过去，看两处：
 
 ```sh
-code_index_status        # 会打印「重排：quality（… 远端 https://…）」
+code_index_status        # 会打印「向量位置：远端 …」「重排：quality（… 远端 …）」
 node tools/bench-remote.mjs --url https://… --skip-rerank   # 只看嵌入那半
 ```
 

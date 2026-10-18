@@ -115,7 +115,9 @@ export async function search(
     // 维度不同 → NaN；维度相同（fp16↔int8）→ **完全静默的垃圾排名**。
     const storedTag = store.getMeta('embedding_tag')
     if (!embedder?.ok) {
-      vecNote = `向量通道未启用：${embedder?.reason ?? '嵌入器不可用'}`
+      // auto 模式：没有嵌入能力是**默认形态**（没装依赖 / 没模型）→ 静默走关键词，不报警；
+      // 但用户**显式要求** vector 时必须说明做不到的原因（诊断信息不能丢）。
+      vecNote = mode === 'vector' ? `向量通道未启用：${embedder?.reason ?? '嵌入器不可用'}` : ''
     } else if (vectors === 0) {
       vecNote = '向量通道未启用：索引里还没有向量（code_index 建库时未嵌入）'
     } else if (storedTag !== embedder.modelTag) {
@@ -154,7 +156,8 @@ export async function search(
     // 而这条分支其实覆盖三种不同状态——实测曾把「索引里 0 向量」误报成配置问题，
     // 把人引去改一个本来就是 auto 的配置。原因必须由状态推导，不能预设。
     if (!embedder?.ok) {
-      vecNote = `向量通道未启用：${embedder?.reason ?? '嵌入器不可用'}`
+      // 没有嵌入能力是**默认形态**（没装依赖/没模型）：静默走关键词，不解释也不报警
+      vecNote = ''
     } else if (vectors === 0) {
       vecNote = '向量通道未启用：索引里还没有向量（建库默认不补算）——跑 code_index 并传 max_embed=<正整数> 可补算'
     } else {
