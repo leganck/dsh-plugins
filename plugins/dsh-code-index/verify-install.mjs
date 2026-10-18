@@ -127,13 +127,15 @@ function makeCtx(injectList) {
 if (mod) {
   try {
     mod.apply(makeCtx(mod.inject), {
-      indexDirBase: tmpIndexDir, // 临时目录：不碰线上索引
       roots: ['D:/Code'],
-      embedding: { backend: 'off' }, // 关键：不碰模型
+      vectors: 'off', // 纯关键词：不连远端、也不需要任何模型
+      advanced: { indexDirBase: tmpIndexDir }, // 临时目录：不碰线上索引
     })
-    check('apply() 成功且注册 4 个工具', registry.size === 4, [...registry.keys()].join(','))
+    const expected = ['code_index', 'code_search', 'code_map', 'code_index_status', 'code_index_deps']
+    const missing = expected.filter((name) => !registry.has(name))
+    check('apply() 成功且注册 5 个工具', registry.size === expected.length && missing.length === 0, missing.length ? `缺少 ${missing.join(',')}` : [...registry.keys()].join(','))
   } catch (e) {
-    check('apply() 成功且注册 4 个工具', false, String(e.message).slice(0, 140))
+    check('apply() 成功且注册 5 个工具', false, String(e.message).slice(0, 140))
   }
 
   // ---- 3. roots 白名单（验证 config 覆盖行是否应用）----

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Code Index",
-    "description": "Local codebase retrieval: SQLite FTS5 (BM25) plus optional local ONNX embeddings fused with RRF, exposed as code_index / code_search / code_index_status."
+    "description": "Local codebase retrieval: SQLite FTS5 (BM25) plus optional local ONNX embeddings fused with RRF, exposed as code_index / code_search / code_map / code_index_status / code_index_deps."
   }
 }

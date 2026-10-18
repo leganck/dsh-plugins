@@ -50,15 +50,14 @@ function usedAstGrammars(scanned, chunking, depsDir, depsFallbackDirs) {
  *
  *  - 配了 `indexDirBase`：`<base>/<仓库名>-<路径哈希前8位>/index.db`
  *    —— **每个仓库一个库**，且不落在代码仓库里（不会污染 git status）。
- *  - 只配了 `indexDir`：直接用该目录下的 index.db（多个仓库会共用一个库，仅适合单仓库场景）
- *  - 都没配：`<repo>/.dsh-index/index.db`
+ *  - 都没配：`<repo>/.dsh-index/index.db`（兜底；bundle 默认会给 indexDirBase）
  */
-export function indexDbPath(repoRoot, { indexDir, indexDirBase } = {}) {
+export function indexDbPath(repoRoot, { indexDirBase } = {}) {
   if (indexDirBase) {
     const slug = `${path.basename(repoRoot).replace(/[^\w.-]+/g, '_')}-${crypto.createHash('sha1').update(repoRoot).digest('hex').slice(0, 8)}`
     return path.join(indexDirBase, slug, 'index.db')
   }
-  return path.join(indexDir ?? path.join(repoRoot, '.dsh-index'), 'index.db')
+  return path.join(repoRoot, '.dsh-index', 'index.db')
 }
 
 /** 只扫描比对，不写入。用于 code_index_status 判断新鲜度 */
@@ -203,22 +202,29 @@ export async function buildIndex({
 
   // ---- 远端索引：推清单 → 只传缺失正文 → 服务端后台嵌入 ----
   let remoteInfo = null
+  let remoteError = null
   if (remote) {
-    remoteInfo = await syncRemote({
-      store,
-      client: remote.client,
-      repoId: remote.repoId,
-      url: remote.url,
-      tag: remote.tag,
-      lineage: remote.lineage ?? null,
-      noEmbed: !!remote.noEmbed,
-      rateLimit: remote.rateLimit ?? null,
-      fingerprint,
-      changedFiles: remoteChanged,
-      removed,
-      uploadBatch: remote.uploadBatch ?? 256,
-      log: onProgress ?? (() => {}),
-    })
+    try {
+      remoteInfo = await syncRemote({
+        store,
+        client: remote.client,
+        repoId: remote.repoId,
+        url: remote.url,
+        tag: remote.tag,
+        lineage: remote.lineage ?? null,
+        noEmbed: !!remote.noEmbed,
+        rateLimit: remote.rateLimit ?? null,
+        fingerprint,
+        changedFiles: remoteChanged,
+        removed,
+        uploadBatch: remote.uploadBatch ?? 256,
+        log: onProgress ?? (() => {}),
+      })
+    } catch (e) {
+      // 远端挂了不能连累本地关键词索引：切块/FTS 已写入，这里只把失败如实带回去，
+      // 由 code_index 报告"本地已更新、远端待同步"，下次建库自动重试（diff 协议）。
+      remoteError = String(e?.message ?? e).slice(0, 200)
+    }
   }
 
   // ---- 向量补算（只算缺的）----
@@ -229,10 +235,12 @@ export async function buildIndex({
   const pendingTotal = Math.max(0, stats0.chunks - stats0.vectors)
   if (remote) {
     const r = remoteInfo ?? {}
-    embedNote = r.unchanged
-      ? `远端索引已是最新（revision ${r.revision}）：清单指纹一致，未上传任何正文`
-      : `已同步到远端（revision ${r.revision}）：缺向量 ${r.missing} 块，本轮上传正文 ${r.uploaded} 条；` +
-        `服务端后台嵌入中，覆盖率 ${((r.coverage ?? 0) * 100).toFixed(0)}%（再跑 code_index 可查看进度）`
+    embedNote = remoteError
+      ? `远端同步失败：${remoteError}；本地关键词索引已更新，服务恢复后重跑 code_index 会自动补同步`
+      : r.unchanged
+        ? `远端索引已是最新（revision ${r.revision}）：清单指纹一致，未上传任何正文`
+        : `已同步到远端（revision ${r.revision}）：缺向量 ${r.missing} 块，本轮上传正文 ${r.uploaded} 条；` +
+          `服务端后台嵌入中，覆盖率 ${((r.coverage ?? 0) * 100).toFixed(0)}%（再跑 code_index 可查看进度）`
   } else if (!embedder?.ok) {
     embedNote = `向量未生成：${embedder?.reason ?? 'embedder 未配置'}`
   } else if (maxEmbed <= 0) {
@@ -284,6 +292,8 @@ export async function buildIndex({
     embedNote,
     /** 远端索引同步结果（vectorStore='remote' 时有值） */
     remote: remoteInfo,
+    /** 远端同步失败原因（本地索引仍已更新） */
+    remoteError,
     /** 需要但没装的语法（给 code_index 的安装提示用） */
     parserMissing,
     scannedFiles: scanned.length,

@@ -102,20 +102,17 @@ function cordisLikeCtx(mod) {
   return { ctx, registry, logs, effects, declared }
 }
 
-const indexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-plugin-'))
+const indexDirBase = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-plugin-'))
 // 依赖目录也隔离：测试绝不能碰真实的受管目录（%LOCALAPPDATA%/dsh-code-index/embed-deps）
 const testDepsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-deps-'))
 const { ctx, registry, logs, effects, declared } = cordisLikeCtx(plugin)
 plugin.apply(ctx, {
-  indexDir,
   roots: [repo],
-  embedding: process.argv.includes('--no-embed')
-    ? { backend: 'off', depsDir: testDepsDir }
-    : { backend: 'auto', modelDir, depsDir: testDepsDir },
-  maxEmbedPerRun: 400,
+  vectors: 'off', // remote-only：测试不连服务端，走本地 FTS5
+  advanced: { indexDirBase, depsDir: testDepsDir },
 })
 
-console.log(`仓库: ${repo}\n索引目录: ${indexDir}\n`)
+console.log(`仓库: ${repo}\n索引目录: ${indexDirBase}\n`)
 
 // ---------- bundle 契约（按 skill cordis-plugin-development）----------
 console.log('[0] bundle 契约（cordis-plugin-development）')
@@ -154,15 +151,21 @@ check('effect 带可读标签', effects.every((e) => typeof e.label === 'string'
 console.log('\n[0b] 配置校验')
 const cases = [
   ['未知顶层键', { nope: 1 }, /未知配置项/],
-  ['未知 embedding 键', { embedding: { nope: 1 } }, /未知配置项/],
-  ['非法 backend', { embedding: { backend: 'quantum' } }, /backend/],
-  ['负数 maxEmbedPerRun', { maxEmbedPerRun: -1 }, /maxEmbedPerRun/],
+  ['已移除的 embedding（本地模型）', { embedding: { backend: 'off' } }, /已移除.*vectors/],
+  ['已移除的 vectorStore', { vectorStore: 'remote' }, /已移除.*vectors/],
+  ['已移除的 preset', { preset: 'remote' }, /已移除.*vectors/],
+  ['已移除的 excludeDirs', { excludeDirs: ['legacy'] }, /已移除.*exclude/],
+  ['非法 vectors', { vectors: 'cloud' }, /vectors/],
+  ['vectors=remote 缺地址', { vectors: 'remote' }, /remote\.url/],
+  ['未知远端键', { remote: { tag: 'x' } }, /未知远端配置|remote\.tag/],
+  ['未知 advanced 键', { advanced: { nope: 1 } }, /未知 advanced/],
   ['非法 roots', { roots: 'D:/Code' }, /roots/],
-  // 扫描排除：三种都是"静默失效"型配置错误 —— 写错了不报错，只是排除没生效，所以必须拒绝
-  ['excludeDirs 不是数组', { excludeDirs: 'node_modules' }, /excludeDirs/],
-  ['excludePaths 元素为空', { excludePaths: [''] }, /excludePaths/],
-  ['excludePaths 用绝对路径', { excludePaths: ['D:/Code/legacy'] }, /相对路径/],
-  ['excludePaths 含 ..', { excludePaths: ['../legacy'] }, /\.\./],
+  // 排除：写错会静默失效 —— 必须拒绝
+  ['exclude 不是数组', { exclude: 'node_modules' }, /exclude/],
+  ['exclude 元素为空', { exclude: [''] }, /exclude/],
+  ['exclude 用绝对路径', { exclude: ['D:/Code/legacy'] }, /绝对路径/],
+  ['exclude 含 ..', { exclude: ['../legacy'] }, /\.\./],
+  ['非法 chunking.strategy', { advanced: { chunking: { strategy: 'nope' } } }, /strategy/],
 ]
 for (const [label, cfg, pattern] of cases) {
   let msg = ''
@@ -173,14 +176,19 @@ for (const [label, cfg, pattern] of cases) {
   }
   check(`拒绝${label}并指明原因`, pattern.test(msg), msg.slice(0, 90))
 }
-// maxEmbedPerRun = 0 是**默认值**（建库不自动补算向量），必须被接受
-let zeroAccepted = true
-try {
-  plugin.apply(cordisLikeCtx({ inject: ['tools'] }).ctx, { maxEmbedPerRun: 0, embedding: { backend: 'off' } })
-} catch {
-  zeroAccepted = false
+// 加载标记必须如实记录新的配置面
+const readMarker = () => JSON.parse(fs.readFileSync(path.join(process.env.DSH_HOME, 'code-index', '_loaded.json'), 'utf8'))
+{
+  plugin.apply(cordisLikeCtx({ inject: ['tools'] }).ctx, { vectors: 'off' })
+  const marker = readMarker()
+  check('vectors=off → 标记记录 vectors=off / rerank=off', marker.config?.vectors === 'off' && marker.config?.rerank?.tier === 'off', JSON.stringify(marker.config))
 }
-check('接受 maxEmbedPerRun = 0（默认不补算向量）', zeroAccepted)
+{
+  plugin.apply(cordisLikeCtx({ inject: ['tools'] }).ctx, { vectors: 'remote', remote: { url: 'https://h.example' } })
+  const marker = readMarker()
+  check('vectors=remote → 标记记录远端地址（且不记 apiKey）', marker.config?.vectors === 'remote' && marker.config?.remote?.url === 'https://h.example', JSON.stringify(marker.config))
+  check('标记不记录 apiKey 原文', !JSON.stringify(marker.config ?? {}).includes('secret'), JSON.stringify(marker.config))
+}
 
 // ---------- 注册面 ----------
 console.log('\n[1] 工具注册面')
@@ -195,7 +203,7 @@ check('测试夹具自身会拒绝未声明的服务访问', (() => {
 })())
 check('未声明 inject 时 apply 会抛错（回归保护）', (() => {
   try {
-    plugin.apply(cordisLikeCtx({ inject: [] }).ctx, { indexDir, roots: [repo], embedding: { backend: 'off' } })
+    plugin.apply(cordisLikeCtx({ inject: [] }).ctx, { roots: [repo], vectors: 'off', advanced: { indexDirBase } })
     return false
   } catch (e) {
     return /without inject/.test(e.message)
@@ -231,19 +239,20 @@ check(
   check('标记记录了扫描相关配置（scan 段）', typeof marker.config?.scan === 'object' && marker.config.scan !== null, JSON.stringify(marker.config?.scan))
   check('标记记录了 excludePaths（能确认排除是否真的生效）', Array.isArray(marker.config?.scan?.excludePaths), JSON.stringify(marker.config?.scan?.excludePaths))
   check('标记记录了 excludeDirs', Array.isArray(marker.config?.scan?.excludeDirs), JSON.stringify(marker.config?.scan?.excludeDirs))
-  check('标记记录了 maxFileBytes / windowLines / maxEmbedPerRun', [marker.config?.scan?.maxFileBytes, marker.config?.scan?.windowLines, marker.config?.scan?.maxEmbedPerRun].every((v) => typeof v === 'number'))
+  check('标记记录了 maxFileBytes / windowLines', [marker.config?.scan?.maxFileBytes, marker.config?.scan?.windowLines].every((v) => typeof v === 'number'))
 }
 
 // 依赖工具：默认只**报**状态，绝不擅自下载（下载必须由显式 action 触发）
 const depsStatusOut = await deps.execute({}, {})
 const depsText = depsStatusOut.content[0].text
 check('code_index_deps 默认只报状态', /依赖目录/.test(depsText) && /各组状态/.test(depsText), depsText.split('\n')[0])
-check('code_index_deps 列出两个依赖组', /\[embed\]/.test(depsText) && /\[parser\]/.test(depsText))
+check('code_index_deps 只列 parser 组（本地嵌入依赖已移除）', /\[parser\]/.test(depsText) && !/\[embed\]/.test(depsText))
 check('code_index_deps 给出可执行的下一步', /code_index_deps action=install group=/.test(depsText), depsText.split('\n').slice(-1)[0])
 check('code_index_deps 默认不动手（没创建 node_modules）', !fs.existsSync(path.join(testDepsDir, 'node_modules')))
 check(
-  'code_index_deps 的 group 枚举覆盖按语言安装组',
-  ['parser', 'parser-go', 'parser-python', 'parser-rust', 'parser-extra', 'embed', 'all'].every((g) => (deps?.parameters?.properties?.group?.enum ?? []).includes(g)),
+  'code_index_deps 的 group 枚举只含 parser 组',
+  ['parser', 'parser-go', 'parser-python', 'parser-rust', 'parser-extra', 'all'].every((g) => (deps?.parameters?.properties?.group?.enum ?? []).includes(g))
+    && !(deps?.parameters?.properties?.group?.enum ?? []).includes('embed'),
   JSON.stringify(deps?.parameters?.properties?.group?.enum),
 )
 const badGroup = await deps.execute({ action: 'install', group: 'nope' }, {})
@@ -293,7 +302,9 @@ const s2 = await status.execute({ path: repo }, {})
 const s2Text = s2.content[0].text
 check('报告库文件大小', /\d+(\.\d+)?\s*MB[)）]/.test(s2Text), s2Text.slice(0, 120))
 check('报告覆盖情况', /覆盖 \d+ 文件/.test(s2Text))
-check('报告嵌入器状态', /嵌入器（建库）：/.test(s2Text))
+// off 模式（--no-embed）走的是"纯关键词"这条产品线：不该出现嵌入器/模型字样，
+// 只该有一行模式说明 —— 这条契约专门钉住"本地完全不碰嵌入"的展示面。
+check('纯关键词模式不报告嵌入器', /模式：纯关键词/.test(s2Text) && !/嵌入器（建库）/.test(s2Text), s2Text.slice(0, 120))
 console.log(s2Text.split('\n').map((l) => '    ' + l).join('\n'))
 
 // ---------- 卸载契约 ----------

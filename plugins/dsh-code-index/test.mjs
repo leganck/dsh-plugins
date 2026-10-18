@@ -137,7 +137,8 @@ check('通道标记为 fts', res2.mode === 'fts', res2.mode)
 check('命中里含样本文件自身', res2.results.some((h) => h.path === sample.rel), `probe=${probe} 命中=${res2.results.slice(0, 3).map((h) => h.path).join(',')}`)
 check('结果按 rank 递增', res2.results.every((h, i) => h.rank === i + 1))
 check('条目带片段', res2.results.every((h) => typeof h.snippet === 'string' && h.snippet.length > 0))
-check('向量通道缺失时给出说明', /向量通道未启用/.test(res2.note), res2.note)
+// 契约调整：缺嵌入能力是默认形态，auto 模式**静默**降级到关键词
+check('缺嵌入能力时 auto 模式静默走关键词', res2.note === '', res2.note)
 
 // ---------- 3. 增量：未改动时零变更 ----------
 console.log('\n[3] 增量刷新（未改动）')
@@ -216,8 +217,10 @@ if (!modelDir) {
 console.log('\n[8] 诊断信息不得预设原因')
 
 // (a) 嵌入器不可用 → 用它的真实 reason，且不得声称是配置关了
-const r8a = await search(store, { ok: false, reason: '缺少可选依赖 XYZ' }, 'anything', { topK: 1 })
-check('嵌入器失败时 note 用真实 reason', r8a.note.includes('缺少可选依赖 XYZ'), r8a.note)
+const r8aAuto = await search(store, { ok: false, reason: '缺少可选依赖 XYZ' }, 'anything', { topK: 1 })
+check('嵌入器失败时 auto 模式静默', r8aAuto.note === '', r8aAuto.note)
+const r8a = await search(store, { ok: false, reason: '缺少可选依赖 XYZ' }, 'anything', { topK: 1, mode: 'vector' })
+check('显式 mode=vector 时 note 用真实 reason', r8a.note.includes('缺少可选依赖 XYZ'), r8a.note)
 check('嵌入器失败时不得误报 backend=off', !r8a.note.includes('backend = off'), r8a.note)
 
 // (b) 索引里 0 向量但嵌入器可用 → 应指出"没有向量"，而不是配置

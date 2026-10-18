@@ -8,7 +8,7 @@
  *
  * 但**默认仍然全本机**：远端要多一个故障点（网络、另一台机器开机、证书），
  * 而且本机已经够快（30–60 ms）。所以这是一项**显式开启**的能力：
- *   - `embedding.backend: 'remote'` + `embedding.remote.url`
+ *   - `embedding.backend: 'remote'` + 顶层 `remote.url`
  *   - `rerankBackend: 'remote'` + `rerankRemote.url`
  * 关掉就是原来的行为，一个字节都不差。
  *
@@ -243,7 +243,7 @@ export async function createRemoteEmbedder({
       ok: false,
       reason:
         `嵌入不可用：远端 ${ep.base} 没有自述 tag，也无法推导向量标签。` +
-        `请升级服务端（deploy/nas-dsh-embed/server.py 会返回 tag），或显式配置 embedding.remote.tag。`,
+        `请升级服务端（deploy/nas-dsh-embed/server.py 会返回 tag），或显式配置 remote.tag。`,
       remote: { url: ep.base, status: st },
     }
   }

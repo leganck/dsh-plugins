@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "代码索引",
-    "description": "本地代码库检索：SQLite FTS5（BM25）与可选的本地 ONNX 向量经 RRF 融合，提供 code_index / code_search / code_index_status 三个工具。"
+    "description": "本地代码库检索：SQLite FTS5（BM25）与可选的本地 ONNX 向量经 RRF 融合，提供 code_index / code_search / code_map / code_index_status / code_index_deps 五个工具。"
   }
 }

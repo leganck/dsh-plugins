@@ -47,8 +47,9 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 ```
 
 > ⚠️ **向量补算是重负载**：实测 GPU 约 47 块/s，而它抢占的正是驱动显示的那块显卡——
-> 8227 块曾把整机卡住数分钟（2026-10-16 实测）。所以**默认不自动补算**（`maxEmbedPerRun: 0`），
-> 要向量必须显式传 `max_embed`，建议每次 500~2000 块。没有向量时检索依然可用，
+> 8227 块曾把整机卡住数分钟（2026-10-16 实测）。所以**默认不自动补算**（配置里没有
+> `maxEmbedPerRun`；只由调用方显式给 `max_embed`），要向量必须显式传 `max_embed`，
+> 建议每次 500~2000 块。没有向量时检索依然可用，
 > 只是退化为纯关键词——`code_search` 会明确告诉你原因与补算方法，不会误报成"配置关了向量"。
 
 `code_search` 输出形如：
@@ -83,7 +84,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 4. **依赖可选、优雅降级**。缺 `onnxruntime-node` / 缺模型文件 → 自动退化为纯 FTS5，并在结果里说明原因，不会让插件加载失败。
 5. **GPU 批量的坑已处理**。DirectML 在 batch 8~16 最快，32 会掉到 10.8 块/s、更大直接崩 → 失败自动减半拆批，单条仍失败才回退 CPU。
 6. **截断策略对齐**。transformers.js 截断时把 512 位全填内容 token，Rust `tokenizers` 会给结尾 `[SEP]` 留位 —— 差 1 个 token 会让向量与 Python 版不一致（余弦 0.9986 → 0.999999）。已在推理层对齐。
-7. **索引不落在代码仓库里**。`indexDirBase` 下按「仓库名-路径哈希」分目录，不会污染 `git status`。
+7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录，不会污染 `git status`。
 8. **roots 白名单**。不在白名单内的路径直接拒绝，**且在创建索引库之前校验**。
 
 ## 配置
@@ -92,41 +93,37 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 - id: code-index
   name: "@local/dsh-code-index"          # 官方 tarball 安装后模块名=包名
   config:
-    indexDirBase: "C:/Users/you/.dsh/code-index"   # 每仓库一个库；不配则用 <repo>/.dsh-index
-    roots: ["D:/Code"]                                  # 安全白名单；空 = 允许任意路径
-    windowLines: 40                                     # window 策略的窗口行数
-    chunking:
-      strategy: "auto"                                  # auto | ast | heuristic | window
-      byExt: {}                                         # 按扩展名覆盖策略表，如 {".vue": {"strategy": "heuristic"}}
-    maxFileBytes: 2097152                               # 单文件上限（默认 2 MB）
-    excludeDirs: []                                     # 排除目录**名**（任意深度），与内置默认合并
-    excludePaths: []                                    # 排除**仓库相对路径**前缀；遗留/生成物目录用这个
-    defaultTopK: 10
-    maxEmbedPerRun: 0                                   # 默认 0 = 建库不补算向量；>0 才自动补算（重负载，见上）
-    embedding:
-      backend: "auto"                                   # auto | cpu | gpu | remote | off（建库/索引侧）
-      queryBackend: null                                # null = 跟 backend；可单独指定查询侧（见下）
-      modelDir: "C:/Users/you/.dsh/models/bge-small-zh-v1.5"
-      threads: 6
-      cachePath: null                                   # 默认 ~/.dsh/index/vectors.db（与实验版共用）
-      depsDir: null                                     # 默认 %LOCALAPPDATA%/dsh-code-index/embed-deps
-      remote:                                           # backend=remote 时用（默认不配）
-        url: "https://dsh-embed.example.com"            # 服务端见 server/code-index-service/
-        timeoutMs: 8000
-        apiKey: null                                     # 服务端设了 API_KEY 才需要
-        tag: null                                        # 向量标签；留空用服务端自述
-        fallbackLocal: true                              # 仅当两边标签一致时才真的回退
-    rerank: "off"                                        # off | fast（top-10）| quality（top-20）
-    rerankBackend: "local"                               # local | remote
-    rerankModelDir: null                                 # 默认 ~/.dsh/models/bge-reranker-base
-    rerankRemote:                                        # rerankBackend=remote 时用
-      url: null                                          # 留空则复用 embedding.remote.url
-      timeoutMs: 8000
-      apiKey: null
-      fallbackLocal: true
+    # —— 用户只需要这 6 个 ——
+    roots: ["D:/Code"]                    # 安全白名单；空 = 允许任意路径
+    remote:
+      url: "https://dsh-embed.example.com"   # 向量服务（/embed + /v1 索引 + /rerank）
+      apiKey: null                        # 服务端设了 API_KEY 才需要
+    vectors: "auto"                       # auto（默认：有 remote.url 即走远端）| remote | off（纯关键词）
+    rerank: "off"                         # off | fast（top-10）| quality（top-20），远端重排
+    exclude: []                           # 目录名，或含 "/" 的仓库相对路径前缀
+
+    # —— 以下都是 advanced（不写全用默认）——
+    advanced:
+      indexDirBase: "C:/Users/you/.dsh/code-index"   # 每仓库一个库；不配则用 <repo>/.dsh-index
+      maxFileBytes: 2097152               # 单文件上限（默认 2 MB）
+      windowLines: 40                     # window 策略的窗口行数
+      depsDir: null                       # parser 依赖的受管目录
+      chunking:
+        strategy: "auto"                  # auto | ast | heuristic | window
+        byExt: {}                         # 按扩展名覆盖策略表，如 {".vue": {"strategy": "heuristic"}}
+      sync:
+        watch: false                      # fs.watch 自动增量（默认关）
+        debounceMs: 30000
+      remoteTimeoutMs: 8000
+      remoteRateLimit: null               # 服务端嵌入限速（块/秒）
 ```
 
-### `excludeDirs` vs `excludePaths`：两种排除，别混用
+> **0.10.0 remote-only**：本地嵌入/本地重排已移除，向量与重排都走 `remote.url`；
+> 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，不需要任何模型）。
+> 旧配置（`embedding`、`vectorStore`、`preset`、`rerankBackend`、`excludeDirs/excludePaths`、
+> 顶层 `indexDirBase/chunking/sync` 等）会**直接报错并给出迁移提示**，不会静默降级。
+
+### `exclude`：一种写法，两种语义
 
 真实踩过的坑（0/4 → 2/4 那次）：一个 Java 仓库里同时存在
 
@@ -141,77 +138,35 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 **剩下的是排序问题，不是召回问题**，那属于 reranker 的活。
 
 ```yaml
-    # ① 按"目录名"排除：任意深度都排掉（会误伤别处同名目录），与内置默认**合并**
-    excludeDirs: ["legacy-web"]
+    # 目录名（任意深度，会误伤别处同名目录）—— 与内置默认合并
+    exclude: ["legacy-web"]
 
-    # ② 按"仓库相对路径"排除：只排这一个（推荐用于遗留/生成物目录）
-    excludePaths: ["legacy-grails-service", "docs/2-technical"]
+    # 含 "/" 的仓库相对路径前缀（只排这一处，推荐用于遗留/生成物目录）
+    exclude: ["legacy-grails-service", "docs/2-technical"]
 ```
 
 - **改完不用全量重建**：被排除的文件在下次 `code_index` 时走 `diffFiles` 的 `removed` 分支，
   连同它的块、FTS 行、向量一起删掉（实测：`removed=1`、`mode=incremental`）。
 - **`code_index_status` 共用同一份排除规则**（否则会把已排除文件永远报成"过期"），
   并在输出里显示 `已排除：…` 供确认。
-- 排除**单个文件**也可以（`excludePaths: ["src/Legacy.java"]`）。
+- 排除**单个文件**也可以（`exclude: ["src/Legacy.java"]`）。
 
-## 算力放哪：本机 / 分档 / 远端（0.7.0 起）
+## 算力与远端（0.10.0 remote-only）
 
-默认**全部在本机**（装好即用，不依赖任何网络）。两个正交的开关可以把算力挪走：
+本地嵌入与本地重排已移除。向量和重排都交给 `remote.url` 指向的服务：
 
-| 开关 | 管什么 | 取值 |
+| 模式 | 配置 | 行为 |
 |---|---|---|
-| `embedding.backend` | **建库/索引侧**的向量 | `auto`（默认）| `cpu` | `gpu` | `remote` | `off` |
-| `embedding.queryBackend` | **查询侧**的向量（默认跟随 backend） | 同上（`null` = 跟随） |
-| `rerank` | 开不开重排、候选多少 | `off`（默认）| `fast` | `quality` |
-| `rerankBackend` | 重排在哪算 | `local`（默认）| `remote` |
+| 远端语义检索（默认） | `vectors: remote` + `remote.url` | 本地 BM25 + 远端 kNN，客户端 RRF 融合；服务端挂了只丢语义召回 |
+| 纯关键词 | `vectors: off` | 本地 FTS5/BM25，不连服务端、不加载任何模型 |
+| 远端重排 | `rerank: fast \| quality` | 在候选集上做远端交叉编码器重排；不可用时不降级到本机，如实报告 |
 
-### 为什么要分"建库侧"和"查询侧"
-
-实测（同一台机器、同一份 bge-base fp16、同一个向量标签）：
-
-| 场景 | 批次 | 本机 DML | 本机 CPU |
-|---|---|---|---|
-| 建库（长批） | 8–32 | **33 块/s** | 3.4 块/s |
-| 查询（batch=1） | 1 | 45–68 ms | **26–40 ms** |
-
-DirectML 每次 `session.run` 有约 **45 ms 的固定开销**（提交 + 同步 + 回读），
-所以在 batch=1 的查询上它反而输给 CPU；而长批时 GPU 的吞吐是 CPU 的 8–10 倍。
-两者用的是**同一份模型文件** → 同一个向量标签 → 索引里的向量对两边都有效。所以：
-
-```yaml
-embedding:
-  backend: auto        # 建库走 GPU
-  queryBackend: cpu    # 查询走 CPU（本机实测快 1.1–1.7 倍）
-```
-
-### 远端（可选）
-
-`server/code-index-service/` 是配套的服务端（`/embed` + `/rerank`，`GET /` 自述向量 `tag`；0.8.0 起还自带 `/v1` 索引层）。
-实测口径（局域网、开发机 RX 6750 XT、服务端 Tesla P4 / CUDA 12 / ORT 1.19.2）：
-
-| 动作 | 本机 | 远端 | 建议 |
-|---|---|---|---|
-| 单条查询嵌入 | 45 ms（DML）/ 26 ms（CPU） | **15.8 ms**（含网络） | 差别不大，**别搬** |
-| 建库向量（512 token 长块） | **33 块/s** | 26.8 块/s | 本机更快，**别搬** |
-| 重排每候选 | 36 ms（DML） | **4.8 ms** | **值得搬**（快 7.5×） |
-
-也就是：**只有重排值得放到另一台机器**。
-
-```yaml
-rerank: quality
-rerankBackend: remote
-embedding:
-  remote:
-    url: "https://dsh-embed.example.com"   # rerankRemote.url 留空即可复用
-    fallbackLocal: true                     # 服务端连不上时用本机重排器
-```
-
+服务端见仓库根目录 [`server/code-index-service/`](../../server/code-index-service/)（`/embed`、`/rerank`、`/v1` 索引层）。
 三条硬规则（都有测试钉住，见 `test-remote.mjs`）：
 
 1. **远端不可用绝不让检索失败** —— 向量通道降级为纯关键词、重排退回 RRF 顺序，原因写进结果。
-2. **向量标签 `tag` 必须对得上**（`模型名-模型文件内容哈希-精度`，服务端与插件同一算法）。
-   对得上 ⇒ 切换后端**不用重建索引**；对不上 ⇒ **不回退**（回退等于把两种来源的向量混进一个索引）。
-3. **远端超时默认 8 s**，只用来兜住"那台机器睡了"。
+2. **向量标签 `tag` 必须对得上**（服务端自述；对不上 ⇒ **不回退**，避免两种向量混进一个索引）。
+3. **远端超时默认 8 s**（`advanced.remoteTimeoutMs`），只用来兜住"那台机器睡了"。
 
 ## 新目录的语言扩展提示（0.8.5）
 
@@ -235,6 +190,32 @@ embedding:
 | `parser-rust` | tree-sitter-rust@0.21.0 | 10.8 MB |
 | `parser-extra` | 上面三个 | ≈19 MB |
 
+## 两种工作模式（0.10.0 remote-only）
+
+| 模式 | 配置 | 行为 |
+|---|---|---|
+| 自动（默认） | `vectors: auto` | 配了 `remote.url` 就走远端；没配则纯关键词 |
+| 强制远端 | `vectors: remote` | 缺 `remote.url` 直接报错 |
+| 纯关键词 | `vectors: off` | 本地 FTS5/BM25，不连服务端、不加载任何模型 |
+
+远端不可用时**自动切换**：查询/建库/状态遇到连接失败会退化为纯关键词（建库仍完成本地索引），
+并进入 **60 秒冷却**——冷却期内不再等超时，冷却后自动重试，不需要重启插件。
+`rerank` 是独立开关（`off|fast|quality`），只有远端实现；远端不可用时如实报告、不降级到本机。
+
+```yaml
+# 不连服务端、只用关键词检索
+vectors: off
+```
+
+关键词模式下的展示面：
+
+| 项 | 状态 |
+|---|---|
+| onnxruntime / transformers / 模型文件 | **完全不加载**（本地模型能力已移除） |
+| 检索 | FTS5 / BM25（中文用 bigram 切词，零依赖） |
+| `code_map` / `code_index_status` / 切块 | 照常可用（tree-sitter 是可选的**唯一**额外依赖） |
+| 输出文案 | 只留一行 `模式：纯关键词（本地 FTS5；vectors=off）` |
+
 ## 发布打包：两个产物
 
 ```sh
@@ -244,7 +225,7 @@ node build-release.mjs --no-model   # 只打不带模型的（150 KB 级）
 
 | 产物 | 大小 | 适用 |
 |---|---|---|
-| `release/local-dsh-code-index-<v>.tgz` | **0.2 MB**（44 文件） | `vectorStore: remote` 的用户：本机不需要 194 MB 模型 |
+| `release/local-dsh-code-index-<v>.tgz` | **0.2 MB**（44 文件） | 推荐：本机不需要 194 MB 模型（0.10.0 已无本地模型） |
 | `release/local-dsh-code-index-<v>-local-model.tgz` | **178 MB**（49 文件，随包 fp16 模型） | 全本机、装完即用、不联网 |
 
 实现要点：
@@ -255,10 +236,9 @@ node build-release.mjs --no-model   # 只打不带模型的（150 KB 级）
 - `release/*.tgz` 被 `.gitignore` 忽略，只提交 `release/SHA256SUMS.txt`；
 - 装后验证：`node verify-install.mjs --pkg <解包后的 package 目录>`（19 项，含"包里没有捆 onnxruntime"）。
 
-## 远端索引：`vectorStore: remote`（0.8.0 起，默认关）
+## 远端索引：`vectors: remote`（0.10.0 起为默认）
 
-默认 `local`：向量索引在本机 SQLite，行为与之前完全一致。
-切到 `remote` 后**本机只保留 BM25**，向量与 kNN 都在服务端：
+`vectors: remote` 时**本机只保留 BM25**，向量与 kNN 都在服务端；`vectors: off` 则完全不连远端：
 
 ```
 本机：切块 + BM25(top-40) ─┐
@@ -270,11 +250,11 @@ node build-release.mjs --no-model   # 只打不带模型的（150 KB 级）
 自测 41 项、客户端桩测试 45 项。
 
 ```yaml
-vectorStore: remote
+vectors: remote
 remote:
   url: "https://dsh-embed.example.com"
-  repoId: null        # 默认由 git origin URL 推导；同一仓库的不同克隆/机器算出同一个值
-  rateLimit: 10       # 服务端嵌入限速（块/秒）
+advanced:
+  remoteRateLimit: 10   # 服务端嵌入限速（块/秒）
 ```
 
 **实测（同语料、同一份 bge-base fp16）**
@@ -321,7 +301,7 @@ node tools/seed-vectors.mjs --repo D:/oss/elasticsearch --url https://dsh-embed.
    或服务端 `POST /v1/lineages/{id}/adopt`。
 2. **建库搬过去会更慢**：本机 33.05 块/s vs NAS P4 26.8 块/s。远端赢在查询延迟与重排（快 7.5×），
    以及"本机零重依赖、多人共享一份索引"。
-3. **纯远程没有离线语义检索**：服务端不可达时只剩 BM25。若需要兜底，把 `vectorStore` 切回 `local`
+3. **纯远程没有离线语义检索**：服务端不可达时只剩 BM25。若需要兜底，把 `vectors` 切回 `off`
    （本机代码与模型都还在）。
 
 ## 默认嵌入模型（0.6.0 起）
