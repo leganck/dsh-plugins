@@ -89,10 +89,19 @@ class EmbedGovernor:
                 self.log(f"[governor] tick failed: {e}\n{traceback.format_exc()[-600:]}")
 
     def _next_namespace(self):
+        """**轮转**取下一个命名空间（每批换一个），而不是把队首那个排干。
+
+        为什么必须轮转：实测在一个 43,836 待嵌的大命名空间后面新建一个小仓库，
+        它的 pending 永远轮不到 —— 服务端 100% 的 GPU 都喂给大仓，"新增的代码"在
+        **语义通道**上一直搜不到（BM25 能搜到，所以症状很隐蔽）。
+        一批 = 8 块，轮转几乎不影响大仓的整体吞吐（它本来就被限速在 10 块/s）。
+        """
         with self.lock:
             if not self._ns_queue:
                 return None
-            return self._ns_queue[0]
+            ns = self._ns_queue.pop(0)
+            self._ns_queue.append(ns)  # 排到队尾：下一批换别人
+            return ns
 
     def _tick(self, namespace):
         repo = self.store.repo(namespace)
