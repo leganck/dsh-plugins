@@ -1,0 +1,19 @@
+# GPU 覆盖层：有 NVIDIA 卡时叠在 compose.yaml 上
+#
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
+#
+# 前置：宿主机装了 nvidia-container-toolkit（`nvidia-smi` 能跑、`docker run --gpus all` 可用）。
+# 镜像要用 gpu flavor（自己构建时 --build-arg FLAVOR=gpu；或直接用 latest-gpu）。
+# 入口脚本会检查 libcublasLt.so.12 / libcudnn.so.9：缺了就**降级 CPU 并告警**，不会起不来。
+services:
+  dsh-embed:
+    image: ${IMAGE:-ghcr.io/leganck/dsh-embed:latest-gpu}
+    environment:
+      ORT_PROVIDERS: CUDAExecutionProvider,CPUExecutionProvider
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

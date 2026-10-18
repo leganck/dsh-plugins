@@ -33,10 +33,17 @@ code-index-service/
 ├── governor.py      # 后台嵌入：限流、暂停、优先级、进度
 ├── embedder.py      # ONNX 嵌入会话 + 向量标签（tag）
 ├── reranker.py      # 交叉编码器重排
-├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），41 项
-├── start.sh         # 装依赖、选 ORT（CUDA 12 / 1.19.2 / 或退回 CPU）、启动
-├── compose.yaml     # Traefik 暴露 + nvidia device 预留
-└── out/             # server.log 与 index.db（运行时生成）
+├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），43 项
+├── Dockerfile       # 一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
+├── docker-entrypoint.sh  # 拼 CUDA 路径、查设备、校验模型、/data 权限；能降级就降级
+├── scripts/fetch-models.mjs  # 拉模型 → models/model、models/model-rerank（也支持 --check）
+├── compose.yaml     # 默认部署：GHCR latest-cpu，镜像自带嵌入模型
+├── compose.gpu.yaml # GPU 覆盖层：设备预留 + CUDA providers
+├── compose.build.yaml  # 本地自建（模型走 --build-context，不进主上下文）
+├── .env.example     # HOST_PORT / API_KEY / ORT_THREADS …
+├── deploy/legacy/   # 历史非容器路径（start.sh + 旧 compose），仅参考
+├── models/          # 构建用模型（.gitignore；embed 194 MB + rerank 531 MB）
+└── /data            # 容器卷：index.db 与 server.log（运行时生成）
 ```
 
 ## 数据模型：为什么按"血统"存
@@ -125,33 +132,114 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | 优先级 | `spread`（按 hash） | 先嵌的块在全仓均匀分布 → 部分索引立刻可检索 |
 | 覆盖率 | `/status.coverage` | 查询结果里也会带上；初始化期间 BM25 照常可用 |
 
-## 部署（fnOS 实测路径）
+## 部署（容器，**开箱即用**）
+
+镜像自带嵌入模型 `bge-base-zh-v1.5`（fp16），**不需要预先准备任何模型文件**：
 
 ```bash
-# 目录约定与其它 compose 项目一致
-cd /vol1/1000/Docker/compose/dsh-embed
-# 放好 model/（bge-base-zh-v1.5 fp16）与可选 model-rerank/（bge-reranker-base）
-docker compose up -d          # 首次会 pip install（约 1–2 分钟）
-curl -s http://127.0.0.1:18000/health | head -c 400
+docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
+  -v dsh-embed-data:/data ghcr.io/leganck/dsh-embed:latest-cpu
+curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
 ```
 
-`compose.yaml` 的关键项：`deploy.resources.reservations.devices[driver=nvidia]`（等价 `--gpus all`，
-fnOS 的容器 API 没有 GPU 开关）与 Traefik 标签（对外暴露为 `https://dsh-embed.example.com`）。
+第一次拉取约 **267 MB**（压缩层），之后升级只增量拉模型/代码层。
 
-### 为什么必须是 CUDA 12 + onnxruntime 1.19.2
+### 镜像变体（体积都是实测）
 
-Tesla P4 是 **Pascal（sm_61）**；pip 上最新的 `onnxruntime-gpu`（1.31+）是 **CUDA 13** 栈，
-而 CUDA 13 已移除 Maxwell/Pascal/Volta（最低 sm_75）→ P4 上永远跑不起来。
-能跑 Pascal 的组合是 **ORT 1.19.2 + CUDA 12.4 + cuDNN 9.1**：
+| 标签 | 内容 | 拉取（压缩） | docker 显示（未压缩） | 什么时候用 |
+|---|---|---|---|---|
+| `latest-cpu` | cpu 底座 + 嵌入模型 | **≈267 MB** | 485 MB | **默认推荐**：查询为主、局域网、没显卡 |
+| `latest-gpu` | gpu 底座 + 嵌入模型 | ≈1.7 GB | 3.06 GB | 大规模建库、高并发 |
+| `latest-cpu-rerank` | + 重排模型 | ≈759 MB | 1.06 GB | 要用远端重排（`rerank=fast|quality`） |
+| `latest-gpu-rerank` | gpu + 两个模型 | ≈2.0 GB | 3.63 GB | 大规模 + 远端重排 |
+| `base-cpu` / `base-gpu` | 只有运行时（无模型） | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | 模型在 NFS 上、或自己叠层 |
+
+> 为什么默认不带重排模型：服务端 `rerank` 默认就是 `off`，缺模型时 `/health` 报
+> `rerank_ready=false`、客户端**自动回退本机重排**。需要远端重排再拉 `-rerank` 变体即可。
+> 体积怎么压下来的、为什么不量化：见仓库根 README 的「镜像体积」一节。
+
+### 三种用法
+
+1. **直接拉 GHCR（推荐）**：上面那段 `docker run`。
+2. **compose**（cpu）：`cp .env.example .env && docker compose up -d`；
+   有 NVIDIA 卡就叠加覆盖层：`docker compose -f compose.yaml -f compose.gpu.yaml up -d`。
+3. **自建**（改代码 / 想自己出镜像）：
+
+   ```bash
+   node scripts/fetch-models.mjs                 # → models/model、models/model-rerank
+   docker compose -f compose.build.yaml up -d --build
+   # 只出"不含模型"的小镜像：
+   MODEL_TARGET=nomodel docker compose -f compose.build.yaml up -d --build
+   ```
+
+### GPU 的前置与降级行为
+
+- 宿主机需要 `nvidia-container-toolkit`（`docker run --gpus all nvidia/cuda nvidia-smi` 能跑）；
+  compose 里用 `deploy.resources.reservations.devices`（fnOS 的容器 API 没有 GPU 开关，只能走这个）。
+- 入口脚本先看**设备**（`/dev/nvidia0`）再看**库**（`libcublasLt.so.12` / `libcudnn.so.9`）：
+  - 没有设备 → 打印"没做 GPU 设备预留"并**退回 CPU**（ORT 1.19.2 缺设备时直接调 CUDA 会段错误，实测踩到过）；
+  - 设备有但库缺 → 同样退回 CPU 并点名缺哪个；
+  - 两者都有 → `/health.providers` 显示 `CUDAExecutionProvider`。
+
+### 反向代理
+
+服务只绑 `127.0.0.1`，对外用反代。Traefik 示例（放 `compose.override.yaml`）：
+
+```yaml
+services:
+  dsh-embed:
+    networks: [gateway]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.dsh-embed.rule=Host(`dsh-embed.example.com`)
+      - traefik.http.services.dsh-embed.loadbalancer.server.port=8000
+networks:
+  gateway: { external: true }
+```
+
+### 数据、备份与升级
+
+- 索引库与日志都在 **`/data` 卷**（`index.db` + `server.log`）。升级镜像只换 tag，索引不动。
+- 备份：`docker compose stop` 后
+  `docker run --rm -v dsh-embed-data:/data -v "$PWD:/backup" busybox tar czf /backup/index.tgz -C /data .`
+- 卷属主必须是 uid **10001**（容器非 root）。老数据卷若是 root：
+  `docker run --rm -v dsh-embed-data:/data busybox chown -R 10001:10001 /data`
+
+### 模型与许可
+
+- 嵌入 `Xenova/bge-base-zh-v1.5`（fp16，194 MB）、重排 `Xenova/bge-reranker-base`（fp16，531 MB），
+  均 **MIT**；镜像内 `/models/LICENSE.md` 记录来源、下载时间与每个文件的 sha256。
+- **目录名必须是 `model` / `model-rerank`**：`embedder.py` 用 `basename(model_dir)=='model'` 推导模型名，
+  拼出的向量标签会跟着变 —— 变了客户端就认为"模型换了" → 全量重嵌。
+  实测本镜像的 tag 与现网一致：`bge-base-zh-v1.5-c4fa1e57-fp16`。
+
+### 排错
+
+| 现象 | 原因 / 处置 |
+|---|---|
+| gpu 镜像的 `/health.providers` 只有 CPU | 没做设备预留或宿主机缺 nvidia-container-toolkit；看 `docker logs` 里的 `[entrypoint]` 告警 |
+| 容器起不来，exit 78 | 缺嵌入模型（用了 `nomodel` 却没挂载）或 `/data` 不可写；入口脚本会打印具体修复命令 |
+| `/health` 里 `ready=false` | 模型加载失败，`err` 字段有原因（多半是模型文件不全） |
+| `rerank_ready=false` | **正常**：这是 embed 变体。要远端重排就用 `-rerank` 变体 |
+| 写入返回 507 | 存储上界（`MAX_TOTAL_GB`，默认 20） |
+| 拉镜像慢 | 换 `latest-cpu`（267 MB），或用 `base-*` + 挂载模型 |
+
+### 发布镜像
 
 ```bash
-pip download --no-deps -d /tmp/cuda nvidia-cublas-cu12==12.4.5.8 nvidia-cudnn-cu12==9.1.0.70 nvidia-cuda-runtime-cu12==12.4.127
-# 解包后把 lib/ 下 *.so* 拷到 ./cuda12/（28 个文件）
-pip install --no-cache-dir --target ./pylib119 onnxruntime-gpu==1.19.2
-pip install --no-cache-dir --target ./pylib numpy tokenizers
+git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workflows/publish-image.yml
 ```
 
-`start.sh` 会自动检查 `cuda12/libcublasLt.so.12` 与 `cuda12/libcudnn.so.9`，缺了就退回 CPU（服务仍可用）。
+流水线：先构建并推 `base-{cpu,gpu}`（层复用）→ 再叠模型出 4 个变体 → **每个变体先在容器里跑
+`selftest.py` 与"模型文件在位"检查，通过才推**。首次发布后要在 GitHub → Packages 把
+`dsh-embed` 设为 **public**（否则拉取需要 `docker login ghcr.io`）。
+
+### 附录：非容器历史路径
+
+`deploy/legacy/start.sh` + `deploy/legacy/compose.legacy.yaml` 是容器化之前的做法
+（`python:3.11-slim` + 启动时 pip 装依赖 + 手工拷 `cuda12/` 的 28 个 `.so`）。
+现在只作参考保留：它的 CUDA 版本约束（ORT 1.19.2 + CUDA 12.4 + cuDNN 9.1，Pascal 才跑得起来）
+已经搬进 `Dockerfile` 的 pip wheel 里。
 
 ## 环境变量
 
@@ -169,11 +257,18 @@ pip install --no-cache-dir --target ./pylib numpy tokenizers
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
 | `API_KEY` | 空 | 设了则所有 `POST` 要求 `Authorization: Bearer` |
 | `FAKE_EMBED` | 空 | `1` = 不加载模型（自测用） |
+| `HOST_PORT` | `18000` | **compose 专用**：宿主机端口（只绑 127.0.0.1） |
+| `FLAVOR` | `cpu` | **构建参数**：`cpu` / `gpu`（gpu 装 CUDA 12 的 cublas/cudnn/curand/cufft） |
+| `MODEL_TARGET` | `embed` | **构建参数**：`nomodel` / `embed` / `embed-rerank` |
+| `VERSION` | `dev` | **构建参数**：写进 OCI label 的版本号 |
 
 ## 自测
 
 ```bash
-python selftest.py     # 41 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+python selftest.py     # 43 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+
+# 容器里跑（不需要模型，发布门禁就是这条）
+docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app/selftest.py
 ```
 
 ## 安全
