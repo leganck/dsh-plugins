@@ -206,15 +206,18 @@ def _warmup():
 
 
 # ------------------------------------------------------------------ 业务
-def search(namespace, query, k=10, tag=None, rerank_candidates=0):
+def search(namespace, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
     repo = store.repo(namespace)
     if not repo:
         return {"error": "unknown-namespace", "namespace": namespace}, 404
     use_tag = tag or repo["tag"]
     if not use_tag:
         return {"hits": [], "reason": "该命名空间还没有模型标签（先同步一次）", "ms": {}}, 200
+    req_text = embed_text or query
     t0 = time.time()
-    qvec = embedder.embed([query], is_query=True)[0]
+    # `embedText`：客户端带了「当前文件片段」时，用它构造查询向量（更贴近正在编辑的上下文），
+    # 而 `rerank` 仍然用原始 query —— 两件事的"提问"不一样，混用会污染重排。
+    qvec = embedder.embed([req_text], is_query=True)[0]
     embed_ms = (time.time() - t0) * 1000
     hashes, mat, meta = knn.get(namespace, use_tag)
     if mat.shape[0] == 0:
@@ -500,6 +503,7 @@ class Handler(BaseHTTPRequestHandler):
                     int(req.get("k", 10)),
                     req.get("tag"),
                     int((req.get("rerank") or {}).get("candidates", 0)),
+                    req.get("embedText"),
                 )
                 return self._send(code, payload)
             if path.startswith("/v1/admin/"):

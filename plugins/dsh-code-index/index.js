@@ -33,7 +33,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.3'
+export const BUILD = '2026-10-18.4'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -462,6 +462,27 @@ function expandPath(p) {
 
 
 
+/**
+ * 把 `current_file` 解析成 `{ rel, excerpt, dirPrefix }`。
+ *
+ * 只接受**仓库内真实存在**的文件：超出仓库、不存在、太大都返回 null ——
+ * 锚定是可选增强，任何异常都不该让整次搜索失败（这条与"远端挂了只丢语义召回"同一原则）。
+ */
+function resolveCurrentFile(repoRoot, file) {
+  if (!file) return null
+  try {
+    const abs = path.resolve(repoRoot, expandPath(file))
+    const rel = path.relative(repoRoot, abs).replace(/\\/g, '/')
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
+    const st = fs.statSync(abs)
+    if (!st.isFile() || st.size > 1024 * 1024) return null
+    const excerpt = fs.readFileSync(abs, 'utf8').split('\n').slice(0, 120).join('\n').slice(0, 6000)
+    const dir = path.posix.dirname(rel)
+    return { rel, excerpt, dirPrefix: dir === '.' ? null : `${dir}/` }
+  } catch {
+    return null
+  }
+}
 const textResult = (value, text) => ({ content: [{ type: 'text', text }], structuredContent: value })
 const fail = (message) => ({ content: [{ type: 'text', text: `错误：${message}` }] })
 
@@ -919,6 +940,14 @@ function applyInner(ctx, rawConfig = {}) {
         path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
         top_k: { type: 'integer', description: '返回条数，默认 10。' },
         mode: { type: 'string', enum: ['auto', 'fts', 'vector'], description: '检索通道，默认 auto（混合）。' },
+        current_file: {
+          type: 'string',
+          description:
+            '正在编辑的文件（仓库内相对路径或绝对路径）。给了它就做「当前文件锚定」：'
+            + '文件前 120 行的片段一起参与查询向量，结果默认排除该文件本身、同目录候选加一点权重。'
+            + '适合“在这个文件附近，还有哪儿是类似实现”。',
+        },
+        exclude_current: { type: 'boolean', description: '给了 current_file 时是否排除该文件自身，默认 true。' },
       },
       required: ['query'],
       additionalProperties: false,
@@ -935,6 +964,12 @@ function applyInner(ctx, rawConfig = {}) {
           return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。索引位于 ${dbPath}`)
         }
         const tier = RERANK_TIERS[config.rerank]
+        // 「当前文件锚定」（对应 Cursor 请求里的 CurrentFileInfo）：
+        // 片段参与查询向量 + 默认排除自身 + 同目录加权。cf 为 null 时三个参数都不生效。
+        const cf = resolveCurrentFile(repoRoot, args.current_file)
+        const embedText = cf ? `${args.query}\n\n[当前文件 ${cf.rel}]\n${cf.excerpt}` : null
+        const excludePaths = cf && (args.exclude_current ?? true) ? [cf.rel] : []
+        const boostPrefix = cf?.dirPrefix ?? null
         let r
         if (config.vectorStore === 'remote') {
           // 远端索引模式：本地 BM25 + 远端 kNN（可选远端重排）→ 客户端 RRF 融合。
@@ -946,7 +981,11 @@ function applyInner(ctx, rawConfig = {}) {
           let remoteError = null
           const t0 = Date.now()
           try {
-            const res = await getRemoteIndex().search(namespace, args.query, { k: 40, rerankCandidates: remoteRerank })
+            const res = await getRemoteIndex().search(namespace, args.query, {
+              k: 40,
+              rerankCandidates: remoteRerank,
+              embedText,
+            })
             remoteHits = (res.hits ?? []).map((h) => ({ hash: h.hash, score: h.score, rerankScore: h.rerankScore }))
             remoteMeta = {
               namespace,
@@ -973,6 +1012,8 @@ function applyInner(ctx, rawConfig = {}) {
             remoteMeta,
             reranker: localReranker,
             rerankCandidates: tier?.candidates ?? 0,
+            excludePaths,
+            boostPrefix,
           })
           if (remoteError) r.note = [r.note, `远端不可达，已退化为纯关键词：${remoteError}`].filter(Boolean).join('；')
         } else {
@@ -983,6 +1024,9 @@ function applyInner(ctx, rawConfig = {}) {
             mode: args.mode ?? 'auto',
             reranker: tier ? reranker : null,
             rerankCandidates: tier?.candidates ?? 0,
+            embedText,
+            excludePaths,
+            boostPrefix,
           })
         }
         if (!r.results.length) {
@@ -993,6 +1037,11 @@ function applyInner(ctx, rawConfig = {}) {
           )
         }
         const lines = [`命中 ${r.results.length} 条（通道 ${r.mode}；词项 ${r.terms.join(' / ')}）`]
+        if (cf) {
+          const ex = r.boosted ? `，同目录 ${r.boosted} 条加权` : ''
+          const keepSelf = (args.exclude_current ?? true) ? '已排除自身' : '保留自身'
+          lines.push(`  当前文件锚定：${cf.rel}（${cf.excerpt.split('\n').length} 行片段参与查询向量；${keepSelf}${ex}）`)
+        }
         if (r.note) lines.push(`  ${r.note}`)
         // 重排状态必须显式报告：开了没生效（缺模型/降级）与"本来就没开"是两件事，
         // 不写清楚就会让人以为在享受重排的收益。
@@ -1120,6 +1169,51 @@ function applyInner(ctx, rawConfig = {}) {
       }
     },
   })
+
+  // ---------------------------------------------------------------- code_map
+  registerTool({
+    name: 'code_map',
+    description:
+      '仓库的**目录地图**：每个目录多少文件、什么语言为主、多少块、有哪些代表符号（函数/类）。'
+      + '冷启动或不知道代码在哪时先用它定位目录，再针对性 code_search，省一次盲搜来回。'
+      + '只读本地索引，不做模型推理。需要先跑过 code_index。',
+    isConcurrencySafe: () => true,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
+        depth: { type: 'integer', description: '目录层级，默认 2（如 platform/win32/）。' },
+        limit: { type: 'integer', description: '最多列多少个目录，默认 24，按块数排序。' },
+      },
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => [{ type: 'text', text: v.content?.[0]?.text ?? '' }] },
+    async execute(args, exec) {
+      try {
+        const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
+        assertAllowed(repoRoot)
+        const { store } = storeFor(repoRoot)
+        const s = store.stats()
+        if (s.files === 0) {
+          return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。`)
+        }
+        const depth = Math.max(1, Math.min(6, args.depth ?? 2))
+        const dirs = store.dirMap({ depth, dirs: Math.max(1, Math.min(200, args.limit ?? 24)) })
+        const lines = [`目录地图：${repoRoot}（${s.files} 文件 / ${s.chunks} 块，深度 ${depth}）`]
+        for (const d of dirs) {
+          const exts = d.exts.map(([e, n]) => `${e}×${n}`).join(' ')
+          lines.push(`  ${d.dir.padEnd(24)} ${String(d.files).padStart(4)} 文件 · ${String(d.chunks).padStart(5)} 块 · ${exts}`)
+          if (d.top.length) {
+            lines.push(`      ${d.top.map((t) => `${t.symbol ? t.symbol + ' ' : ''}${t.path}`).join(' | ')}`)
+          }
+        }
+        return textResult({ repoRoot, depth, dirs, files: s.files, chunks: s.chunks }, lines.join('\n'))
+      } catch (e) {
+        return fail(String(e.message))
+      }
+    },
+  })
+
 
   registerTool({
     name: 'code_index_deps',
