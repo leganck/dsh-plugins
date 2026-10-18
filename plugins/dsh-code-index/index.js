@@ -33,7 +33,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.2'
+export const BUILD = '2026-10-18.3'
 export const SCHEMA_VERSION = 1
 
 /**
