@@ -41,22 +41,29 @@ export function sqliteDriver() {
 }
 
 /**
- * 从块正文里抽一个"签名"用来在目录地图里指路：
- * 优先 `func/fn/function/class/interface/def/type/struct` 后面的名字，
- * 抽不到就退回第一行有内容的代码（注释与空行跳过）。
+ * 从块正文里抽一个"签名"，用来在目录地图里指路（例：`TWindow.InternalBeforeFormCreate`）。
+ *
+ * 为什么不是简单取第一行：实测第一行经常是文档字符串、`export const BUILD = ...` 或
+ * `const run = promisify(execFile)` —— 对"这个目录是干什么的"毫无帮助。所以：
+ *   ① 先在**前 120 行**里找声明（func/fn/function/class/interface/def/type/struct/export const）；
+ *   ② 找不到再退回"第一条像代码的行"，并跳过注释、文档字符串、import/package 这类样板。
  */
-function signatureOf(body) {
+function signatureOf(body, relPath = '') {
   const lines = String(body ?? '').split('\n')
-  const pat = /(?:^|\s)(?:func\s+(?:\([^)]*\)\s*)?|fn\s+|function\s+|class\s+|interface\s+|def\s+|type\s+|struct\s+)([A-Za-z_$][\w$]*)/ 
-  for (const line of lines.slice(0, 40)) {
-    const m = line.match(pat)
+  const decl = /\b(?:func\s+(?:\([^)]*\)\s*)?|fn\s+|function\s*\*?\s*|class\s+|interface\s+|def\s+|type\s+|struct\s+|enum\s+|export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|interface|type)\s+)([A-Za-z_$][\w$]*)/ 
+  for (const line of lines.slice(0, 120)) {
+    const m = line.match(decl)
     if (m) return m[1]
   }
-  for (const line of lines) {
-    const s = line.trim()
-    // package xxx 这类行信息量太低，指路时不如再往下找一行
-    if (s && !s.startsWith('//') && !s.startsWith('#') && !s.startsWith('*') && !s.startsWith('/*') && !s.startsWith('package ') && !s.startsWith('import ') && !s.startsWith('#include') && !s.startsWith('using ')) return s.slice(0, 48)
+  // 文档类文件：第一行正文就是最好的摘要（`# 标题` 去掉井号）
+  if (/\.(md|markdown|txt|rst)$/i.test(relPath)) {
+    for (const line of lines) {
+      const s = line.replace(/^\s*[#>*\-+]+\s*/, '').trim()
+      if (s && !s.startsWith('---') && !s.startsWith('```')) return s.slice(0, 44)
+    }
+    return ''
   }
+  // 代码文件找不到声明就留空：宁可空着，也不要把注释/文档字符串当成符号塞给模型
   return ''
 }
 export class Store {
@@ -294,16 +301,21 @@ export class Store {
       .slice(0, dirs)
       .map((a) => ({ dir: a.dir, files: a.files, chunks: a.chunks, exts: [...a.exts.entries()].sort((x, y) => y[1] - x[1]).slice(0, 3), top: a.top.sort((x, y) => y.chunks - x.chunks).slice(0, perDir) }))
 
-    // 代表符号：每个目录取 top 文件的第一块，抽出函数/类/接口名（抽不到就退回第一行有效代码）
+    // 代表符号：每个目录取 top 文件的**前 3 块**（第一块常常只有 import / 文档字符串，
+    // 声明往往在后面），从中抽函数/类/接口名
     const wanted = out.flatMap((d) => d.top.map((t) => t.path))
     if (wanted.length) {
       const ph = wanted.map(() => '?').join(',')
       const rows = this.db.prepare(`select path, body from chunks where path in (${ph}) order by path, start_line`).all(...wanted)
-      const first = new Map()
-      for (const r of rows) if (!first.has(r.path)) first.set(r.path, r.body)
+      const head = new Map()
+      for (const r of rows) {
+        const arr = head.get(r.path) ?? []
+        if (arr.length < 3) arr.push(r.body)
+        head.set(r.path, arr)
+      }
       for (const d of out) {
         for (const t of d.top) {
-          t.symbol = signatureOf(first.get(t.path) ?? '')
+          t.symbol = signatureOf((head.get(t.path) ?? []).join('\n'), t.path)
         }
       }
     }
