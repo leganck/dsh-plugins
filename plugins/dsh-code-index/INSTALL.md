@@ -94,84 +94,6 @@ code_index_deps action=remove                        # 删除
 POSIX 上是 `~/.cache/dsh-code-index/embed-deps`）。**不装也能用**：切块降级为 heuristic/window，
 检索不受影响；装了 `code_index` 才会按 AST 切块。
 
-### 2'''. 下载模型：用 `tools/fetch-model.mjs`，**默认走 ModelScope**
-
-```powershell
-node tools\fetch-model.mjs --list        # 有哪些模型、各需哪些文件
-node tools\fetch-model.mjs --check       # 校验本地已有文件（该机器必需的量化版本）
-node tools\fetch-model.mjs --model bge-small-zh-v1.5          # 下载（默认 fp16+int8 都拉）
-node tools\fetch-model.mjs --model bge-reranker-base --quant int8   # 实验用的交叉编码器
-```
-
-**为什么固定用 ModelScope —— 同一台机器、同一时段的实测对比：**
-
-| 源 | 实测 | 结论 |
-|---|---|---|
-| `hf-mirror.com` | **308 重定向后 0 字节**；更早一次 2.9–26 KB/s（151 s 才 429 KB） | ❌ **不可用** |
-| `huggingface.co` 直连 | 小文件能通；CDN（`us.aws.cdn.hf.co`）大文件 **20 秒 0 字节** | ⚠️ 不可靠 |
-| **`modelscope.cn`** | **4.9–6.9 MB/s**（266 MB 用 54 秒、22.8 MB 用 3.8 秒） | ✅ **唯一可用** |
-
-**为什么要用脚本而不是两条 curl**：这件事已经踩过两次同一个坑 ——
-**把"0 字节"当成下载成功**。脚本对每个文件校验 ① HTTP 状态 ② 实际字节数
-③ 与 `content-length` 是否一致 ④ 是否达到该文件的最小合理体积（`minBytes`），
-任一不满足就报错并非零退出，且不会留下半个文件当成品。
-
-> 校验里 `model_fp16.onnx` 显示 ❌ 只代表"**GPU 路径不可用**"，CPU 的 int8 路径仍然可用。
-
-### 2''''. 候选升级的嵌入模型（**实验性**，插件不引用）
-
-清单里还有三个**非默认**模型，供"换更强的中文/代码嵌入模型值不值"做对照：
-
-```powershell
-node tools\fetch-model.mjs --model qwen3-embedding-0.6b     # 1024 维，585 MB(int8)
-node tools\fetch-model.mjs --model bge-base-zh-v1.5        # 768 维，194 MB(fp16) 中文同族大一档
-node tools\fetch-model.mjs --model bge-large-zh-v1.5       # 1024 维，619 MB(fp16) 中文同族最大档
-node tools\fetch-model.mjs --model bge-m3                   # 1024 维，542 MB(int8)
-node tools\fetch-model.mjs --model bge-reranker-base        # 交叉编码器（重排，实测净负）
-```
-
-**各自的正确用法不同，弄错就会把模型测成废物**（本机实测踩过）：
-
-| 模型 | 查询前缀 | 文档前缀 | pooling | 推荐执行后端 |
-|---|---|---|---|---|
-| `bge-small-zh-v1.5` | `为这个句子生成表示以用于检索相关文章：` | 无 | **CLS** | DirectML / fp16 |
-| **`bge-base-zh-v1.5`（默认，随包提供）** | 同上 | 无 | **CLS** | int8/CPU（fp16 可选）|
-| `qwen3-embedding-0.6b` | `Instruct: {任务}\nQuery:{问题}` | 无 | **last_token** | CPU / int8（量化算子在 DML 上支持差） |
-| `bge-m3` | 无 | 无 | **CLS** | CPU / int8 |
-
-两个易踩点：
-1. **`onnx/` 子目录**：我们把 ONNX 放在模型目录**根**（与 `lib/embedder.js` 的约定一致），
-   但 `transformers.js` 的 `pipeline()` 只认 `<dir>/onnx/<file>.onnx`。下载器对这两个候选模型
-   会在下载后**自动补硬链接**（`linkOnnxSubdir`），瞬时且不占额外磁盘 —— 手工放模型时也要注意。
-2. **带 KV-cache 的 ONNX 导出**：`Qwen3-Embedding` 的 ONNX 声明了 `position_ids` 与一堆
-   `past_key_values.*` 输入 → **不要用裸 `session.run`**（要自己填 KV，还会算无用的 `present.*`
-   输出、内存翻倍）→ 走 `pipeline('feature-extraction', dir, { dtype, pooling, normalize })`。
-
-**换模型的代价（实测）**：标签变 → 缓存复用 **0%**（全库要重嵌）；维度 512 → 1024 → 每向量
-2048 B → 4096 B（存储 ×2）；`Qwen3-0.6B` 在 CPU/int8 下 **864 ms/块**、查询 **297 ms**
-（对照 `bge-small` 在 DML/fp16 下 29 ms/块、查询 25 ms）。
-
-### 2''. 模型身份与"换模型 / 多机器"的一致性（0.4.6 起）
-
-向量必须带"**是哪份模型产出的**"标识，否则换模型后会拿新模型的查询向量去和旧模型的存量向量
-做点积 —— 维度不同变 NaN，**维度相同（如 fp16 ↔ int8）则完全静默地给出垃圾排名**。
-
-- **标签格式**：`bge-small-zh-v1.5-<sha8>-<fp16|int8>`，`sha8` = 模型文件 + 分词器 +
-  分词器配置的**内容哈希**前 8 位（本机实测 `…-716c6e6f-fp16`）。用内容哈希而不是 mtime/size，
-  因为文件跨机器复制时 mtime 必变 —— 而跨机器一致性正是这个标签要保证的事。
-- **自动重建**：建库写 `embedding_tag`；库里已有向量且 tag 不一致 → 自动全量重建并报告
-  `embedChanged`（与切块策略指纹同一套机制）。
-- **查询闸门**：tag 不符（含"旧库没记录"）或维度不符 → **不用向量通道**，并在结果里说明
-  原因与处置办法，绝不静默算垃圾。
-- **`code_index_status`** 同时显示「索引向量模型」与「当前模型」，一眼可比。
-- **升级后迁移历史缓存**（只做一次；不做则历史向量因 key 前缀不同而全部用不上）：
-  ```text
-  node tools/migrate-embedding-tag.mjs --dry-run    # 先看要迁多少条
-  node tools/migrate-embedding-tag.mjs              # 原地 UPDATE 前缀，可重复执行
-  ```
-
-多机器共享向量缓存的做法与前置条件见 `VECTOR-SHARING.md`。
-
 ## 2'. 切块策略表（对应 Cursor 的 `GetAvailableChunkingStrategies`）
 
 Cursor 那套是"**服务端按文件类型下发**切块策略"；我们本地没有服务端，等价物是
@@ -342,17 +264,7 @@ rerank: quality   # off（默认）| fast（top-10）| quality（top-20）
 server/code-index-service/README.md
 ```
 
-起好后本机先量一遍，**再决定搬哪一段**（不要凭印象）：
-
-```sh
-node tools/bench-remote.mjs --url https://dsh-embed.example.com --runs 12 --batch 16
-#   自述 / RTT / 单条查询 / 批量 / 重排，各一行
-node tools/bench-build-vector.mjs --repo D:/oss/some-big-repo --n 8000 \
-     --remote https://dsh-embed.example.com --arms local-gpu,remote
-#   同一批块、同一份模型：本机与远端的"创建向量"速度对照
-```
-
-然后配置远端（0.10.0 起只有这一种远端写法）：
+起好服务端后直接配置远端（0.10.0 起只有这一种远端写法）：
 
 ```yml
 vectors: remote

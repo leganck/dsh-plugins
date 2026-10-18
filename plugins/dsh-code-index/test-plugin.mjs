@@ -1,8 +1,8 @@
 /**
  * 插件接口层测试：不启动 DSH，用假 ctx 验证 apply() 注册了哪些工具、
- * 参数声明是否正确、四个工具能否真的跑通，以及错误路径是否给出可读信息。
+ * 参数声明是否正确、五个工具能否真的跑通，以及错误路径是否给出可读信息。
  *
- * 用法：node test-plugin.mjs [--repo <path>] [--no-embed]
+ * 用法：node test-plugin.mjs [--repo <path>]
  *
  * ⚠️ 第一条语句必须是**隔离 DSH_HOME**：插件在"模块导入"时就往
  * `<DSH_HOME>/code-index/{_boot.log,_loaded.json}` 写加载标记，而 `_loaded.json` 是
@@ -31,7 +31,6 @@ if (!repo || !fs.existsSync(repo)) {
   console.error('找不到可测仓库，请用 --repo 指定')
   process.exit(1)
 }
-const modelDir = path.join(os.homedir(), '.dsh', 'models', 'bge-small-zh-v1.5')
 
 let pass = 0
 let fail = 0

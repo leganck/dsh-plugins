@@ -81,9 +81,9 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
      命名空间换了，1501 块里只有 **5 块**需要重嵌（其余正文没变，直接命中老向量）；
    - `code_index_deps install group=parser` 装完会清解析器缓存，**当次会话立即生效**；
      本机之外手动 npm 安装的则需要重启进程。
-4. **依赖可选、优雅降级**。缺 `onnxruntime-node` / 缺模型文件 → 自动退化为纯 FTS5，并在结果里说明原因，不会让插件加载失败。
-5. **GPU 批量的坑已处理**。DirectML 在 batch 8~16 最快，32 会掉到 10.8 块/s、更大直接崩 → 失败自动减半拆批，单条仍失败才回退 CPU。
-6. **截断策略对齐**。transformers.js 截断时把 512 位全填内容 token，Rust `tokenizers` 会给结尾 `[SEP]` 留位 —— 差 1 个 token 会让向量与 Python 版不一致（余弦 0.9986 → 0.999999）。已在推理层对齐。
+4. **远端不可用时优雅降级**。连不上服务端 → 查询自动退化为纯 FTS5、建库仍完成本地索引，原因写进结果，不会让插件加载失败。
+5. **远端失败有冷却**。连接失败后 60 s 内不再重试（避免每次查询都等满超时），冷却后自动恢复。
+6. **本地零重依赖**。本地不再需要 onnxruntime / transformers / 模型文件；唯一可选依赖是 parser 组（AST 切块）。
 7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录，不会污染 `git status`。
 8. **roots 白名单**。不在白名单内的路径直接拒绝，**且在创建索引库之前校验**。
 
@@ -216,27 +216,7 @@ vectors: off
 | `code_map` / `code_index_status` / 切块 | 照常可用（tree-sitter 是可选的**唯一**额外依赖） |
 | 输出文案 | 只留一行 `模式：纯关键词（本地 FTS5；vectors=off）` |
 
-## 发布打包：两个产物
-
-```sh
-node build-release.mjs              # 两个都打
-node build-release.mjs --no-model   # 只打不带模型的（150 KB 级）
-```
-
-| 产物 | 大小 | 适用 |
-|---|---|---|
-| `release/local-dsh-code-index-<v>.tgz` | **0.2 MB**（44 文件） | 推荐：本机不需要 194 MB 模型（0.10.0 已无本地模型） |
-| `release/local-dsh-code-index-<v>-local-model.tgz` | **178 MB**（49 文件，随包 fp16 模型） | 全本机、装完即用、不联网 |
-
-实现要点：
-
-- 用 `npm pack --ignore-scripts` **绕过 prepack**（否则两个包都会带上模型）；
-- 带模型那个先显式 `tools/pack-model.mjs stage`，打完立刻 `clean`（仓库里不留二进制）；
-- 打完用 `tar -tzf` **验证包里真的有 `model/model_fp16.onnx`**，不只信文件名；
-- `release/*.tgz` 被 `.gitignore` 忽略，只提交 `release/SHA256SUMS.txt`；
-- 装后验证：`node verify-install.mjs --pkg <解包后的 package 目录>`（19 项，含"包里没有捆 onnxruntime"）。
-
-## 远端索引：`vectors: remote`（0.10.0 起为默认）
+## 远端索引：`vectors: remote`（`auto` + `remote.url` 时默认走这里）
 
 `vectors: remote` 时**本机只保留 BM25**，向量与 kNN 都在服务端；`vectors: off` 则完全不连远端：
 
@@ -280,125 +260,48 @@ advanced:
 为什么不用 Merkle：它省的是"整棵树传到云端"，而我们本来就只发变更。实测建树 117 ms/4 万文件、
 增量 0.001 ms/文件，但本地全量核对在未变更时只要 2 ms —— 协议复杂度换不到收益。
 
-**用快机器预热（`tools/seed-vectors.mjs`）**
-
-本机建库比 NAS 快（33.05 vs 26.8 块/s），大仓首次初始化可以让本机算、服务端只存：
-
-```sh
-node tools/seed-vectors.mjs --repo D:/oss/elasticsearch --url https://dsh-embed.taek.site \
-     --model-dir D:/dsh-models/bge-base-zh-v1.5 --deps-dir D:/dsh-code-index/embed-deps \
-     --index-base D:/dsh-bench-tmp/index-oss
-# 补一次全量清单（本地已同步过、服务端是空的）：加 --reset
-```
-
-实测：2,666 块 1.5 分钟（31.3 块/s）；16 万块约 90 分钟。灌入前会校验两边 `tag` 一致，
-不一致直接拒绝（否则等于把另一份模型的向量混进索引）。
-
 **三条边界，必须如实理解**：
 
 1. **"跨仓库复用"= 同仓库的多分支/多克隆**。实测无关项目之间块重合 **0.00%**（4 个仓库两两比对），
-   同项目跨分支 ~98%。服务端因此按**血统**（git origin URL）分存储；fork 想共用需显式 `remote.lineage`
-   或服务端 `POST /v1/lineages/{id}/adopt`。
+   同项目跨分支 ~98%。服务端因此按**血统**（git origin URL）分存储；fork 想共用只能走服务端
+   `POST /v1/lineages/{id}/adopt`（客户端不再暴露 lineage 配置）。
 2. **建库搬过去会更慢**：本机 33.05 块/s vs NAS P4 26.8 块/s。远端赢在查询延迟与重排（快 7.5×），
    以及"本机零重依赖、多人共享一份索引"。
-3. **纯远程没有离线语义检索**：服务端不可达时只剩 BM25。若需要兜底，把 `vectors` 切回 `off`
-   （本机代码与模型都还在）。
-
-## 默认嵌入模型（0.6.0 起）
-
-**`bge-base-zh-v1.5`（**fp16**）随包提供**，装在 `<插件目录>/model`，装上即用。
-103 题实测比原来的 `bge-small` 高 **+11 个百分点**（hit@3 43% → 54%），查询 22 → 34 ms；代价是索引慢约 7 倍。
-⚠️ 该模型的 **int8 导出会让向量空间塌缩**（无关文本 cosine 0.806 vs fp16 0.464，实测），所以随包的是 fp16。
-⚠️ 换模型会让已有向量作废 → 升级后首次 `code_index` 会全量重嵌（676 块≈5 分钟；详见 INSTALL.md）。
-
-## 配置怎么选（实测矩阵）
-
-103 道中文自然语言题、语料 = 一个 129 文件 / 361 块的 Java 模块，**全部走插件真实的 `search()`**
-（含 RRF 融合与重排接入）。命中 = 正确答案出现在前 k 条：
-
-| 配置 | @1 | @3 | @5 | @10 | @20 | 延迟 p50 |
-|---|---|---|---|---|---|---|
-| 不启用模型（纯关键词 BM25） | 22% | **27%** | 31% | 34% | 38% | **1 ms** |
-| bge-small-zh-v1.5（默认） | 27% | 43% | 59% | 71% | 87% | 22 ms |
-| bge-small + 重排 | 41% | **57%** | 71% | 78% | 87% | 1125 ms |
-| bge-base-zh-v1.5 | 35% | **54%** | 69% | 79% | 86% | **34 ms** |
-| bge-base + 重排 | 38% | 57% | 68% | 76% | 86% | 1118 ms |
-| Qwen3-Embedding-0.6B | 34% | **56%** | 71% | **83%** | **96%** | 87 ms |
-| **Qwen3 + 重排** | **44%** | **63%** | **74%** | **86%** | **96%** | 1292 ms |
-
-**怎么读这张表**：
-
-1. **模型不是可选项**：不用模型时 @3 只有 27%，而且**连召回都不够**（@20 仅 38%）。
-   模型的主要价值在**召回**（@20 从 38% 拉到 86~96%），其次才是排序。
-2. **重排对弱模型增益最大**：bge-small **+14pt**、Qwen3 +7pt、**bge-base 只有 +2~3pt**（甚至 @5/@10 略降）
-   → 重排不是无脑加，它主要是"补救召回池里排序不精"，模型本身够强时收益就没了。
-3. **按需求选**：
-   - 只要快、不改现有索引 → 默认（bge-small，0 成本，43% @3）
-   - 想显著提升第一屏、**且不想重建索引** → `rerank: fast` 或 `quality`（57% @3）
-   - 追求最好的召回池（@20 = 96%）→ 换 Qwen3-Embedding-0.6B（要全量重嵌，索引慢 13×）
-   - 最快且明显强于默认 → 换 bge-base-zh-v1.5（54% @3，查询 34 ms，索引慢 7×；fp16 可跑 DirectML，但曾见瞬时 TDR —— 已加探测+CPU 兜底）
-
-复现：`node tools/config-matrix.mjs`（自备三个嵌入模型 + 重排模型；缺哪个自动跳过对应行）。
-
-### 开源语料复现（任何一个仓库都能跑）
-
-上表是早期在一个私有 Java 业务模块上测的。为了能被任意人复现，仓库里另带了一份**开源语料**的题库：
-
-| 项 | 值 |
-|---|---|
-| 语料 | [`macrozheng/mall`](https://github.com/macrozheng/mall)（Spring Boot 电商示例）→ **665 文件 / 2626 块** |
-| 题库 | `tools/cases/oss-mall-30.json`（30 题中文自然语言，答案 = 仓库里真实存在的类/参数，已用 `tools/verify-cases.mjs` 全量核验） |
-| 实测（bge-small-zh-v1.5，fp16/DirectML） | 文档嵌入 **63.3 s**（24 ms/块）；**hit@3 = 13/30（43%）**、hit@8 = 17/30、hit@40 = 26/30 |
-
-`hit@3 43%` 与私有语料上测到的同模型结果**一致**，说明这套方法不是只对某一个仓库成立。
-
-```bash
-# 1) 建纯全文索引（秒级，不补算向量）
-node tools/build-oss-index.mjs /path/to/your-repo
-# 2) 换你自己的题库（格式：[[问题, 期望命中的文件路径片段, 依据], ...]，先用 verify-cases 核一遍）
-node tools/verify-cases.mjs tools/cases/oss-mall-30.json /path/to/your-repo
-# 3) 跑各模型对照（会顺带把文档向量按语料缓存到 %TEMP%）
-node tools/ab-embedding-models.mjs --index <上一步输出的 index.db> --cases tools/cases/oss-mall-30.json
-# 4) 全配置矩阵（必须显式 --index：题库与索引必须同一语料）
-node tools/config-matrix.mjs --index <同一 index.db> --cases tools/cases/oss-mall-30.json
-```
+3. **纯远程没有离线语义检索**：服务端不可达时只剩 BM25（自动冷却 60 s 后重试）。
+   要永久纯关键词就把 `vectors` 设为 `off`。
 
 ## 文件结构
 
 ```
-index.js              插件入口：apply(ctx, config) + 四个工具定义 + 加载标记
+index.js              插件入口：apply(ctx, config) + 五个工具定义 + 加载标记
 lib/store.js          SQLite schema（files / chunks / chunks_fts / vectors / meta）
 lib/strategies.js     切块策略表（扩展名 → ast|heuristic|window）+ 配置覆盖解析
 lib/chunker.js        策略分发：ast → heuristic → window 降级链 + 固定窗口实现
 lib/chunk-ast.js      tree-sitter AST 切块（含 bufferSize 与 setLanguage 两个坑的处理）
 lib/chunk-heuristic.js 纯 JS 语法感知切块（括号深度 + 成员边界，零依赖）
 lib/hash.js           块内容哈希（单独成模块以避免循环依赖）
-lib/deps.js           依赖按需安装：embed / parser 两组、受管目录、修剪、解析器链
+lib/deps.js           parser 依赖按需安装：受管目录、修剪、解析器链
 lib/scan.js           仓库遍历、扩展名/目录过滤、两级指纹增量判定
 lib/query.js          查询 → 词项抽取（标识符 / 数字串 / 中文 n 元组）→ FTS5 MATCH
-lib/search.js         FTS5 + 向量 kNN → RRF 融合（k=20）
-lib/indexer.js        建库/增量编排（含向量补算、断点续跑、策略指纹强制重建）
-lib/embedder.js       可选嵌入层（onnxruntime-node + DirectML + 共享向量缓存）
-test.mjs              核心自测：建库/检索/增量/删除/降级/依赖层/切块策略（88 项）
-test-plugin.mjs       插件接口自测：注册面/错误路径/四工具真实调用（56 项）
-verify-install.mjs    装后验证：从已安装包跑通模块加载、工具注册、依赖解析（16 项）
-tools/fetch-model.mjs 模型下载器（**默认走 ModelScope**；逐文件校验 HTTP/字节数/下限，绝不把 0 字节当成功）
-tools/migrate-embedding-tag.mjs  升级 0.4.6 后一次性迁移历史向量缓存的 key 前缀
-tools/ab-embedding-models.mjs  嵌入模型对照（同一批块+同一批问题只换模型；--reuse 零成本重排）
-tools/rerank-eval.mjs          重排评测（固定候选池上量交叉编码器的净收益与延迟）
-tools/cases/oss-mall-30.json   103 题中文自然语言题库（每题含期望文件与依据，均已核验）
+lib/search.js         FTS5 + 远端 kNN → RRF 融合（k=20）
+lib/indexer.js        建库/增量编排（远端清单同步、切块指纹强制重建）
+lib/remote.js         远端服务客户端（索引同步 / 重排 / 状态）
+test.mjs              核心自测：建库/检索/增量/删除/切块策略/扫描排除
+test-plugin.mjs       插件接口自测：注册面/错误路径/五工具真实调用
+verify-install.mjs    装后验证：从已安装包跑通模块加载、工具注册、parser 依赖状态
+tools/build-oss-index.mjs  给任意仓库建纯全文索引（评测/演示用）
+tools/verify-cases.mjs     校验题库里的期望文件真实存在
+tools/remote-index-sync.mjs 手动触发远端索引同步
+tools/cases/oss-mall-30.json  开源语料题库（每题含期望文件与依据）
 ```
 
 ## 测试
 
 ```console
-node test.mjs --repo D:\Code\your-repo                                        # 核心：88/88
-node test-plugin.mjs --no-embed --repo D:\Code\your-repo                      # 契约与接口：56/56
-node verify-install.mjs                                                  # 装后验证（对已安装的包跑）
-
-# 避免重负载：加 --model-dir D:\nonexistent-model 即"模型关闭"路径
-# 切块策略的真实仓库 A/B（真值来自语法树）：
-node <workspace>/dsh-comparison/strategy-ab.mjs D:\Code\demo\svc\saas
+node test.mjs --repo D:\Code\your-repo          # 核心：建库/检索/增量/切块/排除
+node test-plugin.mjs --repo D:\Code\your-repo   # 契约与接口：五个工具
+node test-remote.mjs                            # 远端地址/重排/配置校验（本地 HTTP 桩）
+node verify-install.mjs                         # 装后验证（对已安装的包跑）
 ```
 
 ## 按官方 skill 的合规性（cordis-plugin-development）
@@ -413,7 +316,7 @@ DSH 自带技能 `cordis-plugin-development`（位于 asar 内 `dsh-agent-preset
 | `export function apply(ctx, config)` | ✅ 单一导出形式，不混用 |
 | 服务依赖必须声明 | ✅ `export const inject = ['tools']` |
 | 导出 `name` | ✅ `code-index` |
-| 注册用 `ctx.effect` 并返回清理 | ✅ 三个工具注册在一个带标签的 effect 里，卸载即回收 |
+| 注册用 `ctx.effect` 并返回清理 | ✅ 五个工具注册在一个带标签的 effect 里，卸载即回收 |
 | 显示元数据 + 图标 | ✅ `locale/{zh,en}.json` 的 `meta.title/description` + `icon.svg` |
 | `exports` / `files` 白名单 | ✅ 含 `./package.json`、`./locale/*.json` |
 | 不要 import `@deepseek-ai/*` 值 | ✅ 源码零 DSH 内部导入（有断言守着） |
@@ -436,7 +339,7 @@ DSH 自带技能 `cordis-plugin-development`（位于 asar 内 `dsh-agent-preset
 1. **中文中间词命中依赖向量通道**。FTS5 的 unicode61 分词会把连续中文切成一个整词（`退款超限校验` 是一个 token），所以中文词项用前缀查询只能命中开头；中间词要靠向量补。
 2. **切块边界质量取决于策略**。默认按文件类型查表：`.java/.js/.ts/.tsx` → `ast`（需按需装 `parser` 组），
    `.vue/.xml/.sql/.md` 等 → `window`，其它 → `heuristic`。换策略会**自动全量重建**索引（见 INSTALL.md §2'）。
-3. **依赖体积**：`embed` 组 661 MB → 修剪后 264 MB；`parser` 组 41 MB。两者都**按需安装**，装插件本身只 50 KB。
+3. **依赖体积**：`parser` 组约 61 MB，**按需安装**；装插件本身只约 150 KB（无本地模型）。
 4. **需要 Node ≥ 22.19 或 ≥ 24**（`node:sqlite` 免 flag 可用）。
 5. **@1 精度**：实测 RRF 在 rank 1 上不如纯通道（向量 18% > FTS5 15% > RRF 5%），所以默认返回 top-10；若你要"最可能的那一个"，用 `mode="vector"`。
 6. 改动插件代码后**需要重启 app**：cordis 不会重新 import 已加载的模块，配置热加载只对已存在的行生效。

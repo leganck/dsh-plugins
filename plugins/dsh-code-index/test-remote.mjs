@@ -1,14 +1,11 @@
 /**
- * 远端推理的**行为**测试：不发真网络、不需要模型，用本地 HTTP 桩验证协议与降级。
+ * 远端服务的行为测试：不发真网络，用本地 HTTP 桩验证地址解析、重排与配置校验。
  *
- * 为什么必须有这一层：远端的失败模式几乎都是**静默**的 —— 连不上、超时、服务端没就绪、
- * 向量标签对不上。它们都不该让检索失败，但也都不该被当成"正常"。这里逐条钉住：
+ * 0.10.0 remote-only：向量嵌入与 kNN 都在服务端，客户端不再有远端嵌入器；
+ * 这里守住的是：
  *   ① 地址解析（base / 带 /embed 后缀 / 非法 URL）
- *   ② 握手：服务端自述的 tag / providers / rerank_ready 被正确采用
- *   ③ 响应解码：vectors_b64 与 vectors 两种形态都要能吃
- *   ④ 超时与 5xx → 报出**哪种**失败，不吞
- *   ⑤ 降级：标签一致才回退本机；标签不一致**必须拒绝**（否则两种向量混进一个索引）
- *   ⑥ 配置校验：选远端却没给地址、未知键、rerankRemote 复用 remote.url、已移除键的迁移提示
+ *   ② 重排握手与失败可见（rerank_ready=false 时不发无谓请求）
+ *   ③ 配置校验：vectors=auto/remote/off、缺地址、未知键、已移除键的迁移提示
  *
  * 用法：node test-remote.mjs
  */
@@ -20,7 +17,7 @@ import http from 'node:http'
 // 必须在动态 import 插件之前隔离 DSH_HOME（插件在模块导入时写加载标记）
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-remote-home-'))
 
-const { endpointsOf, createRemoteEmbedder, createRemoteReranker, RemoteError } = await import('./lib/remote.js')
+const { endpointsOf, createRemoteReranker, RemoteError } = await import('./lib/remote.js')
 const { apply } = await import('./index.js')
 
 let pass = 0
@@ -34,6 +31,7 @@ function check(label, cond, extra = '') {
     console.log(`  ❌ ${label}${extra ? '  — ' + extra : ''}`)
   }
 }
+
 const near = (a, b, tol = 1e-6) => Math.abs(a - b) <= tol
 
 /** 测试用向量：dim=4，逐条可区分（第 0 维 = 序号，其余递推） */
@@ -89,28 +87,7 @@ async function makeStub(opts = {}) {
   })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const url = `http://127.0.0.1:${server.address().port}`
-  return { url, state, close: () => new Promise((r) => server.close(r)) }
-}
-
-/** 本机嵌入器替身：只记录调用、给可预测的向量，不加载模型 */
-function fakeLocal(tag, { ok = true, reason = 'fake' } = {}) {
-  const calls = []
-  return {
-    calls,
-    get ok() {
-      return ok
-    },
-    reason,
-    modelTag: tag,
-    dim: 4,
-    backend: 'fake-local',
-    modelFile: 'fake.onnx',
-    cacheEntries: 0,
-    async embed(texts) {
-      calls.push(texts.length)
-      return texts.map((_, i) => vecFor(100 + i))
-    },
-  }
+  return { url, state, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r) }) }
 }
 
 // ---------------------------------------------------------------- ① 地址解析
@@ -132,90 +109,6 @@ console.log('\n[1] 地址解析')
     }
     check(`拒绝非法地址 ${JSON.stringify(bad)}`, threw instanceof RemoteError, String(threw))
   }
-}
-
-// ---------------------------------------------------------------- ②③ 握手与解码
-console.log('\n[2] 握手与响应解码')
-{
-  const stub = await makeStub()
-  const emb = await createRemoteEmbedder({ url: stub.url, fallbackLocal: false, log: () => {} })
-  check('握手成功', emb.ok === true, emb.reason)
-  check('采用服务端自述的 tag', emb.modelTag === 'bge-base-zh-v1.5-deadbeef-fp16', emb.modelTag)
-  check('tag 来源标记为 server', emb.remote.tagSource === 'server', emb.remote.tagSource)
-  const vecs = await emb.embed(['a', 'b', 'c'], { useCache: false })
-  check('解出 3 条向量', vecs.length === 3)
-  check('维度来自 dim 字段（4）', vecs[0].length === 4, String(vecs[0]?.length))
-  check('第一条向量内容正确', near(vecs[0][0], 0) && near(vecs[0][1], 0.1), Array.from(vecs[0]).join(','))
-  check('顺序与输入一致（第 2 条 = 1.x）', near(vecs[1][0], 1), Array.from(vecs[1]).join(','))
-  await stub.close()
-
-  const stub2 = await makeStub({ arrayVectors: true })
-  const emb2 = await createRemoteEmbedder({ url: stub2.url, fallbackLocal: false, log: () => {} })
-  const v2 = await emb2.embed(['x'], { useCache: false })
-  check('vectors 数组形态也能吃', v2.length === 1 && near(v2[0][0], 0))
-  await stub2.close()
-
-  const stub3 = await makeStub({ noTag: true })
-  const emb3 = await createRemoteEmbedder({ url: stub3.url, fallbackLocal: false, log: () => {} })
-  check('服务端无 tag 且未配置 → 明确拒绝（不猜标签）', emb3.ok === false && /tag/.test(emb3.reason ?? ''), emb3.reason)
-  const emb4 = await createRemoteEmbedder({ url: stub3.url, tag: 'explicit-tag', fallbackLocal: false, log: () => {} })
-  check('显式配置 tag 时可继续', emb4.ok === true && emb4.modelTag === 'explicit-tag', emb4.reason)
-  await stub3.close()
-}
-
-// ---------------------------------------------------------------- ④ 失败可见
-console.log('\n[3] 失败必须说清是哪种')
-{
-  const stub = await makeStub({ embed500: true })
-  const emb = await createRemoteEmbedder({ url: stub.url, fallbackLocal: false, log: () => {} })
-  let err = null
-  try {
-    await emb.embed(['a'], { useCache: false })
-  } catch (e) {
-    err = e
-  }
-  check('embed 500 → 抛 RemoteError 并带 http-error', err instanceof RemoteError && err.code === 'http-error', String(err?.code))
-  await stub.close()
-
-  const stubSlow = await makeStub({ slowGet: true })
-  const t0 = Date.now()
-  const embSlow = await createRemoteEmbedder({ url: stubSlow.url, timeoutMs: 400, fallbackLocal: false, log: () => {} })
-  const ms = Date.now() - t0
-  check('探活超时 → 不 ok，且理由含"连不上"', embSlow.ok === false && /连不上/.test(embSlow.reason), embSlow.reason)
-  check('超时按配置生效（<3 s）', ms < 3000, `${ms} ms`)
-  await stubSlow.close()
-
-  const embDead = await createRemoteEmbedder({ url: 'http://127.0.0.1:9', timeoutMs: 500, fallbackLocal: false, log: () => {} })
-  check('端口不通 → 不 ok 且给出地址', embDead.ok === false && String(embDead.reason).includes('127.0.0.1:9'), embDead.reason)
-}
-
-// ---------------------------------------------------------------- ⑤ 降级规则
-console.log('\n[4] 降级只在标签一致时发生')
-{
-  const stub = await makeStub()
-  const sameTag = 'bge-base-zh-v1.5-deadbeef-fp16'
-  const localOk = fakeLocal(sameTag)
-  const emb = await createRemoteEmbedder({ url: stub.url, fallbackLocal: true, localFactory: async () => localOk, log: () => {} })
-  // 让远端 embed 失败
-  const stubBroken = await makeStub({ embed500: true })
-  const embB = await createRemoteEmbedder({ url: stubBroken.url, fallbackLocal: true, localFactory: async () => fakeLocal('different-tag'), log: () => {} })
-  const okVecs = await emb.embed(['a', 'b'], { useCache: false })
-  check('标签一致时正常走远端（未触发回退）', okVecs.length === 2 && emb.remote.fallbackUsed === 0)
-  let refused = null
-  try {
-    await embB.embed(['a'], { useCache: false })
-  } catch (e) {
-    refused = e
-  }
-  check('标签不一致 → 拒绝回退（抛错而不是偷偷用本机）', refused instanceof RemoteError && /标签/.test(refused.message), String(refused?.message))
-  await stub.close()
-  await stubBroken.close()
-
-  // 远端探活就失败 + 标签一致 → 直接用本机
-  const localSame = fakeLocal(sameTag)
-  const embDown = await createRemoteEmbedder({ url: 'http://127.0.0.1:9', timeoutMs: 300, tag: sameTag, fallbackLocal: true, localFactory: async () => localSame, log: () => {} })
-  check('连不上但标签一致 → 回退本机', embDown.ok === true && embDown.backend === 'fake-local', String(embDown.reason))
-  check('回退时记下原因', typeof embDown.fallbackReason === 'string' && embDown.fallbackReason.length > 0)
 }
 
 // ---------------------------------------------------------------- ⑥ 重排
@@ -291,4 +184,4 @@ console.log('\n[6] 配置校验（apply 会大声失败）')
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
-process.exit(fail === 0 ? 0 : 1)
+process.exitCode = fail === 0 ? 0 : 1
