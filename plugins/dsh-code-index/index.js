@@ -33,7 +33,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.1'
+export const BUILD = '2026-10-18.2'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -1054,7 +1054,9 @@ function applyInner(ctx, rawConfig = {}) {
           `  覆盖 ${s.files} 文件 / ${s.chunks} 块${remoteMode ? '' : ` / ${s.vectors} 向量`}`,
           `  最后建库：${store.getMeta('last_build_at') ? new Date(Number(store.getMeta('last_build_at'))).toLocaleString() : '从未'}`,
           remoteMode
-            ? `  向量位置：远端 ${config.remote.url}（命名空间 ${namespaceFor(repoRoot, store)}；本机只保留 BM25）`
+            ? store.stats().chunks === 0
+              ? `  向量位置：远端 ${config.remote.url}（本机只保留 BM25；命名空间在建库后由切块指纹确定）`
+              : `  向量位置：远端 ${config.remote.url}（命名空间 ${namespaceFor(repoRoot, store)}；本机只保留 BM25）`
             : `  嵌入器（建库）：${describe(embedder)}${embedder.ok ? `（缓存 ${embedder.cacheEntries} 条）` : ''}`,
           // 建库与查询可以走不同后端（本机实测：DML 建库快 8×，但 batch=1 查询 CPU 更快）——
           // 两档只在"向量标签一致"时才有意义，所以标签必须并排显示
@@ -1063,8 +1065,12 @@ function applyInner(ctx, rawConfig = {}) {
           remoteMode ? '' : `  索引向量模型：${store.getMeta('embedding_tag') ?? '未记录（旧版本建的库）'}${embedder.ok ? `　当前模型：${embedder.modelTag}` : ''}`,
         ].filter(Boolean)
         if (remoteMode) {
-          // 远端状态是"索引到底建了多少"的唯一真相来源：本地只知道清单，不知道向量进度
-          try {
+          // 远端状态是"索引到底建了多少"的唯一真相来源：本地只知道清单，不知道向量进度。
+          // 但**本机还没建库时命名空间是 `@default`（没有 chunkFp）**，去问服务端必然 404 ——
+          // 那不是"远端坏了"，而是"还没开始"。直接给出下一步，别报错吓人。
+          if (store.stats().chunks === 0) {
+            lines.push('  远端索引：本机尚未建库（先跑 code_index，命名空间由切块配置的指纹决定）')
+          } else try {
             const rs = await getRemoteIndex().status(namespaceFor(repoRoot, store))
             lines.push(
               `  远端索引：revision ${rs.revision}；${rs.chunks} 块 / ${rs.vectors} 向量（覆盖 ${((rs.coverage ?? 0) * 100).toFixed(0)}%）；待嵌 ${rs.pending ?? '?'}`,
@@ -1158,6 +1164,13 @@ function applyInner(ctx, rawConfig = {}) {
             if (tail.length) lines.push(`npm 输出尾部：${tail.join(' | ')}`)
           }
           detail = { action, group, ok: r.ok }
+          // 装完立刻让**本进程**也能用上：chunk-ast 会缓存"解析器加载失败"的结果，
+          // 不清的话本次会话里仍然一直在走 heuristic，看起来像"装了没用"（实测踩到）。
+          if (r.ok) {
+            const { resetParserCache } = await import('./lib/chunk-ast.js')
+            resetParserCache()
+            lines.push('已重置解析器缓存：后续建库立即按 AST 切块（无需重启）')
+          }
         } else if (action === 'prune') {
           const p = pruneForeignPlatforms(depsDir)
           lines.push(`已移除 ${p.removed.length} 个非本平台目录（保留 ${p.kept}），回收 ${(p.freedBytes / 1048576).toFixed(1)} MB`)

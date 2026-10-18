@@ -17,6 +17,32 @@ import crypto from 'node:crypto'
 import { chunkFile, bodyForEmbedding } from './chunker.js'
 import { sha256 } from './hash.js'
 import { walkRepo, diffFiles, readForIndex, DEFAULT_INCLUDE, DEFAULT_EXCLUDE_DIRS, DEFAULT_MAX_FILE_BYTES } from './scan.js'
+import { resolveChunkConfig } from './strategies.js'
+import { getParser } from './chunk-ast.js'
+
+/**
+ * 本仓库**实际会用到、且确实加载成功**的 AST 语法（用于切块指纹）。
+ *
+ * 按扩展名去重：一个仓库几千个文件，扩展名通常只有几十种。
+ * 加载不到的语法**不计入** —— 那种情况下该文件仍旧走 heuristic，指纹应保持原样，
+ * 不要因为"这台机器缺依赖"就把命名空间换掉。
+ */
+function usedAstGrammars(scanned, chunking, depsDir, depsFallbackDirs) {
+  const needed = new Set()
+  const seen = new Set()
+  for (const f of scanned) {
+    const ext = path.extname(f.rel).toLowerCase()
+    if (seen.has(ext)) continue
+    seen.add(ext)
+    const cfg = resolveChunkConfig(f.rel, chunking)
+    if (cfg.strategy === 'ast' && cfg.grammar) needed.add(cfg.grammar)
+  }
+  const ok = []
+  for (const grammar of [...needed].sort()) {
+    if (getParser({ depsDir, depsFallbackDirs, grammar }).ok) ok.push(grammar)
+  }
+  return ok
+}
 
 /**
  * 索引库路径。
@@ -91,7 +117,25 @@ export async function buildIndex({
    * "没变化"→ 只重切少数变动文件 → 直接落进上面那个混合状态。
    * 这是实测踩到的：对三个既有索引做迁移重建时，最大的那个只重切了 14 个文件。
    */
-  const fingerprint = sha256(JSON.stringify(chunking ?? {}))
+  // 扫描先做：切块能力要从"这个仓库有哪些扩展名"推，而不是从"这台机器装了什么"推。
+  // 否则给一个 Go 仓库装 tree-sitter 也会改指纹 → 换命名空间 → 白白重嵌全部向量。
+  const scanned = walkRepo(repoRoot, opts)
+  const astCapability = usedAstGrammars(scanned, chunking ?? {}, depsDir, depsFallbackDirs)
+  /**
+   * 切块指纹 = 配置 **+ 本仓库实际会用到的可用语法**。
+   *
+   * 为什么要带上语法：装了 tree-sitter 之后同一个文件会切出**不同的块边界**；只哈希配置
+   * （`strategy:'auto'`）的话，装依赖前后指纹不变 → 库里以及服务端同一个命名空间里混进
+   * 两种粒度的块（旧 heuristic + 新 ast），而且没有任何信号。这正是上面那段注释在防的事，
+   * 只是原先漏了"能力"这一维。
+   *
+   * 为什么不是"全部可用语法"：Go 项目用不到 AST，装个依赖就把命名空间换掉是纯浪费。
+   * 所以只写"本仓库有对应扩展名、且该语法确实加载成功"的那些；用不到时为 undefined，
+   * JSON.stringify 会丢掉字段 → 与旧指纹完全一致，老索引不受影响。
+   */
+  const fingerprint = sha256(
+    JSON.stringify({ ...chunking, ast: astCapability.length ? astCapability : undefined }),
+  )
   const prevFingerprint = store.getMeta('chunk_fingerprint')
   const hasIndexedFiles = store.stats().files > 0
   const strategyChanged = hasIndexedFiles && prevFingerprint !== fingerprint
@@ -120,7 +164,6 @@ export async function buildIndex({
   // 记录产出这批向量的模型；没有可用嵌入器时**不写**（写 null 会让下次误判成"换过模型"）
   if (embeddingTag) store.setMeta('embedding_tag', embeddingTag)
 
-  const scanned = walkRepo(repoRoot, opts)
   const known = store.fileState()
   const { changed, removed } = diffFiles(scanned, known)
 
