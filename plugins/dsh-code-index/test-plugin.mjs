@@ -164,7 +164,9 @@ const cases = [
   // 排除：写错会静默失效 —— 必须拒绝
   ['exclude 不是数组', { exclude: 'node_modules' }, /exclude/],
   ['exclude 元素为空', { exclude: [''] }, /exclude/],
-  ['exclude 用绝对路径', { exclude: ['D:/Code/legacy'] }, /绝对路径/],
+  // 用 path.resolve 造平台相关的绝对路径：Windows 是 D:\legacy、Linux 是 /legacy，
+  // 写死 'D:/Code/legacy' 在 Linux 上其实是相对路径，CI 就会假失败（已踩到）
+  ['exclude 用绝对路径', { exclude: [path.resolve('/legacy')] }, /绝对路径/],
   ['exclude 含 ..', { exclude: ['../legacy'] }, /\.\./],
   ['非法 chunking.strategy', { advanced: { chunking: { strategy: 'nope' } } }, /strategy/],
 ]
