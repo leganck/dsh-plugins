@@ -28,9 +28,9 @@ export const GRAMMARS = {
   typescript: { pkg: 'tree-sitter-typescript', pick: 'typescript' },
   tsx: { pkg: 'tree-sitter-typescript', pick: 'tsx' },
   groovy: { pkg: 'tree-sitter-groovy', pick: null },
-  go: { pkg: 'tree-sitter-go', pick: null },
-  python: { pkg: 'tree-sitter-python', pick: null },
-  rust: { pkg: 'tree-sitter-rust', pick: null },
+  go: { pkg: 'tree-sitter-go', pick: null, group: 'parser-go' },
+  python: { pkg: 'tree-sitter-python', pick: null, group: 'parser-python' },
+  rust: { pkg: 'tree-sitter-rust', pick: null, group: 'parser-rust' },
 }
 
 /** 默认参数（可被配置逐项覆盖）

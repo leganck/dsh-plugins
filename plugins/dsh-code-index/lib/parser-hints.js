@@ -76,7 +76,7 @@ export function detectMissingGrammars(scanned, chunking = {}, deps = {}, isAvail
  * 把检测结果渲染成给模型/用户看的几行。
  * 文案刻意包含"影响什么、要下多大、装完会怎样"，否则用户无法判断该不该点。
  */
-export function renderParserHint(missing, { totalFiles = 0 } = {}) {
+export function renderParserHint(missing, { totalFiles = 0, vectorStore = 'local' } = {}) {
   if (!missing.length) return []
   const files = missing.reduce((n, m) => n + m.files, 0)
   const mb = missing.reduce((n, m) => n + (m.approxBytes || 0), 0) / 1048576
@@ -95,7 +95,11 @@ export function renderParserHint(missing, { totalFiles = 0 } = {}) {
   return [
     `💡 有 ${files}/${totalFiles} 个文件本可以按语法切块：${list}`,
     ...installLines,
-    '   影响：切块边界更整齐（块首落在函数中间的比例：heuristic 7.5% → ast 0.1%）；',
-    '   注意：装了会改变切块指纹 → 命名空间换新，但只有**正文真的变了**的块需要重嵌（内容哈希去重）。',
+    '   影响：切块边界更整齐（块首落在函数中间的比例：heuristic 7.5% → ast 0.1%）。',
+    // 两种模式都会因为"切块指纹变了"而重建索引，但代价不同，措辞必须分开 ——
+    // 本地用户看到"命名空间换新"只会困惑（那是远端存储的概念）。
+    vectorStore === 'remote'
+      ? '   代价：切块指纹变了 → 服务端命名空间换新；向量按内容哈希去重，只有正文真的变了的块需要重嵌。'
+      : '   代价：切块指纹变了 → 索引会全量重建；向量按内容哈希命中缓存，只有正文真的变了的块需要重算。',
   ]
 }
