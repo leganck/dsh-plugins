@@ -17,7 +17,7 @@
 | 服务端 kNN（16 万块 × 768 维，fp32） | — | **14.3 ms** | 470 MB 常驻内存；np16 会慢 30 倍，别用 |
 | 端到端混合检索（1,503 块） | 40–68 ms | **≈19 ms**（含往返） | 服务端拆分：embed 7.4 + knn 0.1 |
 | 端到端混合检索（**160,507 块**） | — | **p50 30 ms / p90 37.5 ms** | embed 7.7 + kNN 14.6；矩阵 493 MB |
-| 冷启（第一次查询建 493 MB 矩阵 + 首次计数） | — | 2.4 s | 之后为热路径 |
+| 冷启（第一次查询建 493 MB 矩阵 + 首次计数） | — | **25 ms**（已挪到启动期预热，日志 warmup: knn … 1752 ms） | 之前是 2.4 s；WARMUP=0 可还原 |
 | 单仓占用（16 万块） | — | 800 MB | 正文 332 MB + fp32 向量 468 MB |
 
 > 结论：**建库搬过来不划算（慢 23%），查询与重排划算**。默认让插件全本机，按需把
@@ -165,6 +165,7 @@ pip install --no-cache-dir --target ./pylib numpy tokenizers
 | `KNN_MAX_BYTES` | `2 GiB` | 内存矩阵 LRU 上限 |
 | `MAX_VECTORS_PER_LINEAGE` / `MAX_TOTAL_GB` | `500000` / `20` | 存储上界（超限 507） |
 | `RETENTION_DAYS` | `30` | 无人引用的 blob/vector 保留期 |
+| `WARMUP` | `1` | 启动后台预热（嵌入会话、重排内核、最大命名空间的 kNN 矩阵与计数）：把"重启后第一个查询"从 2.4 s 降到 **25 ms**；`0` 关闭 |
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
 | `API_KEY` | 空 | 设了则所有 `POST` 要求 `Authorization: Bearer` |
 | `FAKE_EMBED` | 空 | `1` = 不加载模型（自测用） |

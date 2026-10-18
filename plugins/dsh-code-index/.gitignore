@@ -6,3 +6,6 @@ model/
 # 0.6.0 起包内含嵌入模型（int8 97.7 MB / 压缩后约 54 MB），提交会让仓库永久膨胀。
 # 只保留 release/SHA256SUMS.txt 作为版本与校验记录。
 release/*.tgz
+
+# build-release.mjs 的临时目录
+.pack-tmp-*/
