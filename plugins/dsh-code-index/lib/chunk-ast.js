@@ -54,6 +54,9 @@ function languageOf(mod, pick) {
 /**
  * 取得（并缓存）某语法的 parser。任何失败都返回 {ok:false, reason}，由调用方决定降级。
  */
+/** 语法包所属的安装组（按语言分组，见 lib/deps.js 的 DEP_GROUPS） */
+const groupOfGrammar = (grammar) => GRAMMARS[grammar]?.group ?? 'parser'
+
 export function getParser({ depsDir, depsFallbackDirs = [], grammar }) {
   // **必须兜底到受管目录**：插件的 `embedding.depsDir` 默认是 null，传下来就是 undefined；
   // 不兜底的话解析器链为空 → 永远解析不到 → AST 策略会**静默退化成启发式**
@@ -78,9 +81,11 @@ export function getParser({ depsDir, depsFallbackDirs = [], grammar }) {
     } catch (e) {
       result = {
         ok: false,
+        // 只留第一行：`Cannot find module` 后面会跟一大段 Require stack，塞进建库结果里全是噪声
         reason:
-          `语法解析依赖不可用（${spec?.pkg ?? grammar}）: ${String(e?.message ?? e).slice(0, 140)}` +
-          `——按需安装请用 code_index_deps action=install group=parser`,
+          `语法解析依赖不可用（${spec?.pkg ?? grammar}）: ${String(e?.message ?? e).split('\n')[0].slice(0, 120)}`
+          + ` —— 装语法：code_index_deps action=install group=${groupOfGrammar(grammar)}`
+          + '（group=parser-extra 可一次装齐 go/python/rust）',
       }
     }
   }

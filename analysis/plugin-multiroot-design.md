@@ -945,3 +945,148 @@ function audit(cfg, exec, tool, root, targetPath, bytes) {
 | 6 | `TypertCodec` 的 `{mode:'src-json'}` 分支是否免 zod 工厂（L2 前提） | 读 `dsh-typert-protocol` 的 codec 分支 + 手写一个 method 试挂 | L2 改用 `webServer.register`（+2 天，自己限根） |
 
 > 1–4 决定 Host 半能不能成立（预计 30 分钟）；5–6 只影响 UI 档位。
+
+---
+
+## 附录 C：如果改沙箱本体，到底要改多少
+
+> 结论先行：**不大**。多根在沙箱层的语义只需要"一个字段 + 一个函数"，而且下游有一半是免费的；真正的工作量集中在 **Windows ACL 的接线（2–3 人日，纯 JS，不用写原生代码）**，以及"根从哪来"的会话状态（严格说不属于沙箱）。
+
+### C.1 为什么小：`workspace-write` 的语义只有一个定义处
+
+```
+writableRoots(policy)  ← 唯一真源（dsh-sandbox/lib/index.js:166-173）
+   ├─ dsh-fs-sandbox   写围栏：已经 for 循环逐个 isPathUnder（:160-164）→ 免费
+   ├─ Seatbelt 方言    已按 writableRoots 拼 subpath（sandbox-local:65-75）→ 免费
+   ├─ bwrap 方言       --bind policy.workspaceRoot（:22-39）→ 加个循环
+   ├─ Landlock 方言    readWrite.push(policy.workspaceRoot)（:41-52）→ 加个循环
+   └─ Windows ACL      单 workspace + 单 write-sid（:357-382）→ 接线活
+```
+
+所以"改成多根"在类型上就是：
+
+```ts
+interface SandboxExecutionPolicy {
+  mode: SandboxMode
+  workspaceRoot: string            // 保留 = roots[0]，兼容旧 provider
+  workspaceRoots?: readonly string[]   // 新增：可选的额外根
+  sessionId?: SessionId
+}
+function writableRoots(policy) {
+  if (policy.mode !== 'workspace-write') return []
+  return [...new Set([policy.workspaceRoot, ...(policy.workspaceRoots ?? []), '/tmp', tmpdir()].map(canonicalPath))]
+}
+```
+
+### C.2 逐包改动与工作量
+
+| 包 | 改什么 | 证据 | 人日 |
+|---|---|---|---|
+| `dsh-sandbox` | 类型加可选字段；`writableRoots` 合并 | `lib/index.js:166-173` | 0.5 |
+| `dsh-fs-sandbox` | **零**（已循环 writableRoots） | `lib/index.js:160-164` | 0 |
+| `dsh-sandbox-policy` | `resolve()` 产出多根；提示词渲染多根 | `lib/index.js:141-148, 72-83` | 1–1.5（含根的来源） |
+| `dsh-sandbox-local` | bwrap/Landlock 循环（各几行）；Windows 相关见下 | `:22-52` | 0.5 |
+| `dsh-sandbox-local`（Windows） | `windowsAclRunnerArgv` 发多对 `--workspace/--write-sid`；`materializeAclGrant` 每根一条 grant；temp 键改多根签名 | `:357-444` | 2–3 |
+| `dsh-sandbox-windows-acl` | runner 解析重复参数；`AclSandbox` 的 `writeSid` → `writeSids[]`；`createRestrictedToken` **本来就收数组** | `runner.js:16-19, 59-109, 143-150`；`types-*.js:1290, 1277-1286` | （含上） |
+| 测试 | 围栏多根、runner 多根、provider 一致性 | — | 1–2 |
+| **合计（完整多根）** | | | **5–7 人日** |
+
+关键证据：`createRestrictedToken(api, token, logonSid, [writeSidPtr, tempWriteSidPtr].filter(Boolean), …)` 已经接受 **SID 数组**（`types-Cl_DXjhk.js:1290`），`AclWriteGrant.add(path, standing)` 本来就按路径逐条 grant（`:983-986`）。所以 Windows 不是"重写沙箱"，而是"把单元素数组改成 N 元素、把单对 CLI 参数改成多对"。
+
+### C.3 三种改造深度（按投入排）
+
+| 深度 | 改什么 | 得到什么 | 代价 |
+|---|---|---|---|
+| **C（= 插件路线）** | 沙箱**零改动** | 插件工具可跨根（自报 policy）；内置工具仍单根 | 0 人日 |
+| **A（最小本体改动）** | `dsh-sandbox` 类型 + `writableRoots` + `sandbox-policy` 从配置读 `additionalRoots` | **内置 `write`/`edit` 直接支持多个根**（fs 围栏免费）；`pwsh` 仍单根（provider 只认 `workspaceRoot`，安全地失败关闭） | **1.5–2 人日** |
+| **B（完整本体多根）** | A + bwrap/landlock/Windows 方言 + 会话根状态 | fs 与 shell 全多根；所有 provider 一致 | **5–7 人日** |
+
+A 的语义是"**写工具多根、命令单根**"——不完美但不撒谎：shell 写根外仍会被 ACL 拒。对"AI 主要用 read/write/edit、偶尔跑命令"的场景，A 的性价比很高。
+
+### C.4 真正的成本不在沙箱，在"根从哪来"和"怎么发版"
+
+1. **根的来源**：`resolve()` 现在只读 `session.header.cwd`（`dsh-sandbox-policy:145`）。要让它返回多个根，必须有"会话根集合"——这就要动 `dsh-working-directory` 的投影 + 事件 + 迁移（1–1.5 人日），或者先用部署级配置 `additionalRoots`（0.5 人日，但没有"每个项目不同根"）。
+2. **发版**：DSH 桌面版是 `app.asar` 打包。改本体包要么走上游 PR，要么从源码构建，要么直接 patch asar 做验证——**每次应用升级都会覆盖**。代码 5 天 ≠ 上线 5 天，这条要单独评估。
+3. **兼容性**：把字段设计成**可选**（`workspaceRoots?`），旧 provider 只认 `workspaceRoot` → 行为退化为单根（fail-closed），不会变成安全漏洞；`resolve()` 继续返回 `workspaceRoot = roots[0]`，第三方插件不用改。
+
+### C.5 建议
+
+- **想立刻可用**：保持插件路线（C），零本体改动。
+- **想让内置工具也跨根、又不想大动**：先做 A（1.5–2 天），把 `additionalRoots` 接到现有 profile 配置；shell 仍单根，文档写清楚。
+- **想做到 Cursor 级一致**：做 B + 会话根集合 + UI（后者才是大头，见总报告 M2 的 ≈22 人日）。
+
+---
+
+## 附录 D：低成本替代方案——跨仓变更台账（推荐先做这个）
+
+> 触发场景：需求横跨多个仓库（依赖库、前端、服务），**多轮会话后忘了改过哪些仓库**。
+> 关键判断：这个痛点的主因是"**没有可信的跨仓变更记录**"，而不是"不能跨仓写"。前者 1–2 人日可解，后者才是 6–22 人日。
+
+### D.1 问题拆开看
+
+| 子问题 | 真实需求强度 | 最便宜的解 |
+|---|---|---|
+| 多轮后忘了改过哪些仓库/文件 | **每次都痛** | **变更台账**（git 为事实源 + 每轮注入一行摘要） |
+| 需要在依赖库/前端里**写**代码 | 偶尔 | 每仓库一个 subagent（内置 `subagent({cwd})`），或公共父目录，或终端 |
+| 跨仓读/搜 | 有 | 已经免费（绝对路径 + code-index `roots[]`） |
+| Cursor 式多根树/每根终端/跨根 @ | 弱 | 不做，或等本体 |
+
+### D.2 台账插件（`dsh-repo-ledger`）设计
+
+**目标**：任何时刻，模型和你都能看到"这次需求/这个会话树里，哪些仓库被改过、改了多少、基于哪个 commit"。
+
+数据源（双保险）：
+
+| 源 | 覆盖 | 成本 |
+|---|---|---|
+| `fs/observed` 事件（`target` + `actor`） | 所有走 `write`/`edit`/插件写工具的改动 | 0（插件监听） |
+| `git -C <repo> status --porcelain=v1 -z`（去抖后刷新） | **包括 shell/终端/外部改动**，最权威 | 每个仓库几 ms |
+| `git log --oneline <base>..HEAD` | 代理自己提交的 commit | 同上 |
+| 会话开始时的基线快照 | 区分"本来就脏"和"这次改的" | 一次 |
+
+作用域聚合（这是关键设计）：利用 `SessionHeader.parentSession` 把 **subagent 会话自动归到 root 会话**，台账按 root session 聚合——委托出去的子任务改了哪个仓库，主会话也看得见。
+
+注入（bounded）：
+
+```
+Cross-repo changes (root session): api 2 files (+18/-4); web 3 files (+120/-8); sdk 1 file (+6/-0).
+Untouched roots: infra, docs.
+```
+
+- 放在 `systemPrompt.context`，紧跟 `WORKING_DIRECTORY`；**无改动时不输出**。
+- 只给 repo 级别 + 文件计数 + 行数，细节用工具查（避免每轮灌 diff）。
+
+工具（只读）：
+
+```js
+repo_ledger({ action: 'list' | 'report', repo?, feature? })
+// list:  每个仓库 { id, path, branch, baseCommit, headCommit, dirtyFiles, added, deleted, lastTouchedAt }
+// report: markdown 摘要（含 per-repo git diff --stat），可直接贴给用户/写进 memory-archive
+```
+
+存储：`$DSH_HOME/repo-ledger/<rootSession>.json`（不进 session 日志）。仓库集合来源：`.dshworkspace.json` 的 `roots`，或插件 Config `repos: [{id,path}]`，或扫描 `D:/Projects`、`D:/oss` 下 depth≤2 的 `.git`。
+
+与现有插件的关系：`memory-archive` 负责"压缩后逐字内容可查"，台账负责"跨仓事实可查"；`code-index` 负责"代码在哪"。三者互补，不需要改任何一个。
+
+工作量：**1–2 人日**（git 解析 0.3 + 事件/去抖 0.3 + 注入 0.2 + 工具 0.3 + 基线/提交 0.3 + 测试 0.4）。
+
+### D.3 跨仓执行的三条零改造路径
+
+| 路径 | 怎么做 | 能力 | 代价 |
+|---|---|---|---|
+| **每仓库 subagent**（推荐） | 协调者会话用 `subagent({ cwd: 'D:/oss/api', prompt: '…' })`；子会话的 `header.cwd` 就是那个仓库 → 自己的写边界 | 子代理在各自仓库读写；协调者汇总；台账自动归并 | prompt 纪律；不能实时看子代理中间过程 |
+| 公共父目录 | 会话开在 `D:/Projects` | 读写全部子项目 | 权限过宽；跨盘无解；@/diff 噪声 |
+| 终端 | `terminal_open({ cwd: 'D:/oss/api' })` | 任意命令 | 无围栏，不建议长期 |
+
+### D.4 为什么这比多根插件更对
+
+1. **事实源是 git，不是模型记忆**：模型可能忘，`git status` 不会。
+2. **跨会话/跨压缩存活**：台账在插件存储里，压缩只影响消息，不影响事实。
+3. **零权限扩张**：只读 git + 注入文本；不改变写边界，不需要碰沙箱。
+4. **与 subagent 天然协作**：`parentSession` 让"委托出去的改动"自动回到主台账。
+
+### D.5 验收（模拟真实需求）
+
+1. 在 `api`、`web`、`sdk` 三个仓库各改一处（其中一处用 subagent 完成）；
+2. 跑 30 轮后问"这个需求改了哪些仓库"；
+3. 期望：即使会话被压缩过，`Cross-repo changes` 那行仍在，`repo_ledger report` 能给出三仓的 file/±/base commit 与 commit 列表。

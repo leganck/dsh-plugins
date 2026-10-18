@@ -34,7 +34,7 @@ import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
 import { renderParserHint } from './lib/parser-hints.js'
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.5'
+export const BUILD = '2026-10-18.6'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -849,7 +849,10 @@ function applyInner(ctx, rawConfig = {}) {
           `  切块策略：${Object.entries(r.strategies ?? {}).map(([s, n]) => `${s} ${n} 文件`).join('；') || '（本轮无变更文件）'}`,
           ...(config.chunking?.parserHint === 'off' || !r.parserMissing?.length
             ? []
-            : renderParserHint(r.parserMissing, { totalFiles: r.scannedFiles ?? r.scanned })),
+            : renderParserHint(r.parserMissing, {
+                totalFiles: r.scannedFiles ?? r.scanned,
+                vectorStore: config.vectorStore,
+              })),
           remoteMode
             ? `  向量位置：远端 ${config.remote.url}（命名空间 ${r.remote?.namespace ?? '-'}）`
             : `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,
