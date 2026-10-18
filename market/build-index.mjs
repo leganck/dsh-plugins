@@ -82,9 +82,14 @@ function build() {
     .map((d) => d.name)
     .sort()
 
-  const commit = sh(['rev-parse', 'HEAD'])
-  const commitTime = Number(sh(['show', '-s', '--format=%ct', 'HEAD']))
   const dirty = sh(['status', '--porcelain']) !== ''
+  /**
+   * 每个版本钉"**该插件目录最后一次改动的 commit**"，而不是全局 HEAD。
+   * 理由：索引文件本身也要提交，如果用 HEAD 就是鸡生蛋 —— 生成时钉 A，提交后 HEAD 变成 B，
+   * `--check` 永远不一致（CI 第一次就因为 publishTimestamp 差 9 秒失败）。
+   * 按目录取还顺带消除了"改个 README 就让三个插件都发新版"的churn。
+   */
+  const lastCommitOf = (dir) => sh(['log', '-1', '--format=%H %ct', '--', dir]).split(' ')
 
   const categories = new Map()
   const labels = new Map()
@@ -103,6 +108,8 @@ function build() {
       continue
     }
     const pres = presentationOf(pkg, dir)
+    const [commit, commitTimeRaw] = lastCommitOf(dir)
+    const commitTime = Number(commitTimeRaw)
     if (pres.warned.length) console.warn(`⚠️  ${pkg.name} 缺 ${pres.warned.join(' / ')}，已退化补齐`)
 
     // format 1 的声明形如 { <id>: { title: {en,zh} } } —— title 必须是**本地化对象**，不是裸字符串
@@ -150,13 +157,13 @@ function build() {
     },
     plugins,
   }
-  return { index, commit, commitTime, dirty }
+  return { index, dirty }
 }
 
-const { index, commit, dirty } = build()
+const { index, dirty } = build()
 const text = JSON.stringify(index, null, 2) + '\n'
 const digest = crypto.createHash('sha256').update(text).digest('hex').slice(0, 16)
-const summary = `plugins=${index.plugins.length} commit=${commit.slice(0, 8)} sha256:${digest}`
+const summary = `plugins=${index.plugins.length} sha256:${digest}`
 
 if (process.argv.includes('--print')) {
   process.stdout.write(text)
@@ -188,5 +195,6 @@ fs.mkdirSync(path.dirname(OUT), { recursive: true })
 fs.writeFileSync(OUT, text)
 console.log(`✅ ${path.relative(ROOT, OUT)}  ${summary}`)
 for (const p of index.plugins) {
-  console.log(`   ${p.name}@${p.versions[0].version}  ← git+${REPO_URL}#${commit.slice(0, 8)}&path:/${p.repository.directory}`)
+  const c = p.versions[0].source.commit
+  console.log(`   ${p.name}@${p.versions[0].version}  ← git+${REPO_URL}#${c.slice(0, 8)}&path:/${p.repository.directory}`)
 }
