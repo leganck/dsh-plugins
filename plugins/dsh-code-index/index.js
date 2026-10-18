@@ -953,7 +953,14 @@ function applyInner(ctx, rawConfig = {}) {
               ms: res.ms ?? null,
               coverage: res.coverage ?? null,
               elapsedMs: Date.now() - t0,
-              rerank: remoteRerank ? { applied: (res.hits ?? []).some((h) => h.rerankScore !== undefined), candidates: remoteRerank, where: 'remote' } : null,
+              rerank: remoteRerank
+                ? {
+                    applied: (res.hits ?? []).some((h) => h.rerankScore !== undefined),
+                    candidates: remoteRerank,
+                    where: 'remote',
+                    ms: res.ms?.rerank ?? null,
+                  }
+                : null,
               reason: res.reason ?? null,
             }
           } catch (e) {
