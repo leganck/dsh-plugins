@@ -201,8 +201,8 @@ check('未声明 inject 时 apply 会抛错（回归保护）', (() => {
     return /without inject/.test(e.message)
   }
 })())
-check('注册了 4 个工具', registry.size === 4, [...registry.keys()].join(','))
-for (const name of ['code_index', 'code_search', 'code_index_status', 'code_index_deps']) {
+check('注册了 5 个工具', registry.size === 5, [...registry.keys()].join(','))
+for (const name of ['code_index', 'code_search', 'code_index_status', 'code_map', 'code_index_deps']) {
   check(`包含 ${name}`, registry.has(name))
 }
 const search = registry.get('code_search')

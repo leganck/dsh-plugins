@@ -40,6 +40,25 @@ export function sqliteDriver() {
   return _DatabaseSync
 }
 
+/**
+ * 从块正文里抽一个"签名"用来在目录地图里指路：
+ * 优先 `func/fn/function/class/interface/def/type/struct` 后面的名字，
+ * 抽不到就退回第一行有内容的代码（注释与空行跳过）。
+ */
+function signatureOf(body) {
+  const lines = String(body ?? '').split('\n')
+  const pat = /(?:^|\s)(?:func\s+(?:\([^)]*\)\s*)?|fn\s+|function\s+|class\s+|interface\s+|def\s+|type\s+|struct\s+)([A-Za-z_$][\w$]*)/ 
+  for (const line of lines.slice(0, 40)) {
+    const m = line.match(pat)
+    if (m) return m[1]
+  }
+  for (const line of lines) {
+    const s = line.trim()
+    // package xxx 这类行信息量太低，指路时不如再往下找一行
+    if (s && !s.startsWith('//') && !s.startsWith('#') && !s.startsWith('*') && !s.startsWith('/*') && !s.startsWith('package ') && !s.startsWith('import ') && !s.startsWith('#include') && !s.startsWith('using ')) return s.slice(0, 48)
+  }
+  return ''
+}
 export class Store {
   static open(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true })
@@ -241,6 +260,56 @@ export class Store {
   }
 
   // ---- 统计 ----
+  /**
+   * 目录地图：回答"这个仓库大概是怎么组织的、该去哪个目录找"。
+   *
+   * 对应 Cursor 的 `GetHighLevelFolderDescription`。它那边用模型生成目录摘要；
+   * 这里**纯结构化推导**（文件数 + 语言构成 + 块数 + 代表符号），不花推理成本、也不会编造。
+   * 一次全扫（files + chunks 聚合），16 万块实测百毫秒级，属于"冷启动用一次"的量级。
+   */
+  dirMap({ depth = 2, dirs = 24, perDir = 2 } = {}) {
+    const files = this.db.prepare('select path from files').all()
+    const perPath = new Map(
+      this.db.prepare('select path, count(*) as n from chunks group by path').all().map((r) => [r.path, Number(r.n)]),
+    )
+    const agg = new Map()
+    for (const { path: p } of files) {
+      const parts = p.split('/')
+      const dir = parts.length > depth ? `${parts.slice(0, depth).join('/')}/` : parts.length > 1 ? `${parts.slice(0, -1).join('/')}/` : './'
+      let a = agg.get(dir)
+      if (!a) {
+        a = { dir, files: 0, exts: new Map(), chunks: 0, top: [] }
+        agg.set(dir, a)
+      }
+      a.files++
+      const dot = p.lastIndexOf('.')
+      const ext = dot > p.lastIndexOf('/') ? p.slice(dot) : '(无扩展名)'
+      a.exts.set(ext, (a.exts.get(ext) ?? 0) + 1)
+      const n = perPath.get(p) ?? 0
+      a.chunks += n
+      if (n > 0) a.top.push({ path: p, chunks: n })
+    }
+    const out = [...agg.values()]
+      .sort((a, b) => b.chunks - a.chunks || b.files - a.files)
+      .slice(0, dirs)
+      .map((a) => ({ dir: a.dir, files: a.files, chunks: a.chunks, exts: [...a.exts.entries()].sort((x, y) => y[1] - x[1]).slice(0, 3), top: a.top.sort((x, y) => y.chunks - x.chunks).slice(0, perDir) }))
+
+    // 代表符号：每个目录取 top 文件的第一块，抽出函数/类/接口名（抽不到就退回第一行有效代码）
+    const wanted = out.flatMap((d) => d.top.map((t) => t.path))
+    if (wanted.length) {
+      const ph = wanted.map(() => '?').join(',')
+      const rows = this.db.prepare(`select path, body from chunks where path in (${ph}) order by path, start_line`).all(...wanted)
+      const first = new Map()
+      for (const r of rows) if (!first.has(r.path)) first.set(r.path, r.body)
+      for (const d of out) {
+        for (const t of d.top) {
+          t.symbol = signatureOf(first.get(t.path) ?? '')
+        }
+      }
+    }
+    return out
+  }
+
   stats() {
     const one = (sql) => Number(Object.values(this.db.prepare(sql).get())[0])
     return {

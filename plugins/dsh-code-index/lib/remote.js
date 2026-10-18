@@ -563,12 +563,12 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
       }
     },
     /** 服务端 kNN（可选在同一请求里做重排） */
-    async search(namespace, query, { k = 10, tag = null, rerankCandidates = 0 } = {}) {
+    async search(namespace, query, { k = 10, tag = null, rerankCandidates = 0, embedText = null } = {}) {
       try {
         return await client.request(
           'POST',
           `${base}/v1/search`,
-          { namespace, query, k, tag, rerank: rerankCandidates ? { candidates: rerankCandidates } : undefined },
+          { namespace, query, k, tag, embedText: embedText ?? undefined, rerank: rerankCandidates ? { candidates: rerankCandidates } : undefined },
           { timeoutMs: Math.max(timeoutMs, 15000) },
         )
       } catch (e) {

@@ -29,6 +29,36 @@ function loadMatrix(store) {
 }
 
 /**
+ * 「当前文件锚定」的后处理：排除正在编辑的文件自身 + 同目录候选加权。
+ *
+ * 对应 Cursor 请求里的 `CurrentFileInfo{contents, sha256, top_chunks}`。它那边由服务端
+ * 在重排时考虑"用户眼前是什么"；我们这里做两件能直接验证的事：
+ *   ① 排除当前文件 —— 问"哪儿实现了 X"时，答案不该是用户正在看的那个文件；
+ *   ② 同目录加权 —— 相关实现通常落在同一个 package 下（实测 energy 里 window/ 的窗口逻辑
+ *      彼此相邻），加一点点权重即可把邻居顶上来，不至于压过明显更相关的命中。
+ */
+function curate(entries, pathOf, { excludePaths = [], boostPrefix = null, boostWeight = 0.004 } = {}) {
+  let out = entries
+  if (excludePaths?.length) {
+    const ex = new Set(excludePaths)
+    out = out.filter((e) => !ex.has(pathOf(e)))
+  }
+  let neighbors = 0
+  if (boostPrefix) {
+    for (const e of out) {
+      const p = pathOf(e)
+      if (p && p.startsWith(boostPrefix)) {
+        e.score += boostWeight
+        e.neighbor = true
+        neighbors++
+      }
+    }
+    out.sort((a, b) => b.score - a.score)
+  }
+  return { entries: out, neighbors }
+}
+
+/**
  * 执行一次混合检索。
  *
  * `reranker` / `rerankCandidates` 是**可选的重排**（默认不传 = 不重排）：
@@ -37,7 +67,21 @@ function loadMatrix(store) {
  * 代价是每查询 +939 ms（快档 top-10 约 +474 ms）。重排失败时**退回原顺序**，不让搜索失败。
  * @returns {{mode: string, note: string, results: Array<object>, rerank?: object}}
  */
-export async function search(store, embedder, question, { topK = 10, mode = 'auto', reranker = null, rerankCandidates = 0 } = {}) {
+export async function search(
+  store,
+  embedder,
+  question,
+  {
+    topK = 10,
+    mode = 'auto',
+    reranker = null,
+    rerankCandidates = 0,
+    embedText = null,
+    excludePaths = [],
+    boostPrefix = null,
+    boostWeight = 0.004,
+  } = {},
+) {
   const terms = extractTerms(question)
   const match = buildMatch(terms)
 
@@ -80,7 +124,7 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
         : '向量通道未启用：索引没有记录产出向量的模型（旧版本建的库）—— 跑 code_index 重建即可启用'
     } else {
       try {
-        const [qv] = await embedder.embed([question], { isQuery: true })
+        const [qv] = await embedder.embed([embedText ?? question], { isQuery: true })
         const { ids, mat, dim } = loadMatrix(store)
         // ---- 一致性闸门 ②：维度兜底（即使 tag 相同，配置漂移也可能造成维度不一致）----
         if (qv.length !== dim) {
@@ -137,6 +181,15 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
   else if (mode === 'vector') ranked = ranked.filter((e) => e.vec !== null)
   ranked.sort((a, b) => b.score - a.score)
 
+  // 当前文件锚定（排除自身 + 同目录加权）：只在调用方给了 current_file 时生效
+  let neighborCount = 0
+  if (excludePaths.length || boostPrefix) {
+    const pathById = new Map(store.chunksByIds(ranked.map((e) => e.id)).map((c) => [c.id, c.path]))
+    const cur = curate(ranked, (e) => pathById.get(e.id), { excludePaths, boostPrefix, boostWeight })
+    ranked = cur.entries
+    neighborCount = cur.neighbors
+  }
+
   // ---- 可选重排：在融合结果上取候选池 → 交叉编码器打分 → 重排序 ----
   // 候选池要比 topK 大才有意义（重排只能在池内重排）；池子里没有的东西谁也救不回来。
   const pool = Math.max(topK, rerankCandidates || 0)
@@ -178,6 +231,7 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
       }
       // 重排生效时附上交叉编码器分数：没有它，就分不清"排名变了"是重排的功劳还是没人动过
       if (scoreById?.has(e.id)) r.rerankScore = Number(scoreById.get(e.id).toFixed(4))
+      if (e.neighbor) r.neighbor = true
       return r
     })
     .filter(Boolean)
@@ -187,6 +241,7 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
     terms,
     note: vecNote,
     results,
+    boosted: neighborCount,
     rerank: rerankInfo,
   }
 }
@@ -209,7 +264,20 @@ export async function search(store, embedder, question, { topK = 10, mode = 'aut
  * @param {object} [o.remoteMeta] 远端自述：{ms, coverage, rerank}
  * @param {number} [o.remoteCandidates]
  */
-export async function searchFusedRemote(store, question, { topK = 10, remoteHits = [], remoteMeta = null, reranker = null, rerankCandidates = 0 } = {}) {
+export async function searchFusedRemote(
+  store,
+  question,
+  {
+    topK = 10,
+    remoteHits = [],
+    remoteMeta = null,
+    reranker = null,
+    rerankCandidates = 0,
+    excludePaths = [],
+    boostPrefix = null,
+    boostWeight = 0.004,
+  } = {},
+) {
   const terms = extractTerms(question)
   const match = buildMatch(terms)
   let fts = []
@@ -245,6 +313,16 @@ export async function searchFusedRemote(store, question, { topK = 10, remoteHits
 
   let ranked = [...acc.values()]
   ranked.sort((a, b) => b.score - a.score)
+  let byHash = store.chunksByHashes(ranked.map((e) => e.hash))
+
+  // 当前文件锚定：排除正在编辑的文件 + 同目录加权（与本地模式共用同一套规则）
+  let neighborCount = 0
+  if (excludePaths.length || boostPrefix) {
+    const cur = curate(ranked, (e) => byHash.get(e.hash)?.path, { excludePaths, boostPrefix, boostWeight })
+    ranked = cur.entries
+    neighborCount = cur.neighbors
+  }
+
   // 远端做过重排：带分的项按重排分排序，未参与重排的（纯 BM25 命中）排在后面
   const scored = ranked.filter((e) => e.rerankScore !== undefined)
   if (scored.length) {
@@ -253,7 +331,6 @@ export async function searchFusedRemote(store, question, { topK = 10, remoteHits
   }
 
   const pool = ranked.slice(0, Math.max(topK, 40, rerankCandidates || 0))
-  const byHash = store.chunksByHashes(pool.map((e) => e.hash))
 
   // 可选：**本机**重排（rerankBackend: local）。远端做过重排时不会走到这里。
   let rerankInfo = remoteMeta?.rerank ?? null
@@ -291,6 +368,7 @@ export async function searchFusedRemote(store, question, { topK = 10, remoteHits
       snippet: snippet(c.body, terms),
     }
     if (e.rerankScore !== undefined) r.rerankScore = Number(e.rerankScore.toFixed(4))
+    if (e.neighbor) r.neighbor = true
     results.push(r)
     if (results.length >= topK) break
   }
@@ -298,8 +376,9 @@ export async function searchFusedRemote(store, question, { topK = 10, remoteHits
   const notes = []
   if (!remoteHits.length) notes.push('远端向量通道没有返回结果（可能服务端还没嵌入完该仓库）')
   if (stale) notes.push(`${stale} 条远端命中的块在本地已不存在（本地索引比远端新，跑一次 code_index 可对齐）`)
-  if (remoteMeta?.coverage !== undefined && remoteMeta.coverage < 1) {
-    notes.push(`远端向量覆盖 ${(remoteMeta.coverage * 100).toFixed(0)}%（服务端后台仍在嵌入）`)
+  // 阈值取 0.999 而不是 1：99.67% 会被 toFixed(0) 显示成「100%」，却还提示「仍在嵌入」，自相矛盾
+  if (remoteMeta?.coverage !== undefined && remoteMeta.coverage < 0.999) {
+    notes.push(`远端向量覆盖 ${(remoteMeta.coverage * 100).toFixed(1)}%（服务端后台仍在嵌入）`)
   }
 
   return {
@@ -307,6 +386,7 @@ export async function searchFusedRemote(store, question, { topK = 10, remoteHits
     terms,
     note: notes.join('；'),
     results,
+    boosted: neighborCount,
     rerank: rerankInfo,
     remote: remoteMeta ?? null,
     staleHits: stale,
