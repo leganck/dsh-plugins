@@ -323,7 +323,7 @@ test-remote.mjs       远端地址/重排/配置校验（本地 HTTP 桩）
 ```console
 # 在插件目录里（或不带 --repo，用自动夹具仓库）
 node test-remote.mjs                            # 30 项：远端地址/重排/配置校验（本地 HTTP 桩）
-node test.mjs                                   # 96 项：建库/检索/增量/切块/排除
+node test.mjs                                   # 96 项（Windows）/ 90 项（Linux）：建库/检索/增量/切块/排除
 node test-plugin.mjs                            # 74 项：契约与接口、五个工具真实调用
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 
