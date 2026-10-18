@@ -2,12 +2,13 @@
  * 安装后的验证脚本（不跑模型、不做推理）。
  *
  * 用途：`install_bundle` 把 code-index 从"file:// 路径引用"换成"包引用"之后，
- * 验证四件事：
+ * 验证三件事：
  *   1. 能否从 profile 里**安装后的路径**加载插件（模块可解析）
- *   2. 契约仍在：inject / name / 三个工具注册 + 清理
- *   3. 依赖可从该路径解析（onnxruntime-node / @huggingface/transformers）——
- *      **只 import，不做推理**，避免 CPU/GPU 负载
- *   4. roots 白名单仍生效（补的 config 覆盖行是否真的应用了）
+ *   2. 契约仍在：inject / name / 五个工具注册 + 清理
+ *   3. roots 白名单仍生效（补的 config 覆盖行是否真的应用了）
+ *
+ * 0.10.0 remote-only：本地嵌入/重排已移除，这里不再检查 onnxruntime / 模型文件；
+ * parser 依赖是可选增强，只报告状态。
  *
  * 用法：node verify-install.mjs [--pkg <安装后的包目录>]
  */
@@ -27,7 +28,7 @@ const pkgDir =
 /**
  * 隔离运行环境：本脚本会调用 apply()，而插件在 apply() 里会写加载记录（`_boot.log`）
  * 与加载标记（`_loaded.json`）。**必须**把 DSH_HOME 与索引目录都指到临时目录，
- * 否则会污染线上那份证据 —— 曾因此把"app 是否真的加载过"的判断搞混过一次。
+ * 否则会污染线上那份证据。
  */
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-verify-home-'))
 const tmpIndexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-verify-idx-'))
@@ -53,26 +54,8 @@ if (!fs.existsSync(pkgDir)) {
 check('含 index.js', fs.existsSync(path.join(pkgDir, 'index.js')))
 check('含 cordis.patch.yml（bundle 必备）', fs.existsSync(path.join(pkgDir, 'cordis.patch.yml')))
 check('含 lib/ 与 locale/ 与 icon', fs.existsSync(path.join(pkgDir, 'lib')) && fs.existsSync(path.join(pkgDir, 'locale')))
-check('含 tools/fetch-model.mjs（模型下载器）', fs.existsSync(path.join(pkgDir, 'tools', 'fetch-model.mjs')))
-check('含 tools/migrate-embedding-tag.mjs（缓存 key 迁移）', fs.existsSync(path.join(pkgDir, 'tools', 'migrate-embedding-tag.mjs')))
-{
-  // 工具脚本要能真的被加载（打包漏文件时这里立刻暴露），且清单里两个模型都在
-  const toolUrl = 'file:///' + pkgDir.replace(/\\/g, '/') + '/tools/fetch-model.mjs'
-  try {
-    const t = await import(toolUrl)
-    const names = Object.keys(t.MODELS ?? {})
-    check('fetch-model 可加载且清单完整', names.includes('bge-small-zh-v1.5') && names.includes('bge-reranker-base'), names.join(','))
-    check(
-      'fetch-model 的每个文件都配了体积下限（防"0 字节当成功"）',
-      // onnx 的某个变体可能是**多文件**（external data：图 + 权重，如 qwen3 的 fp16），
-      // 先摊平再逐个查下限，否则数组会被当成文件名、查不到下限而误报。
-      Object.values(t.MODELS).every((m) => Object.values(m.onnx).flat().every((f) => Number(m.minBytes?.[f]) > 0)),
-    )
-  } catch (e) {
-    check('fetch-model 可加载且清单完整', false, String(e.message).slice(0, 100))
-    check('fetch-model 的每个文件都配了体积下限（防"0 字节当成功"）', false, '未加载')
-  }
-}
+check('不再包含本地模型下载/打包脚本', !fs.existsSync(path.join(pkgDir, 'tools', 'fetch-model.mjs')) && !fs.existsSync(path.join(pkgDir, 'tools', 'pack-model.mjs')))
+check('不再包含 lib/embedder.js（本地模型已移除）', !fs.existsSync(path.join(pkgDir, 'lib', 'embedder.js')))
 
 // ---- 1. 模块可加载 ----
 console.log('\n[1] 模块加载（真实宿主运行时路径）')
@@ -156,52 +139,14 @@ if (mod) {
   check('卸载后注册归零', registry.size === 0, `剩余 ${registry.size}`)
 }
 
-// ---- 4. 嵌入依赖（按需安装在受管目录；不在包内，也不该在包内）----
-//
-// 两条必须守住的边界：
-//   ① 装插件**不该**带来任何重依赖（包里不该再出现 onnxruntime-node）
-//   ② 依赖的解析要落在**受管目录**上（%LOCALAPPDATA%/dsh-code-index/embed-deps），
-//      用 createRequire 以该目录的 package.json 为锚点——不能靠 ESM 裸标识符解析
-//      （那是以导入方文件为基准的，装到别处就找不到）
-console.log('\n[4] 嵌入依赖：按需安装在受管目录')
+// ---- 4. parser 依赖（可选增强，只报告状态）----
+console.log('\n[4] 语法解析依赖（可选，仅报告）')
 const depsMod = await import('file:///' + pkgDir.replace(/\\/g, '/') + '/lib/deps.js')
 const dstat = depsMod.depsStatus({ depsDir: depsMod.defaultDepsDir(), alsoDirs: [pkgDir] })
 console.log(`  受管目录：${dstat.dir}`)
-console.log(`  体积 ${(dstat.sizeBytes / 1048576).toFixed(1)} MB；${dstat.installed ? '已就绪' : `缺 ${dstat.missing.join(', ')}`}`)
-
-const pkgLocal = path.join(pkgDir, 'node_modules', 'onnxruntime-node')
-check('包里**没有**再捆 onnxruntime-node（装插件不该带 287 MB）', !fs.existsSync(pkgLocal), pkgLocal)
-check('安装未执行依赖脚本（无构建产物残留）', !fs.existsSync(path.join(pkgDir, 'node_modules', 'onnxruntime-node', 'build')))
-
-if (dstat.installed) {
-  for (const spec of ['onnxruntime-node', '@huggingface/transformers']) {
-    const req = (await import('node:module')).createRequire(path.join(dstat.dir, 'package.json'))
-    try {
-      const resolved = req.resolve(spec)
-      check(`${spec} 从受管目录可解析`, true, resolved.replace(/\\/g, '/').replace(/^.*node_modules\//, 'node_modules/').slice(0, 70))
-    } catch (e) {
-      check(`${spec} 从受管目录可解析`, false, String(e.code || e.message).slice(0, 70))
-    }
-  }
-  try {
-    const req = (await import('node:module')).createRequire(path.join(dstat.dir, 'package.json'))
-    const ort = req('onnxruntime-node')
-    const v = ort?.env?.versions?.node ?? '?'
-    check(`onnxruntime-node 可加载（版本 ${v}；未创建会话、未推理）`, typeof ort?.InferenceSession === 'function')
-  } catch (e) {
-    check('onnxruntime-node 可加载', false, String(e.message).slice(0, 90))
-  }
-  const dml = path.join(dstat.dir, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', 'win32', 'x64', 'DirectML.dll')
-  check('DirectML.dll 在受管目录（GPU 路径）', fs.existsSync(dml), dml.replace(/\\/g, '/'))
-} else {
-  console.log('  （未按需安装 → 跳过解析检查；这是**正常状态**，插件此时走纯 FTS5 降级）')
-  const emb = await (await import('file:///' + pkgDir.replace(/\\/g, '/') + '/lib/embedder.js')).createEmbedder({
-    depsDir: dstat.dir,
-    backend: 'cpu',
-    log: () => {},
-  })
-  check('缺依赖时嵌入器如实降级且指出下一步', emb.ok === false && /code_index_deps/.test(String(emb.reason)), String(emb.reason).slice(0, 110))
-}
+console.log(`  体积 ${(dstat.sizeBytes / 1048576).toFixed(1)} MB；${dstat.installed ? '已就绪' : `缺 ${dstat.missing.join(', ') || '未安装'}`}`)
+check('依赖组只剩 parser 系（embed 组已移除）', Object.keys(depsMod.DEP_GROUPS).every((g) => g.startsWith('parser')), Object.keys(depsMod.DEP_GROUPS).join(','))
+check('包里没有捆 onnxruntime-node', !fs.existsSync(path.join(pkgDir, 'node_modules', 'onnxruntime-node')))
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 if (fail) process.exitCode = 1

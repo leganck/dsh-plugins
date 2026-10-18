@@ -1,10 +1,9 @@
 /**
- * 自测：在真实仓库上验证建库 / 检索 / 增量 / 降级四条路径。
+ * 自测：在真实仓库上验证建库 / 检索 / 增量 / 切块 / 排除（0.10.0 remote-only：无本地模型）。
  *
  * 用法：
  *   node test.mjs                          # 默认挑一个存在的小仓库
  *   node test.mjs --repo D:\Code\...        # 指定仓库
- *   node test.mjs --model-dir <dir>         # 指定嵌入模型目录以验证向量通道
  *
  * 断言失败即退出码 1；最后打印通过/失败计数。
  */
@@ -13,25 +12,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { Store } from './lib/store.js'
 import { buildIndex, scanStatus, dropIndex } from './lib/indexer.js'
-import { createEmbedder, modelFingerprint } from './lib/embedder.js'
-import {
-  depsStatus,
-  defaultDepsDir,
-  makeResolvers,
-  loadFrom,
-  buildInstallArgs,
-  npmInvocation,
-  pruneForeignPlatforms,
-  readManifest,
-  EMBED_PACKAGES,
-} from './lib/deps.js'
 import { search } from './lib/search.js'
 import { walkRepo, normalizeRelPrefix } from './lib/scan.js'
-import { MODELS, SOURCES, defaultFilesOf } from './tools/fetch-model.mjs'
 import { chunkText, chunkFile, sha256 } from './lib/chunker.js'
 import { braceDepths, heuristicChunks } from './lib/chunk-heuristic.js'
 import { getParser } from './lib/chunk-ast.js'
 import { resolveChunkConfig, DEFAULT_BY_EXT, DEFAULT_FALLBACK } from './lib/strategies.js'
+import { defaultDepsDir } from './lib/deps.js'
 
 /**
  * Java 夹具：`methods` 个方法、每个方法体 `bodyLines` 行。
@@ -80,11 +67,6 @@ if (!repo || !fs.existsSync(repo)) {
   console.error('找不到可测仓库，请用 --repo 指定')
   process.exit(1)
 }
-const modelDir =
-  arg('--model-dir') ??
-  (fs.existsSync('C:\\Users\\you\\Documents\\deepseek-harness\\default-workspace\\dsh-comparison\\retrieval-ab\\bge-small-zh')
-    ? 'C:\\Users\\you\\Documents\\deepseek-harness\\default-workspace\\dsh-comparison\\retrieval-ab\\bge-small-zh'
-    : null)
 
 let pass = 0
 let fail = 0
@@ -102,7 +84,6 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-code-index-test-'))
 const dbPath = path.join(tmpDir, 'index.db')
 console.log(`仓库: ${repo}`)
 console.log(`临时索引: ${dbPath}`)
-console.log(`模型目录: ${modelDir ?? '(未提供，将验证降级路径)'}\n`)
 
 const store = Store.open(dbPath)
 
@@ -188,203 +169,6 @@ try {
   await buildIndex({ store, repoRoot: repo, embedder: { ok: false, reason: 'test' } })
 }
 
-// ---------- 6. 向量通道（若给了模型目录且依赖可用）----------
-console.log('\n[6] 向量通道')
-if (!modelDir) {
-  console.log('  (跳过：未提供 --model-dir)')
-} else {
-  const emb = await createEmbedder({ modelDir, backend: 'auto', verbose: false })
-  if (!emb.ok) {
-    console.log(`  ⚠️ 嵌入器不可用（可能未安装 onnxruntime-node / 缺模型文件）：${emb.reason}`)
-    check('不可用时给出明确原因', typeof emb.reason === 'string' && emb.reason.length > 0)
-  } else {
-    console.log(`  嵌入器: ${emb.backend}/${emb.modelFile}，全局缓存 ${emb.cacheEntries} 条`)
-    const r6 = await buildIndex({ store, repoRoot: repo, embedder: emb, budget: { maxEmbedPerRun: 1500 } })
-    check('补算了向量', r6.vectorsAfter > 0, `vectors=${r6.vectorsAfter} embedded=${r6.embedded}`)
-    check('向量数不超过块数', r6.vectorsAfter <= r6.stats.chunks, `${r6.vectorsAfter} vs ${r6.stats.chunks}`)
-    const res6 = await search(store, emb, probe ?? path.basename(sample.rel), { topK: 10 })
-    check('混合通道启用', res6.mode === 'hybrid' || res6.mode === 'vector', `${res6.mode} note=${res6.note}`)
-    check('带向量排名信息', res6.results.some((h) => h.vecRank !== null), JSON.stringify(res6.results.slice(0, 2)))
-    // 二次补算应几乎无事可做
-    const r6b = await buildIndex({ store, repoRoot: repo, embedder: emb, budget: { maxEmbedPerRun: 1500 } })
-    check('第二次无需重复补算', r6b.embedded === 0, `embedded=${r6b.embedded} note=${r6b.embedNote}`)
-  }
-}
-
-// ---------- 8. 诊断信息不得预设原因 ----------
-// 实测事故：某会话的索引里 0 向量，检索提示却写成「配置 embedding.backend = off」，
-// 把排查引向一个本来就是 auto 的配置。原因必须由状态推导。
-console.log('\n[8] 诊断信息不得预设原因')
-
-// (a) 嵌入器不可用 → 用它的真实 reason，且不得声称是配置关了
-const r8aAuto = await search(store, { ok: false, reason: '缺少可选依赖 XYZ' }, 'anything', { topK: 1 })
-check('嵌入器失败时 auto 模式静默', r8aAuto.note === '', r8aAuto.note)
-const r8a = await search(store, { ok: false, reason: '缺少可选依赖 XYZ' }, 'anything', { topK: 1, mode: 'vector' })
-check('显式 mode=vector 时 note 用真实 reason', r8a.note.includes('缺少可选依赖 XYZ'), r8a.note)
-check('嵌入器失败时不得误报 backend=off', !r8a.note.includes('backend = off'), r8a.note)
-
-// (b) 索引里 0 向量但嵌入器可用 → 应指出"没有向量"，而不是配置
-const tmpFts = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-fts-'))
-const storeFts = Store.open(path.join(tmpFts, 'index.db'))
-await buildIndex({ store: storeFts, repoRoot: repo, embedder: null, budget: {} })
-check('(b) 前置：该库确实只有 FTS', storeFts.stats().vectors === 0 && storeFts.stats().chunks > 0, JSON.stringify(storeFts.stats()))
-const r8b = await search(storeFts, { ok: true }, 'refund', { topK: 1 })
-check('0 向量时指出"还没有向量"', /还没有向量/.test(r8b.note), r8b.note)
-check('0 向量时不得误报 backend=off', !r8b.note.includes('backend = off'), r8b.note)
-
-// (c) 预算为 0 → 不得谎称"向量已是最新"
-const r8c = await buildIndex({
-  store: storeFts,
-  repoRoot: repo,
-  embedder: { ok: true, embed: async () => [], cache: null },
-  budget: { maxEmbedPerRun: 0 },
-})
-check('预算为 0 时不谎称"已是最新"', /预算为 0/.test(r8c.embedNote), r8c.embedNote)
-
-// (d) 安全默认：不显式给预算时**不得调用嵌入器**
-// 用"一被调用就抛错"的假嵌入器来证明它压根没被碰过 —— 这是"默认不卡机器"的可执行断言
-let embedCalled = false
-const r8d = await buildIndex({
-  store: storeFts,
-  repoRoot: repo,
-  embedder: {
-    ok: true,
-    embed: async () => {
-      embedCalled = true
-      throw new Error('默认预算不该走到这里')
-    },
-    cache: null,
-  },
-  budget: {},
-})
-check('默认（不传预算）不调用嵌入器', !embedCalled && /预算为 0/.test(r8d.embedNote), r8d.embedNote)
-
-// ---------- 7. 可选嵌入依赖：按需安装层 ----------
-// 这一节全部**离线**：不下载、不联网、不跑模型。验证的是"缺依赖时如实降级 + 修剪只动该动的东西"。
-console.log('\n[7] 嵌入依赖按需安装层')
-{
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-deps-test-'))
-  const fakeDeps = path.join(tmp, 'embed-deps')
-
-  // (a) 目录不存在时 status 必须"可回答而不抛错"
-  const st0 = depsStatus({ depsDir: fakeDeps })
-  check('缺依赖时 status 不抛错', typeof st0 === 'object' && st0.installed === false)
-  check('缺依赖时列出缺哪些包', st0.missing.length === 2 && st0.missing.includes('onnxruntime-node'), st0.missing.join(','))
-  check('缺依赖时不创建目录', !fs.existsSync(fakeDeps))
-
-  // (b) 空目录也不能误报"已就绪"
-  fs.mkdirSync(fakeDeps, { recursive: true })
-  const st1 = depsStatus({ depsDir: fakeDeps })
-  check('空目录不算已安装', st1.installed === false && st1.dirExists === true)
-
-  // (c) 假包 → 解析器必须能解析出来（验证 createRequire 锚点是对的）
-  const fakePkg = path.join(fakeDeps, 'node_modules', 'onnxruntime-node')
-  fs.mkdirSync(fakePkg, { recursive: true })
-  fs.writeFileSync(path.join(fakePkg, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: '0.0.0-fake', main: 'i.js' }))
-  fs.writeFileSync(path.join(fakePkg, 'i.js'), 'module.exports = { fake: true }\n')
-  const resolvers = makeResolvers({ depsDir: fakeDeps })
-  let resolved = null
-  try {
-    resolved = loadFrom(resolvers, 'onnxruntime-node')
-  } catch (e) {
-    resolved = { err: String(e.message) }
-  }
-  check('受管目录内的包可被解析', resolved?.fake === true, JSON.stringify(resolved).slice(0, 80))
-  const st2 = depsStatus({ depsDir: fakeDeps })
-  check('假包计入"受管目录已有"', st2.packages.find((p) => p.name === 'onnxruntime-node')?.installedInManagedDir === '0.0.0-fake')
-
-  // (c2) **版本比对**：装了别的版本必须算"未就绪"。
-  //     这条很要命——tree-sitter 的运行时与语法包是 ABI 配对的，版本错位不会在
-  //     setLanguage/parse 时报错，而是读取节点时才炸（'reading 138'）。
-  const mism = st2.packages.find((p) => p.name === 'onnxruntime-node')
-  check('装了别的版本 → 标记为版本不符', mism?.versionMatches === false && mism?.ready === false, `${mism?.installedInManagedDir} vs 需要 ${mism?.wanted}`)
-  check('版本不符时不误报"已就绪"', st2.installed === false && st2.mismatched.length === 1, st2.mismatched.join(','))
-  // 把假包改成"版本正确"→ 应当变成就绪（证明判定链路是活的，不是永远报错）
-  fs.writeFileSync(path.join(fakePkg, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: EMBED_PACKAGES[0].version, main: 'i.js' }))
-  const st2b = depsStatus({ depsDir: fakeDeps })
-  check('版本正确后 onnxruntime-node 变为就绪', st2b.packages.find((p) => p.name === 'onnxruntime-node')?.ready === true)
-  check('但该组整体仍未就绪（transformers 还没装）', st2b.installed === false && st2b.missing.join(',') === '@huggingface/transformers', st2b.missing.join(','))
-
-  // (d) 修剪：只删非本平台的 napi-v* 目录，其它一律不动
-  const ortRoot = fakeDeps
-  for (const plat of ['win32', 'linux', 'darwin']) {
-    for (const arch of ['x64', 'arm64']) {
-      const d = path.join(ortRoot, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', plat, arch)
-      fs.mkdirSync(d, { recursive: true })
-      fs.writeFileSync(path.join(d, 'onnxruntime.dll'), 'x'.repeat(2048))
-    }
-  }
-  // 放一个"不该被动"的目录，验证修剪有边界
-  const untouch = path.join(fakeDeps, 'node_modules', 'unrelated', 'bin', 'napi-v6', 'linux')
-  fs.mkdirSync(untouch, { recursive: true })
-  fs.writeFileSync(path.join(untouch, 'keep.txt'), 'keep')
-  const pruned = pruneForeignPlatforms(fakeDeps)
-  const kept = path.join(ortRoot, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', process.platform, process.arch)
-  const goneLinux = path.join(ortRoot, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6', 'linux')
-  check('修剪后本平台/本架构仍在', fs.existsSync(kept))
-  check('修剪移除了 foreign 平台', !fs.existsSync(goneLinux))
-  check(
-    '修剪只动 onnxruntime-node 底下的东西',
-    // 夹具是 3 平台 × 2 架构 = 6 个目录。removed 记的是"被删的目录项"：
-    // 非本平台各删 1 个平台目录（win32 上 = linux + darwin = 2），本平台内再删 1 个非本架构（arm64）= 1，
-    // 合计恒为 3（换平台同理）。关键断言是"每一项都在 onnxruntime-node 底下"。
-    pruned.removed.length === 3 && pruned.removed.every((p) => p.includes('onnxruntime-node')) && pruned.freedBytes > 0,
-    `移除 ${pruned.removed.length} 个，回收 ${(pruned.freedBytes / 1024).toFixed(1)} KB；${pruned.removed.map((p) => p.split(/[\\/]/).slice(-2).join('/')).join(', ')}`,
-  )
-  check('修剪写入 manifest 便于追溯', (readManifest(fakeDeps) ?? {}).prunedFor === `${process.platform}-${process.arch}`)
-  check('修剪不动无关目录', fs.existsSync(path.join(untouch, 'keep.txt')))
-
-  // (e) 安装参数构造（不真跑网络）：必须带 --ignore-scripts，且版本是固定的
-  const args = buildInstallArgs({ dir: fakeDeps })
-  check('安装参数含 --ignore-scripts', args.includes('--ignore-scripts'))
-  check('安装参数逐个钉版本', args.includes(`onnxruntime-node@${EMBED_PACKAGES[0].version}`) && args.includes(`@huggingface/transformers@${EMBED_PACKAGES[1].version}`))
-  check('显式 registry 才会被传', !args.includes('--registry') && buildInstallArgs({ dir: fakeDeps, registry: 'https://example.invalid' }).includes('--registry'))
-  const inv = npmInvocation(['install', 'x'])
-  if (process.platform === 'win32') {
-    check('Windows 走 cmd.exe 而非直接 spawn npm.cmd', String(inv.file).toLowerCase().endsWith('cmd.exe'), inv.file)
-  } else {
-    check('POSIX 直接用 npm', inv.file === 'npm')
-  }
-
-  // (f) embedder 在缺依赖时必须给出"可执行下一步"，而不是一句泛泛的失败
-  // 注意：要给一个**存在 tokenizer.json 的假模型目录**，否则会先在"缺分词器"那一步返回，
-  // 测不到依赖这一层（这个顺序是真实的：先查模型文件，再加载依赖）。
-  const fakeModel = path.join(tmp, 'fake-model')
-  fs.mkdirSync(fakeModel, { recursive: true })
-  fs.writeFileSync(path.join(fakeModel, 'tokenizer.json'), '{}')
-  const emb = await createEmbedder({ modelDir: fakeModel, depsDir: fakeDeps, backend: 'cpu', log: () => {} })
-  const reason = emb.ok ? '（embedder 竟然成功——说明本机全局装了依赖）' : emb.reason
-  check('embedder 在缺依赖时返回 ok:false 且不抛错', typeof emb.ok === 'boolean')
-  check(
-    '降级原因指向 code_index_deps action=install',
-    /code_index_deps action=install/.test(String(reason)),
-    String(reason).slice(0, 120),
-  )
-  // 这里受管目录里有一个"假 onnxruntime-node"，所以缺的应当是 @huggingface/transformers；
-  // 断言"列出真正缺的那个"，而不是写死某个包名
-  const missingNow = depsStatus({ depsDir: fakeDeps }).missing
-  check(
-    '降级原因列出真正缺的包',
-    missingNow.length > 0 && missingNow.some((n) => String(reason).includes(n)),
-    `缺 ${missingNow.join(',')}；原因里提到的是上面这个 → ${missingNow.some((n) => String(reason).includes(n))}`,
-  )
-  // 全新机器：**既**没模型文件**又**没依赖 → 一条消息必须把两件事都说出来。
-  // 早前是"先报缺分词器"就返回了，用户补完模型再跑一次才被告知缺依赖（多一轮往返）。
-  const embFresh = await createEmbedder({
-    modelDir: path.join(tmp, 'no-such-model-dir'),
-    depsDir: fakeDeps,
-    backend: 'cpu',
-    log: () => {},
-  })
-  const freshReason = String(embFresh.ok ? '' : embFresh.reason)
-  check(
-    '全新机器（缺模型+缺依赖）一次说全两件事',
-    /缺模型文件/.test(freshReason) && /code_index_deps action=install group=embed/.test(freshReason),
-    freshReason.slice(0, 150),
-  )
-
-  fs.rmSync(tmp, { recursive: true, force: true })
-}
 
 // ---------- 8. 切块策略（Cursor 风格策略表 + ast/heuristic/window） ----------
 // 这一段全部离线、不跑模型。核心断言是**不变量**而不是"某个具体块长什么样"：
@@ -540,183 +324,6 @@ console.log('\n[8] 切块策略')
   }
 }
 
-// ---------- 9. 嵌入模型一致性闸门（不需要模型：用假嵌入器） ----------
-// 这一节守的是"换模型后静默算垃圾"这个洞：
-//   - 索引里没记模型 → 拿新模型的查询向量和旧模型的存量向量做点积
-//   - 维度不同 → NaN；维度相同（fp16↔int8）→ 分数看着正常、排名是垃圾
-console.log('\n[9] 嵌入模型一致性')
-{
-  const tmpEmb = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-emb-'))
-  const storeEmb = Store.open(path.join(tmpEmb, 'index.db'))
-
-  /** 假模型目录：用来验证"指纹随内容变化" */
-  const mkModelDir = (content) => {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-model-'))
-    fs.writeFileSync(path.join(d, 'model_fp16.onnx'), content)
-    fs.writeFileSync(path.join(d, 'tokenizer.json'), '{"fake":true}')
-    return d
-  }
-  const dirA = mkModelDir('weights-A')
-  const dirB = mkModelDir('weights-B')
-  const fpA1 = modelFingerprint(dirA, 'model_fp16.onnx')
-  const fpA2 = modelFingerprint(dirA, 'model_fp16.onnx')
-  const fpB = modelFingerprint(dirB, 'model_fp16.onnx')
-  check('模型指纹是 8 位十六进制', /^[0-9a-f]{8}$/.test(fpA1), fpA1)
-  check('同一份模型指纹稳定（有记忆化）', fpA1 === fpA2)
-  check('模型内容不同 → 指纹不同（这是跨机器共享的关键）', fpA1 !== fpB, `${fpA1} vs ${fpB}`)
-
-  /** 假嵌入器：满足 indexer/search 需要的形状，返回 L2 归一化的常量向量 */
-  const fakeEmb = (tag, dim = 512) => ({
-    ok: true,
-    backend: 'fake',
-    modelFile: 'fake.onnx',
-    modelTag: tag,
-    dim,
-    cache: null,
-    embed: async (texts) => texts.map(() => new Float32Array(dim).fill(1 / Math.sqrt(dim))),
-  })
-
-  // (a) 建库时写入 embedding_tag
-  const embA = fakeEmb('fake-model-A-fp16')
-  const b1 = await buildIndex({
-    store: storeEmb,
-    repoRoot: repo,
-    embedder: embA,
-    budget: { maxEmbedPerRun: 8 },
-    opts: { maxFileBytes: 256 * 1024 },
-  })
-  check('建库写入 embedding_tag', storeEmb.getMeta('embedding_tag') === 'fake-model-A-fp16', String(storeEmb.getMeta('embedding_tag')))
-  check('确实产生了向量（否则后面的闸门测不到）', b1.stats.vectors > 0, `${b1.stats.vectors} 条`)
-
-  // (b) 换模型 → 强制全量重建并如实标记
-  const b2 = await buildIndex({
-    store: storeEmb,
-    repoRoot: repo,
-    embedder: fakeEmb('fake-model-B-fp16'),
-    budget: { maxEmbedPerRun: 8 },
-    opts: { maxFileBytes: 256 * 1024 },
-  })
-  check('换模型 → 自动全量重建（embedChanged=true）', b2.mode === 'full' && b2.embedChanged === true, `mode=${b2.mode} embedChanged=${b2.embedChanged}`)
-  check('重建后 tag 更新为新模型', storeEmb.getMeta('embedding_tag') === 'fake-model-B-fp16')
-  // 同一模型再跑 → 回到增量
-  const b3 = await buildIndex({
-    store: storeEmb,
-    repoRoot: repo,
-    embedder: fakeEmb('fake-model-B-fp16'),
-    budget: { maxEmbedPerRun: 0 },
-    opts: { maxFileBytes: 256 * 1024 },
-  })
-  check('同模型再跑不再是全量重建', b3.mode === 'incremental' && b3.embedChanged === false, `mode=${b3.mode}`)
-
-  // (c) 查询闸门：用一个干净库造数据，逐条验证
-  const mkSearchStore = () => {
-    const s = Store.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-gate-')), 'index.db'))
-    const chunks = s.replaceChunks('Gate.java', [
-      { startLine: 1, endLine: 10, hash: sha256('a'), body: 'public void 退款超限校验() { int x = 1; }' },
-      { startLine: 11, endLine: 20, hash: sha256('b'), body: 'public void another() { int y = 2; }' },
-    ])
-    return { s, chunks }
-  }
-  const vec512 = new Float32Array(512).fill(1 / Math.sqrt(512))
-
-  // (c1) 正常路径：tag 一致 + 维度一致 → 应当走 hybrid
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'fake-model-A-fp16')
-    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
-    check('tag/维度一致 → 走 hybrid', r.mode === 'hybrid', `mode=${r.mode} note=${r.note.slice(0, 60)}`)
-    check('hybrid 结果带向量名次', r.results.every((x) => typeof x.vecRank === 'number'), JSON.stringify(r.results.map((x) => x.vecRank)))
-    dropIndex(s)
-  }
-  // (c2) 闸门①：tag 不一致 → 禁用向量通道并说明原因
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'old-model-fp16')
-    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
-    check('模型不一致 → 不用向量通道', r.mode === 'fts' && r.results.every((x) => x.vecRank === null), `mode=${r.mode}`)
-    check('并说明"不一致"及处置办法', /不一致/.test(r.note) && /code_index/.test(r.note), r.note.slice(0, 100))
-    dropIndex(s)
-  }
-  // (c3) 闸门①b：库里没记模型（旧版本建的库）→ 也要挡住
-  {
-    const { s, chunks } = mkSearchStore()
-    s.putVectors([[chunks[0].id, vec512]]) // 有向量但没有 embedding_tag
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
-    check('库无模型记录 → 不用向量通道（不猜）', r.mode === 'fts' && /没有记录/.test(r.note), r.note.slice(0, 100))
-    dropIndex(s)
-  }
-  // (c4) 闸门②：tag 一致但维度不符 → 也要挡住（配置漂移的兜底）
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'fake-model-A-fp16')
-    s.putVectors([[chunks[0].id, new Float32Array(3).fill(0.5)]]) // 故意维度不符
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
-    check('维度不符 → 不用向量通道并说明', r.mode === 'fts' && /维度/.test(r.note), r.note.slice(0, 100))
-    dropIndex(s)
-  }
-
-  // (c5) 重排生效：桩重排器把含 'another' 的那块排到第一 → 顺序必须真的变
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'fake-model-A-fp16')
-    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
-    const before = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
-    const stub = { ok: true, backend: 'stub', modelFile: 'stub.onnx', score: async (_q, texts) => texts.map((t) => (t.includes('another') ? 10 : 0)) }
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: stub, rerankCandidates: 2 })
-    // 注意用**行号**判断顺序：fixture 的两块在同一个文件里，比 path 看不出变化（这个断言一开始就写错了）
-    check(
-      '重排生效：结果顺序确实被改变',
-      r.rerank?.applied === true && r.results[0].startLine !== before.results[0].startLine,
-      `applied=${r.rerank?.applied} before=${before.results.map((x) => x.startLine)} after=${r.results.map((x) => x.startLine)}`,
-    )
-    check('重排后含 another 的那块排第一', /another/.test(r.results[0].snippet ?? '') || r.results[0].startLine === 11, `first=${r.results[0].startLine}`)
-    check('重排生效时返回交叉编码器分数（否则无法判断是重排改的还是没人动）', typeof r.results[0].rerankScore === 'number', JSON.stringify(r.results.map((x) => x.rerankScore)))
-    check('重排信息含候选数与耗时', r.rerank.candidates === 2 && typeof r.rerank.ms === 'number', JSON.stringify(r.rerank))
-    dropIndex(s)
-  }
-  // (c6) 重排失败 → **必须退回原顺序**，并留下原因（不能让重排器挂掉变成搜索失败）
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'fake-model-A-fp16')
-    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
-    const before = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2 })
-    const bad = { ok: true, backend: 'stub', modelFile: 'stub.onnx', score: async () => { throw new Error('GPU 掉了') } }
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: bad, rerankCandidates: 2 })
-    check('重排抛错 → 结果仍是原顺序（不失败、不空）', r.results.length === 2 && r.results[0].path === before.results[0].path)
-    check('并如实报告未生效及原因', r.rerank?.applied === false && /GPU 掉了/.test(r.rerank.reason), JSON.stringify(r.rerank))
-    dropIndex(s)
-  }
-  // (c7) 候选数为 0（= 未开启）→ 完全不做重排，rerank 字段为 null
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'fake-model-A-fp16')
-    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: { ok: true, score: async () => [1, 0] }, rerankCandidates: 0 })
-    check('未开启重排时不产生 rerank 信息', r.rerank === null && r.results.every((x) => x.rerankScore === undefined))
-    dropIndex(s)
-  }
-  // (c8) 重排器不可用（ok:false）→ 同样静默跳过，不能报错
-  {
-    const { s, chunks } = mkSearchStore()
-    s.setMeta('embedding_tag', 'fake-model-A-fp16')
-    s.putVectors([[chunks[0].id, vec512], [chunks[1].id, vec512]])
-    const r = await search(s, fakeEmb('fake-model-A-fp16'), '退款超限校验', { topK: 2, reranker: { ok: false, reason: '缺模型' }, rerankCandidates: 5 })
-    check('重排器不可用不影响检索', r.results.length === 2 && r.rerank === null)
-    dropIndex(s)
-  }
-
-  dropIndex(storeEmb)
-  for (const d of [tmpEmb, dirA, dirB]) {
-    try {
-      fs.rmSync(d, { recursive: true, force: true })
-    } catch {
-      /* Windows 句柄，留给系统清理 */
-    }
-  }
-}
-
 // ---------- 10. 扫描排除（excludeDirs / excludePaths） ----------
 // 这一段守的是"中文语义检索被遗留目录带偏"那个真实问题：仓库里常有名字正常、
 // 但在本仓库里是遗留/生成物的目录（例：legacy-grails-service 与 billing-service 只差 svc-）。
@@ -788,39 +395,6 @@ console.log('\n[10] 扫描排除')
   }
 }
 
-// ---------- 11. 模型下载器（只测纯函数，不联网） ----------
-// 这一段守的是"把 0 字节当下载成功"那个坑：体积校验必须每个文件都有，且清单与实现一致。
-console.log('\n[11] 模型下载器')
-{
-  const throwMsg = (fn) => {
-    try {
-      fn()
-      return ''
-    } catch (e) {
-      return String(e.message)
-    }
-  }
-  const names = Object.keys(MODELS)
-  check('清单含嵌入模型与重排模型', names.includes('bge-small-zh-v1.5') && names.includes('bge-reranker-base'), names.join(', '))
-  check('嵌入模型默认拉全部量化版本（换 backend 不用再下）', defaultFilesOf('bge-small-zh-v1.5').filter((f) => f.startsWith('onnx/')).length === Object.keys(MODELS['bge-small-zh-v1.5'].onnx).length)
-  check('required 只含该机器必需要的两档（fp16 GPU / int8 CPU）', defaultFilesOf('bge-small-zh-v1.5', 'required').filter((f) => f.startsWith('onnx/')).length === 2)
-  check('未知模型报错并列出可用项', /未知模型/.test(throwMsg(() => defaultFilesOf('nope'))), throwMsg(() => defaultFilesOf('nope')).slice(0, 60))
-  check('未知量化版本报错', /没有量化版本/.test(throwMsg(() => defaultFilesOf('bge-small-zh-v1.5', 'fp8'))))
-  check(
-    '每个模型的每个量化版本都配了 minBytes（漏配 = 不校验，就会重演 0 字节）',
-    // 量化版本的值可能是数组：ONNX external data 格式下"图 + _data 权重"两个文件都要校验
-    Object.values(MODELS).every((m) => Object.values(m.onnx).flat().every((f) => Number(m.minBytes?.[f]) > 0)),
-  )
-  check('必需文件也都有 minBytes', Object.values(MODELS).every((m) => m.files.every((f) => Number(m.minBytes?.[f]) > 0)))
-  check(
-    'ModelScope resolve 直链形式正确（本机唯一可用的源）',
-    SOURCES.modelscope('Xenova/x', 'onnx/m.onnx') === 'https://modelscope.cn/models/Xenova/x/resolve/master/onnx/m.onnx',
-    SOURCES.modelscope('Xenova/x', 'onnx/m.onnx'),
-  )
-  check('重排模型在清单里且标明用途（插件可选引用，供 code_search 的 rerank 配置）', /重排|交叉编码器/.test(MODELS['bge-reranker-base'].role))
-  check('嵌入模型标注为必需', /必需/.test(MODELS['bge-small-zh-v1.5'].role))
-}
-
 // ---------- 11b. 语言扩展开装提示（parser hints） ----------
 console.log('\n[11b] 语言扩展安装提示')
 const { detectMissingGrammars, renderParserHint } = await import('./lib/parser-hints.js')
@@ -839,7 +413,7 @@ dropIndex(store)
 check('清空后块数为 0', store.stats().chunks === 0)
 check('清空后向量为 0', store.stats().vectors === 0)
 check('清空后文件数为 0', store.stats().files === 0)
-dropIndex(storeFts)
+
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 if (fail) process.exitCode = 1

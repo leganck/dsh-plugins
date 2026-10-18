@@ -4,7 +4,7 @@
  * 用法：
  *   node tools/build-oss-index.mjs <repoRoot> [indexDirBase]
  *
- * 输出最后一行是索引路径，便于后续 config-matrix / ab-embedding-models 使用。
+ * 输出最后一行是索引路径，便于后续远端同步脚本使用。
  */
 import path from 'node:path'
 import { Store } from '../lib/store.js'

@@ -1,30 +1,20 @@
 /**
- * 嵌入依赖的**按需**安装与解析。
+ * 可选语法解析依赖（tree-sitter）的**按需**安装与解析。
  *
- * ## 为什么不写在 package.json 里
+ * 0.10.0 起本地嵌入已移除，本模块只服务于 AST 切块；`embed` 组（onnxruntime-node +
+ * @huggingface/transformers）已删除。目录名 `embed-deps` 是历史遗留，不再有嵌入依赖。
  *
- * 早期实现把 `onnxruntime-node` 与 `@huggingface/transformers` 声明为 `optionalDependencies`，
- * 于是**每次装插件都要**：下载并落盘 463 MB；触发构建脚本审批（pnpm 与 npm 都会拦）；
- * 最坏情况撞上服务侧空闲超时（实测 pnpm 打印完 `Done in 2s` 却不退出 → 10 分钟超时 → 安装回滚）。
+ * ## 为什么不写进 package.json
  *
- * 2026-10-16 实测确认了三条关键事实，于是改成按需：
- *
- * 1. **onnxruntime-node 的 npm 包自带各平台二进制**（`bin/napi-v6/{darwin,linux,win32}/{arm64,x64}`，
- *    43 个文件、解压 301 MB）。它的 `postinstall` 只是"若缺则从 NuGet 补下载"——
- *    **不跑脚本也能用**：实测 `--ignore-scripts` 装完后 `require('onnxruntime-node')` 成功、
- *    `env.versions={common:1.30.0,node:1.30.0}`、`listSupportedBackends()` 返回
- *    `[cpu(bundled), dml(bundled), webgpu(bundled)]` —— **DirectML 也在**。
- * 2. 所以可以 `npm install --ignore-scripts`，**完全不触发构建脚本审批**。
- * 3. 同一份安装里非本平台的二进制占大头，可安全修剪：实测 463.2 MB → 240.1 MB（省 223 MB），
- *    修剪后分词与后端枚举仍然正常。
+ * 重依赖会让每次装插件都下载/落盘数百 MB，并可能触发构建脚本审批或安装超时。
+ * parser 组约 60 MB，只有用户显式 `code_index_deps action=install` 时才下载。
  *
  * ## 本模块的边界
  *
  * - **不自动安装**：`installDeps()` 只被显式动作调用（工具参数 / 用户要求），绝不在 apply 时或
- *   建库过程中偷偷跑。缺依赖时调用方走"纯 FTS5 降级 + 如实报告原因"。
+ *   建库过程中偷偷跑。缺依赖时调用方走"heuristic 降级 + 如实报告原因"。
  * - **解析顺序**：受管目录优先，其次包内 `node_modules`（兼容旧安装形态）。
- * - 目录默认放 `%LOCALAPPDATA%\dsh-code-index\embed-deps`（Windows）/ `~/.cache/...`（POSIX）：
- *   不进 `$DSH_HOME`（避免与 profile 混在一起），更不进代码仓库。
+ * - 目录默认放 `%LOCALAPPDATA%\dsh-code-index\embed-deps`（Windows）/ `~/.cache/...`（POSIX）。
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -36,10 +26,9 @@ import { promisify } from 'node:util'
 const run = promisify(execFile)
 
 /**
- * 依赖**分组**：两组都按需安装到同一个受管目录，共用一套解析器链。
+ * 依赖**分组**：按需安装到同一个受管目录，共用一套解析器链。
  *
- * - `embed`：向量嵌入（onnxruntime-node + @huggingface/transformers）→ 约 661 MB 未修剪 / 264 MB 修剪后
- * - `parser`：语法解析（tree-sitter + 各语言语法）→ 约 41 MB，用于 AST 切块
+ * - `parser`：语法解析（tree-sitter + 各语言语法）→ 约 61 MB，用于 AST 切块
  *
  * 版本必须**同年代配对**：运行时 `tree-sitter@0.21.1` 配 0.21.x 的语法包。
  * 实测踩坑（2026-10-16）：`tree-sitter-java@0.23.5` 声称 `peerOptional tree-sitter@^0.21.1`，
@@ -48,10 +37,6 @@ const run = promisify(execFile)
  * 换成同年代的 0.21.0 后一切正常。**改版本时务必四个包一起验一次解析**。
  */
 export const DEP_GROUPS = {
-  embed: [
-    { name: 'onnxruntime-node', version: '1.30.0' },
-    { name: '@huggingface/transformers', version: '3.8.1' },
-  ],
   parser: [
     { name: 'tree-sitter', version: '0.21.1' },
     { name: 'tree-sitter-java', version: '0.21.0' },
@@ -74,9 +59,6 @@ export const DEP_GROUPS = {
 
 /** 三个可选语法组一起装（= 老版本"全装 parser"的行为） */
 DEP_GROUPS['parser-extra'] = [...DEP_GROUPS['parser-go'], ...DEP_GROUPS['parser-python'], ...DEP_GROUPS['parser-rust']]
-
-/** 兼容旧调用名（= embed 组） */
-export const EMBED_PACKAGES = DEP_GROUPS.embed
 
 /** 全部依赖包（跨组去重） */
 export function allPackages() {
@@ -199,7 +181,7 @@ function pkgVersion(dir, name) {
  * 顶层 `installed` / `missing` / `packages` 指的是 `group` 指定的那一组（默认 `embed`，
  * 保持旧调用可用）；`groups` 里两组都有。
  */
-export function depsStatus({ depsDir, alsoDirs = [], group = 'embed' } = {}) {
+export function depsStatus({ depsDir, alsoDirs = [], group = 'parser' } = {}) {
   const dir = depsDir ?? defaultDepsDir()
   const resolvers = makeResolvers({ depsDir: dir, alsoDirs })
   const groups = {}
@@ -247,7 +229,7 @@ export function depsStatus({ depsDir, alsoDirs = [], group = 'embed' } = {}) {
 }
 
 /** 构造 npm 安装参数（抽出来是为了能单测，不必真跑网络） */
-export function buildInstallArgs({ dir, registry, packages = EMBED_PACKAGES }) {
+export function buildInstallArgs({ dir, registry, packages = DEP_GROUPS.parser }) {
   const args = ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', dir]
   for (const p of packages) args.push(`${p.name}@${p.version}`)
   if (registry) args.push('--registry', registry)
@@ -268,7 +250,7 @@ export function npmInvocation(args) {
 /**
  * 按需安装某个依赖组（或 `all`）。**只在显式动作里调用**。
  */
-export async function installDeps({ depsDir, registry, group = 'embed', log = () => {}, timeoutMs = 30 * 60 * 1000 } = {}) {
+export async function installDeps({ depsDir, registry, group = 'parser', log = () => {}, timeoutMs = 30 * 60 * 1000 } = {}) {
   const dir = depsDir ?? defaultDepsDir()
   if (!dir) return { ok: false, note: '未指定依赖目录' }
   const packages = group === 'all' ? allPackages() : DEP_GROUPS[group]
