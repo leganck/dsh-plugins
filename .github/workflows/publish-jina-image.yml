@@ -132,7 +132,7 @@ jobs:
       - name: push (${{ matrix.flavor }})
         if: needs.meta.outputs.push == 'true'
         run: |
-          refs="latest-jina-${{ matrix.flavor }}"
+          refs="latest-jina-${{ matrix.flavor }} jina-${{ matrix.flavor }}"
           if [ "${{ needs.meta.outputs.version }}" != "edge" ]; then
             refs="$refs dsh-embed-jina-v${{ needs.meta.outputs.version }}-${{ matrix.flavor }}"
           fi
