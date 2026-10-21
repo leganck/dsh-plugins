@@ -757,6 +757,7 @@ def main():
           st5 == 200 and {"bge-base-zh", "bge-reranker-base", "jina-v2-base-code"} <= set(ids), ids)
     page = req_raw("/admin")[1]
     check("后台页面包含「模型下载」与「重传」", "模型下载" in page and "重传" in page)
+    check("后台页面初始化会加载模型列表（不会停在加载中）", "loadModels();" in page)
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")
