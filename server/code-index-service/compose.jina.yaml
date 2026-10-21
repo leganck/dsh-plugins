@@ -1,0 +1,22 @@
+# jina-code 模型覆盖层：**同一个镜像**，只换挂载与几个环境变量（不重新构建镜像）
+#
+#   docker compose -f compose.yaml -f compose.jina.yaml up -d
+#
+# 前置（模型不进镜像，走 Release 资产）：
+#   node scripts/fetch-jina-model.mjs        # → models/model-jina/
+#
+# 镜像建议用 base-*（不含 bge），避免白拉 194 MB 的 bge 模型：
+#   IMAGE=ghcr.io/leganck/dsh-embed:base-gpu \
+#     docker compose -f compose.yaml -f compose.gpu.yaml -f compose.jina.yaml up -d
+services:
+  dsh-embed:
+    volumes:
+      - ${MODELS_DIR:-./models}/model-jina:/models/model:ro
+    environment:
+      # jina v2 与 bge 的差异全部在这里表达（不在镜像里）
+      MODEL_NAME: jina-embeddings-v2-base-code
+      POOLING: auto            # ONNX 图已做 mean pooling + 归一化（输出 2D）
+      QUERY_PREFIX: ""         # jina v2 不需要检索指令前缀
+      PAD_TOKEN: "<pad>"       # tokenizer 词表：<pad> / id=1
+      PAD_ID: "1"
+      SEP_ID: "0"              # 没有 BERT 的 [SEP]=102，禁用末位替换

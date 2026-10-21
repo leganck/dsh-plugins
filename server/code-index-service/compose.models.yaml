@@ -1,0 +1,17 @@
+# 模型挂载覆盖层：镜像只负责运行时，模型由宿主机目录提供
+#
+#   docker compose -f compose.yaml -f compose.models.yaml up -d
+#
+# 前置（模型不进镜像）：
+#   node scripts/fetch-models.mjs            # → models/model、models/model-rerank（bge + 重排）
+#   node scripts/fetch-jina-model.mjs        # → models/model-jina（jina，可选）
+#
+# 镜像请用 base-*（不含模型）：
+#   IMAGE=ghcr.io/leganck/dsh-embed:base-gpu docker compose -f compose.yaml -f compose.gpu.yaml -f compose.models.yaml up -d
+#
+# 重排模型是可选的：不挂 /models/model-rerank 时服务端 `rerank` 自动降级，不影响检索。
+services:
+  dsh-embed:
+    volumes:
+      - ${MODELS_DIR:-./models}/model:/models/model:ro
+      - ${MODELS_DIR:-./models}/model-rerank:/models/model-rerank:ro

@@ -212,7 +212,7 @@ docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
 | `latest-gpu` | ≈1.7 GB | 3.06 GB | gpu 底座（CUDA 12 + ORT 1.19.2，Pascal 可用）+ 嵌入模型 |
 | `latest-cpu-rerank` / `latest-gpu-rerank` | ≈759 MB / ≈2.0 GB | 1.06 / 3.63 GB | 再加重排模型（默认不需要：服务端 `rerank` 默认 off） |
 | `base-cpu` / `base-gpu` | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | 只有运行时，模型自己挂载 |
-| `jina-cpu` / `jina-gpu` | ≈0.37 / ≈1.8 GB（估） | **603 MB / 3.18 GB（实测）** | 代码检索变体：`jina-embeddings-v2-base-code`（Apache-2.0，8k 上下文）。见 [`server/code-index-service/docs/jina-v2.md`](server/code-index-service/docs/jina-v2.md) |
+| ~~`jina-cpu` / `jina-gpu`~~ | 已停止发布 | — | 代码检索改为**挂载模型**：`fetch-jina-model.mjs` + `compose.jina.yaml`（不再占镜像矩阵）。见 [jina-v2.md](server/code-index-service/docs/jina-v2.md) / [image-matrix.md](server/code-index-service/docs/image-matrix.md) |
 
 ### 镜像体积怎么控制的
 
