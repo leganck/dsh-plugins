@@ -350,6 +350,27 @@ class IndexStore:
             self.db.commit()
             self._invalidate()  # set_tag 改了数据 → 计数/体积缓存失效
 
+    def set_all_tags(self, tag):
+        """把所有**已同步**仓库的 tag 批量改成新模型 tag（热切换用）；返回影响行数。
+
+        - 只更新 tag 非空的行：从未定过 tag 的仓库（还没带 tag 同步过）保持原样，
+          它们的 pending 语义是"全部待嵌"，不能被一次热切换误标成已同步；
+        - 单条 UPDATE、单事务（调完一起 commit），16 万块规模也只是一次行更新；
+        - 改 tag 等价于让现有向量作废（旧 tag 的向量留在库里，missing 按新 tag 重算，
+          旧向量由 purge_tag_vectors() 显式清理），所以必须失效计数/体积/覆盖度缓存。
+        """
+        tag = "" if tag is None else str(tag)
+        if not tag:
+            raise ValueError("set_all_tags 的 tag 不能为空")
+        with self.lock:
+            cur = self.db.execute(
+                "update repos set tag = ?, updated_at = ? where tag is not null and tag != ''",
+                (tag, int(time.time())),
+            )
+            self.db.commit()
+            self._invalidate()  # tag 全改 → counts 的 vectors/coverage 缓存全部失效
+            return int(cur.rowcount or 0)
+
     # ---------------------------------------------------------------- 作用域生命周期
     def register_scope(self, namespace, kind, ref, commit_sha=None, ttl_days=None, pinned=None,
                        scope_ref=None, new_row=None):

@@ -29,6 +29,11 @@ class EmbedGovernor:
         self._ns_queue = []
         self._state = {}  # namespace -> {"lastError":..., "embeddedTotal":0, "lastBatchMs":0}
         self.lock = threading.Lock()
+        # 热切换模型前排空用：_inflight 记录"正在 _tick 的批次数"（0 或 1），
+        # 用 self.lock 上的 Condition 等待它归零。锁对象与现有 _next_namespace 共用。
+        self._inflight = 0
+        self._idle_waiters = 0
+        self._idle_cv = threading.Condition(self.lock)
 
     # ------------------------------------------------------------------ 控制
     def kick(self, namespace):
@@ -58,6 +63,45 @@ class EmbedGovernor:
         self.stopping = True
         self._wake.set()
 
+    # ------------------------------------------------------------------ 排空（热切换用）
+    def wait_idle(self, timeout=15.0):
+        """等当前批处理（_tick）结束；返回 True=已空闲，False=超时仍在跑。
+
+        模型热切换前建议**先 pause()** 再 wait_idle()：本方法只保证"返回瞬间没有正在
+        执行的 _tick"，而主循环在它返回后可以立刻开始下一批（队列非空时）。
+        线程安全：_inflight 的增减与等待都在 self.lock 上完成。
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._idle_cv:
+            self._idle_waiters += 1
+            try:
+                while self._inflight > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._idle_cv.wait(remaining)
+                return True
+            finally:
+                self._idle_waiters -= 1
+
+    def _begin_tick(self):
+        with self._idle_cv:
+            self._inflight += 1
+
+    def _end_tick(self):
+        with self._idle_cv:
+            if self._inflight > 0:
+                self._inflight -= 1
+            idle = self._inflight == 0
+            waiters = self._idle_waiters
+            if idle:
+                self._idle_cv.notify_all()
+        # 背靠背批次时 idle 窗口只有几微秒，而通知后主循环可能立刻开始下一批
+        # （锁不保证公平）—— 有人在等就主动让出 1ms，否则 wait_idle 永远看到
+        # _inflight==1，直到超时。没有等待者时零开销，不改变限流节拍。
+        if idle and waiters:
+            time.sleep(0.001)
+
     # ------------------------------------------------------------------ 状态
     def status(self, namespace=None):
         with self.lock:
@@ -84,7 +128,13 @@ class EmbedGovernor:
                     self._wake.wait(1.0)
                     self._wake.clear()
                     continue
-                self._tick(ns)
+                self._begin_tick()
+                try:
+                    self._tick(ns)
+                finally:
+                    # 无论 _tick 抛不抛（含限速睡眠被打断的极端情况）都必须清零并唤醒等待者，
+                    # 否则热切换的 wait_idle 会一直等到超时。
+                    self._end_tick()
             except Exception as e:  # 线程绝不允许因单次失败退出
                 self.log(f"[governor] tick failed: {e}\n{traceback.format_exc()[-600:]}")
 
