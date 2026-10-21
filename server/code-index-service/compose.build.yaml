@@ -9,6 +9,7 @@
 #   MODEL_TARGET=nomodel        # 不含模型（再用 -v ./models:/models:ro 挂载）
 #   MODEL_TARGET=embed          # 只带嵌入模型（默认，开箱即用）
 #   MODEL_TARGET=embed-rerank   # 嵌入 + 重排
+#   MODEL_TARGET=embed-jina     # jina 代码检索变体（先 node scripts/fetch-jina-model.mjs）
 #
 # 模型走独立 build context（additional_contexts.models），不进主上下文哈希。
 name: dsh-embed-build

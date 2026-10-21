@@ -241,6 +241,7 @@ curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
 | `latest-cpu-rerank` | + 重排模型 | ≈759 MB | 1.06 GB | 要用远端重排（`rerank=fast|quality`） |
 | `latest-gpu-rerank` | gpu + 两个模型 | ≈2.0 GB | 3.63 GB | 大规模 + 远端重排 |
 | `base-cpu` / `base-gpu` | 只有运行时（无模型） | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | 模型在 NFS 上、或自己叠层 |
+| `jina-cpu` / `jina-gpu` | 底座 + **jina-embeddings-v2-base-code**（代码检索变体） | ≈0.37 / ≈1.8 GB（估） | **603 MB / 3.18 GB（实测）** | 英文/跨语言查询多、需要 8k 上下文 |
 
 > 为什么默认不带重排模型：服务端 `rerank` 默认就是 `off`，缺模型时 `/health` 报
 > `rerank_ready=false`、客户端**自动回退本机重排**。需要远端重排再拉 `-rerank` 变体即可。
@@ -258,6 +259,9 @@ curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
    docker compose -f compose.build.yaml up -d --build
    # 只出"不含模型"的小镜像：
    MODEL_TARGET=nomodel docker compose -f compose.build.yaml up -d --build
+   # 代码检索变体（jina-embeddings-v2-base-code）：
+   node scripts/fetch-jina-model.mjs              # → models/model-jina（Release 资产 + sha256 校验）
+   MODEL_TARGET=embed-jina docker compose -f compose.build.yaml up -d --build
    ```
 
 ### GPU 的前置与降级行为
@@ -300,6 +304,9 @@ networks:
 - **目录名必须是 `model` / `model-rerank`**：`embedder.py` 用 `basename(model_dir)=='model'` 推导模型名，
   拼出的向量标签会跟着变 —— 变了客户端就认为"模型换了" → 全量重嵌。
   实测本镜像的 tag 与现网一致：`bge-base-zh-v1.5-c4fa1e57-fp16`。
+- **代码检索变体**：`embed-jina` target 用 `jina-embeddings-v2-base-code`（Apache-2.0，768 维，8k 上下文）。
+  模型不进 git：由 `scripts/fetch-jina-model.mjs` 从 GitHub Release 下载并做 sha256 校验；
+  来源、修改说明（ONNX 导出 + mean pooling 烘焙 + fp16）与实测数据见 [docs/jina-v2.md](docs/jina-v2.md)。
 
 ### 排错
 

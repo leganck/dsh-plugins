@@ -8,9 +8,16 @@ import os
 
 import numpy as np
 
-QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章："
-MAX_TOKENS = 512
-SEP_ID = 102
+# 模型差异全部走环境变量：同一份代码既跑 bge-base-zh（默认），也跑 jina-code 变体。
+# 注意：这些值在 import 时读取，Dockerfile 的 ENV 在进程启动前生效，容器内改不了（要重启）。
+QUERY_PREFIX = os.environ.get("QUERY_PREFIX", "为这个句子生成表示以用于检索相关文章：")
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "512"))
+# BERT 的 [SEP]；<=0 表示该模型没有这个 token（jina 是 Llama 词表，禁用末位替换）
+SEP_ID = int(os.environ.get("SEP_ID", "102"))
+# cls（默认，bge）| mean | last | auto（输出已是 2D 就直接用）
+POOLING = os.environ.get("POOLING", "cls").strip().lower()
+PAD_TOKEN = os.environ.get("PAD_TOKEN", "[PAD]")
+PAD_ID = int(os.environ.get("PAD_ID", "0"))
 
 
 def fingerprint(model_dir, model_file):
@@ -61,7 +68,7 @@ class Embedder:
         tok_path = os.path.join(model_dir, "tokenizer.json")
         tok = Tokenizer.from_file(tok_path)
         tok.enable_truncation(max_length=MAX_TOKENS)
-        tok.enable_padding(pad_id=0, pad_token="[PAD]", direction="right")
+        tok.enable_padding(pad_id=PAD_ID, pad_token=PAD_TOKEN, direction="right")
         self.tokenizer = tok
 
         model_path = pick_model(model_dir)
@@ -92,7 +99,7 @@ class Embedder:
         ids = np.array([e.ids for e in encs], dtype=np.int64)
         mask = np.array([e.attention_mask for e in encs], dtype=np.int64)
         seq = ids.shape[1]
-        if seq == MAX_TOKENS:
+        if SEP_ID > 0 and seq == MAX_TOKENS:
             last = seq - 1
             for i in range(ids.shape[0]):
                 if mask[i, last] == 1 and ids[i, last] != SEP_ID:
@@ -105,9 +112,19 @@ class Embedder:
                 feeds[meta.name] = mask
             elif meta.name == "token_type_ids":
                 feeds[meta.name] = np.zeros_like(ids)
-        hidden = self.session.run(None, feeds)[0]
-        cls = hidden[:, 0, :].astype(np.float32)
-        norms = np.linalg.norm(cls, axis=1, keepdims=True)
+        out = np.asarray(self.session.run(None, feeds)[0], dtype=np.float32)
+        if out.ndim == 2:
+            # 模型图里已做 pooling + 归一化（jina 变体）；这里再归一化一次是幂等的
+            emb = out
+        elif POOLING == "mean":
+            m = mask.astype(np.float32)[:, :, None]
+            emb = (out * m).sum(axis=1) / np.clip(m.sum(axis=1), 1e-6, None)
+        elif POOLING == "last":
+            idx = np.clip(mask.sum(axis=1) - 1, 0, out.shape[1] - 1)
+            emb = out[np.arange(out.shape[0]), idx]
+        else:  # cls / auto（3D 输入按 bge 的 CLS 处理）
+            emb = out[:, 0, :]
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
         norms[norms == 0] = 1e-9
-        self.dim = int(cls.shape[1])
-        return cls / norms
+        self.dim = int(emb.shape[1])
+        return emb / norms
