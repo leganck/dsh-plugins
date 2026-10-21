@@ -845,6 +845,21 @@ def test_scope_sync() -> None:
             check("节流窗口内沿用已记录的作用域 namespace", again == ["ns-base", "ns-head"] and len(srv2.calls_matching("/sync")) == 2, str(again))
         finally:
             srv2.close()
+
+        # 回归：刚启动的机器 time.monotonic() 很小（CI runner），首次同步不能被节流误杀
+        import unittest.mock as _mock
+        from dataclasses import replace as _replace
+
+        srv3 = FakeIndexServer()
+        try:
+            srv3.scope_namespaces = {("branch", "release/1.0"): "ns-base", ("pr", "123"): "ns-head"}
+            cfg3 = _replace(cfg, index_url=srv3.url)
+            w3 = Worker("t3", cfg3, Store(os.path.join(tmp, "review3.db")), threading.Event(), IndexClient(srv3.url, timeout=5))
+            with _mock.patch("app.worker.time.monotonic", return_value=5.0):
+                got_boot = w3._maybe_sync_index("7", "release/1.0", wt_base, {}, [], plan=plan, head_worktree=wt_head, iid=123)
+            check("刚启动（monotonic=5s）首次同步不被节流", got_boot == ["ns-base", "ns-head"], str(got_boot))
+        finally:
+            srv3.close()
     finally:
         srv.close()
 
