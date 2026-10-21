@@ -734,10 +734,27 @@ def main():
     st4 = dl2.wait("tiny", timeout=30)
     check("sha256 不符 → failed", st4["status"] == "failed" and "sha256" in (st4.get("error") or ""), st4.get("error"))
     check("失败可重试", st4["retryable"] is True)
+    # 多源回退 + 远端路径（files 用 dict 形式）：第一个源 404 → 第二个源成功
+    mirror = {"mirror": {
+        "label": "镜像回退测试", "dir": "mirror",
+        "release": [base + "/missing", base],
+        "files": {"a.txt": {"sha256": shas["a.txt"], "remote": "a.txt"}},
+    }}
+    dl3 = mdl.ModelDownloader(os.path.join(TMP, "dlroot3"), mirror, timeout=10)
+    dl3.start("mirror")
+    st6 = dl3.wait("mirror", timeout=30)
+    check("多源回退：第一个源 404 自动换下一个源", st6["status"] == "done" and st6["ready"] is True, st6.get("error"))
+    bad_url = {"bad": {"label": "全失败", "dir": "bad", "release": [base + "/x", base + "/y"],
+                       "files": {"a.txt": {"sha256": shas["a.txt"]}}}}
+    dl4 = mdl.ModelDownloader(os.path.join(TMP, "dlroot4"), bad_url, timeout=5)
+    dl4.start("bad")
+    st7 = dl4.wait("bad", timeout=20)
+    check("所有源都失败 → failed", st7["status"] == "failed" and bool(st7.get("error")), st7.get("error"))
     hsrv.shutdown()
     st5, body = req("GET", "/v1/admin/models")
     ids = [m["name"] for m in (body or {}).get("models", [])]
-    check("/v1/admin/models 列出 jina 模型", st5 == 200 and "jina-v2-base-code" in ids, ids)
+    check("/v1/admin/models 列出 bge / rerank / jina 三个模型",
+          st5 == 200 and {"bge-base-zh", "bge-reranker-base", "jina-v2-base-code"} <= set(ids), ids)
     page = req_raw("/admin")[1]
     check("后台页面包含「模型下载」与「重传」", "模型下载" in page and "重传" in page)
 
