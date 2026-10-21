@@ -63,10 +63,15 @@
 
 ## 获取模型
 
-模型不进 git（321 MB），发布在 GitHub Release：
+模型不进 git（321 MB），发布在 GitHub Release。
 
-也可以在**后台页面**（`GET /admin` →「模型下载」）直接下载：显示进度/速度，支持取消、重试、强制重传与 sha256 校验，
+也可以在**控制台**（`GET /admin` →「模型」）直接下载：显示进度/速度，支持取消、重试、强制重传与 sha256 校验，
 文件落在 `/data/models/model-jina/`（容器重启不丢）。
+
+下载完成后在本页「已安装模型」点 **切换为嵌入** 即可**热切换**（无需重启）：服务端会暂停嵌入、等当前批次结束、
+加载 jina profile（`POOLING=auto`、空 query 前缀、`SEP_ID=0` 等自动生效）、把 `repos.tag` 改成 jina tag。
+旧 tag 向量保留但立即检索不到；插件下次同步会按新 tag 全量重嵌（覆盖率从 0 恢复）。
+想切回 bge：再点 bge 那一行即可。
 
 ```bash
 node scripts/fetch-jina-model.mjs                 # 默认 release：dsh-embed-jina-v0.1.0

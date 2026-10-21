@@ -82,33 +82,70 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/scopes/{ns}/pin` | `{pinned, ttlDays?}` → `{namespace, pinned, expiresAt}`（`ttlDays:null` = 永久） |
 | `DELETE /v1/scopes/{ns}` | 删 scope + 对血统做 retention GC → `{deleted, chunks}`（幂等；未知 ns → `{deleted:false}`） |
 | `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
-| `GET /v1/admin/models`、`POST /v1/admin/models/{name}/download` `/cancel` | **模型下载**（后台页面「模型下载」卡片）：进度/速度、取消、失败重试、强制重传、断点续传、sha256 校验 |
+| `GET /v1/admin/models`、`POST /v1/admin/models/{name}/download` `/cancel` | **模型下载**：进度/速度、取消、失败重试、强制重传、断点续传、sha256 校验 |
+| `POST /v1/admin/models/activate`、`POST /v1/admin/models/deactivate` | **模型热切换**：`{kind:'embed'|'rerank', dir|name}` 动态加载，无需重启（见下文） |
+| `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
+| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按端点（请求、错误、embed 文本、search/rerank 次数、延迟） |
+| `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
-| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/`、`/log` 需 Bearer 或后台 Basic |
-| `GET /admin` | **后台查看页**（单文件 HTML，HTTP Basic 登录）。支持查看运行时/治理/限额/作用域表，以及暂停/恢复嵌入、立即清扫 |
+| `GET /` `/v1/status` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/` 对浏览器（`Accept: text/html`）302 到 `/admin`，对 API 客户端仍返回 JSON（插件 `describe` 契约） |
+| `GET /admin` | **控制台**（单文件 HTML，无外部依赖）：登录页 + 6 个 Tab（概览 / 模型 / API Key / 统计 / 作用域 / 日志）；支持暂停嵌入、清扫、热切换模型、Key 管理、调用统计 |
 
-### 鉴权：索引用 `API_KEY`，后台用 HTTP Basic
+### 鉴权：API Key（可多把）+ 控制台会话
 
-两套独立凭据，各管一边：
+索引客户端和控制台是两套入口，但共用「Key」这一套凭据：
 
-| 用途 | 凭据 | 方式 | 客户端配置 |
-|---|---|---|---|
-| 索引 / 检索客户端（插件、review-service） | `API_KEY` | `Authorization: Bearer <key>` | 插件 `remote.apiKey`、review `INDEX_API_KEY` |
-| 后台页面与治理操作 | `ADMIN_USER` / `ADMIN_PASSWORD` | **HTTP Basic**（浏览器自动弹登录框） | 服务端环境变量 |
+| 用途 | 凭据 | 方式 |
+|---|---|---|
+| 索引 / 检索客户端（插件、review-service） | API Key（`role=index`，可建多把） | `Authorization: Bearer <key>` |
+| 控制台 | 管理员密码登录（会话 Cookie）/ HTTP Basic / `role=admin` 的 Key | 登录页 → HttpOnly Cookie（12h） |
+| 兼容旧部署 | 环境变量 `API_KEY`（legacy，`id=0`，admin 角色，只读不可删） | `Authorization: Bearer <API_KEY>` |
 
-- 设了 `API_KEY` 后，**索引必须带 key**：`sync`/`chunks`/`embed`/`vectors`/`search`/`status` 等接口都要求 Bearer；
-- 设了 `ADMIN_PASSWORD` 后，`GET /admin` 需要 Basic；页面用到的数据接口（`/v1/scopes`、`/health` 完整版、`/v1/admin/*`）同时接受 Basic 与 Bearer；
-- 免鉴权只剩 `GET /health`（无人认领时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）；
-- 两个都不配时服务为开放状态（仅建议在隔离内网这样跑）：`API_KEY` 空 = 索引接口开放，`ADMIN_PASSWORD` 空 = 后台页面开放（数据仍受 `API_KEY` 约束）。
-- 页面只做「查看 + 暂停/恢复/清扫 + 检索测试」，删除作用域等破坏性操作仍走 curl/API。
-- **检索测试**：选一个作用域、输入 query、点「检索」，直接调 `/v1/search` 展示命中 `path:start-end`、score、embed/kNN 耗时与覆盖率；后台 Basic 即可调用（`/v1/search` 对 Basic 与 Bearer 都开放）。
-- **模型与向量标签**：页面显示当前模型 tag 以及所有 tag 的条数/占用，并提供「清理非当前 tag 的向量」。
-- **模型下载**：页面「模型下载」卡片可下载预置模型（`bge-base-zh` / `bge-reranker-base` / `jina-v2-base-code`），
-  多源（ModelScope 优先、HF 回退，支持同一文件不同远端路径）、逐文件 sha256 校验，落到 `/data/models/`；实时显示进度/速度，
-  支持取消、失败重试、**强制重传**、断点续传与 sha256 校验；文件在 `/data` 卷里，容器重启不丢。
-  **启用需要重启容器**（`MODEL_DIR` 指向下载目录 + 对应环境变量，jina 见 `docs/jina-v2.md`）。
-  落盘根目录用 `MODELS_DIR` 改；扩展预置模型用 `MODEL_CATALOG`（JSON，字段见 `model_downloader.DEFAULT_CATALOG`）。
+- 控制台打开 `https://<host>/admin`：未登录显示登录页（不再弹浏览器 Basic 框）；登录后进入控制台，
+  右上角「退出」清 Cookie。
+- **Key 管理**：控制台「API Key」页新建/禁用/删除。明文只在创建时显示一次；服务端只存 `sha256(key)`，
+  列表只显示前 6 位。`index` 角色的 Key **不能**进后台管理接口。
+- **强制策略**：只要存在任一 Key（env `API_KEY` 或控制台创建），所有索引/检索接口都必须带 Bearer；
+  一个都没有时为开放模式（仅建议隔离内网），控制台顶部会红字提示。
+- 免鉴权只剩 `GET /health`（无人认领时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）。
+- 首次部署没有管理员密码时，控制台「概览」会显示初始化表单（`POST /admin/setup`，密码 ≥8 位，
+  pbkdf2 存 `/data/admin.db`）；也可以继续用环境变量 `ADMIN_PASSWORD`。
+- 创建 Key 前必须已有管理员凭据（密码 / env `API_KEY` / admin Key），避免"建了 Key 却进不了后台"。
+
+### 控制台能做什么
+
+- **概览**：运行时 / 治理 / 存储限额 / 向量标签 / 鉴权状态；暂停/恢复嵌入、立即清扫、清理旧 tag。
+- **模型**：当前嵌入/重排、已安装模型（本机 `/models` 与 `/data/models` 自动发现）、一键**热切换**、
+  可下载模型（进度/取消/重试/重传）、重排启用/关闭。
+- **API Key**：新建（index/admin 角色）、启用/禁用、删除、一次性明文展示。
+- **统计**：近 7/30 天请求数、错误、embed 文本数、search/rerank 次数、平均/最大延迟；
+  按天柱状图、按 Key、按端点三张表。
+- **作用域**：快照表（块/向量/覆盖率/占用/TTL/命名空间）+ 检索测试。
+- **日志**：服务日志尾部。
+
+### 模型下载与热切换（无需重启）
+
+下载：控制台「模型」页或 `POST /v1/admin/models/{name}/download`。预置 `bge-base-zh` /
+`bge-reranker-base` / `jina-v2-base-code`，多源（ModelScope 优先、HF 回退）、逐文件 sha256 校验，
+支持取消、失败重试、**强制重传**、断点续传；文件落在 `/data/models/`（`/data` 卷，重启不丢）。
+
+切换：下载完成后，在「已安装模型」里点 **切换为嵌入 / 启用重排**（或
+`POST /v1/admin/models/activate {kind, dir}`）。服务端会：
+
+1. `governor.pause()` + `wait_idle()` 排空当前嵌入批次；
+2. 加载新 ONNX 会话（失败自动保留原模型，返回 400/500）；
+3. 交换全局 embedder / governor / `/health` 的模型信息（`tag` 立即变化）；
+4. `repos.tag` 批量改为新 tag + kNN 缓存失效；
+5. 恢复 governor 原状态。
+
+> 切换后旧 tag 的向量仍在库里（可点「清理旧 tag」回收），但**立即检索不到**：插件下次
+> `GET /` 看到新 tag 会按新 tag 全量重嵌（覆盖率从 0 恢复）。控制台切换前会弹确认，
+> 切换后会显示"等待客户端重嵌"提示。
+>
+> 每个模型自带 profile（query 前缀 / 池化 / SEP / PAD），bge 与 jina 自动使用各自参数；
+> 自定义目录名不在内置 profile 里时沿用环境变量默认（`QUERY_PREFIX` 等）。
+> 目录白名单由 `MODEL_ROOTS`（默认 `/models,/data/models`）与 `MODEL_EXTRA_DIRS` 控制。
 
 ### 换模型后还是同一个数据库吗？
 
@@ -361,9 +398,12 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `MODEL_DIR` / `MODEL_NAME` | `/app/model` / 目录名推断 | 嵌入模型；`MODEL_NAME` 参与 tag 计算 |
+| `MODEL_DIR` / `MODEL_NAME` | `/app/model` / 目录名推断 | 启动时嵌入模型；控制台热切换后以切换结果为准（不重启），`MODEL_NAME` 参与 tag 计算 |
 | `MODELS_DIR` | `/data/models` | 后台「模型下载」的落盘根目录（在 `/data` 卷内，重启不丢） |
 | `MODEL_CATALOG` | 空 | 可选 JSON：扩展/覆盖预置模型目录（字段见 `model_downloader.DEFAULT_CATALOG`） |
+| `MODEL_ROOTS` / `MODEL_EXTRA_DIRS` | `/models,/data/models` / 空 | 模型热切换的目录白名单（`/models` 镜像内置，`/data/models` 下载目录） |
+| `SERVER_ADMIN_DB` | `/data/admin.db` | Key / 调用统计 / 管理员密码 / 会话的独立库（不碰 1.6 GB 的 index.db） |
+| `SESSION_TTL` | `43200` | 控制台登录会话有效期（秒，默认 12 小时） |
 | `RERANK_MODEL_DIR` | `/app/model-rerank` | 重排模型；缺文件 → `rerank_ready=false`（客户端直接回退本机） |
 | `SERVER_DB` | `<app>/out/index.db` | 索引库 |
 | `EMBED_RATE` / `EMBED_BATCH` | `10` / `8` | 后台嵌入限流与批大小 |
@@ -377,8 +417,8 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 | `MAX_SEARCH_SCOPES` | `4` | 单次检索最多作用域数，超限 400 |
 | `WARMUP` | `1` | 启动后台预热（嵌入会话、重排内核、最大命名空间的 kNN 矩阵与计数）：把"重启后第一个查询"从 2.4 s 降到 **25 ms**；`0` 关闭 |
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
-| `API_KEY` | 空 | 索引/检索客户端的 Bearer key（插件 `remote.apiKey`）；设了则写操作与数据接口都要 key |
-| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / 空 | 后台页面与治理接口的 HTTP Basic 凭据；`ADMIN_PASSWORD` 为空则不启用 Basic |
+| `API_KEY` | 空 | **legacy** Bearer key（admin 角色，id=0，不可在控制台删除）；新部署建议用控制台「API Key」页建 Key（插件 `remote.apiKey`） |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / 空 | 控制台登录与 HTTP Basic 凭据；为空时首次打开控制台可初始化管理员密码（存 `/data/admin.db`） |
 | `FAKE_EMBED` | 空 | `1` = 不加载模型（自测用） |
 | `HOST_PORT` | `18000` | **compose 专用**：宿主机端口（只绑 127.0.0.1） |
 | `FLAVOR` | `cpu` | **构建参数**：`cpu` / `gpu`（gpu 装 CUDA 12 的 cublas/cudnn/curand/cufft） |

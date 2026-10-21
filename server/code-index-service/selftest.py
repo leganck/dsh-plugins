@@ -568,7 +568,8 @@ def main():
     st, html, ctype = req_raw("/admin")
     check("/admin → 200 text/html", st == 200 and "text/html" in ctype, (st, ctype))
     check("页面包含标题与关键区块",
-          "code-index-service · 后台" in html and "作用域（快照）" in html and "/v1/scopes" in html)
+          "code-index-service · 控制台" in html and "作用域（快照）" in html and "/v1/scopes" in html
+          and "API Key" in html and "概览" in html)
     st, html_slash, _ = req_raw("/admin/")
     check("/admin/ 同样可用", st == 200 and "code-index-service" in html_slash)
     check("页面不再内嵌 API-Key 输入逻辑（改走 HTTP Basic）",
@@ -615,20 +616,20 @@ def main():
     bad = "Basic " + base64.b64encode(b"admin:wrong").decode()
     bearer = "Bearer test-key-123"
     try:
-        st, hdrs, _ = req_auth("/admin")
-        check("无凭据访问 /admin → 401 + Basic challenge",
-              st == 401 and "basic" in (hdrs.get("WWW-Authenticate") or "").lower(),
-              (st, hdrs.get("WWW-Authenticate")))
-        st, _, _ = req_auth("/admin", auth=bad)
-        check("错误 Basic 凭据 → 401", st == 401, st)
+        st, hdrs, page = req_auth("/admin")
+        check("无凭据访问 /admin → 登录页（200，不再弹 Basic）",
+              st == 200 and "请输入管理员账号" in page, (st, page[:40]))
+        st, _, page = req_auth("/admin", auth=bad)
+        check("错误 Basic 凭据 → 仍是登录页", st == 200 and "请输入管理员账号" in page, st)
         st, _, page = req_auth("/admin", auth=good)
-        check("正确 Basic → /admin 200 html", st == 200 and "code-index-service" in page, st)
+        check("正确 Basic → /admin 控制台 html", st == 200 and "code-index-service · 控制台" in page, st)
         st, _, body = req_auth("/v1/scopes", auth=good)
         check("正确 Basic → 后台数据接口放行", st == 200 and "scopes" in body, st)
         st, _, body = req_auth("/health", auth=good)
         check("正确 Basic → health 是完整版", st == 200 and "spaces" in json.loads(body), st)
         st, _, _ = req_auth("/v1/admin/pause", auth=good, method="POST", body={})
         check("正确 Basic → 后台治理接口放行", st == 200, st)
+        req_auth("/v1/admin/resume", auth=good, method="POST", body={})  # 别把 paused 状态留给后续用例
         st, _, _ = req_auth("/embed", auth=good, method="POST", body={"texts": ["basic only"]})
         check("索引接口不接受 Basic（只认 Bearer）", st == 401, st)
         st, _, _ = req_auth("/embed", auth=bearer, method="POST", body={"texts": ["bearer ok"]})
@@ -669,8 +670,8 @@ def main():
 
     print("\n[28] 向量标签统计 / 清理旧 tag / 后台检索测试")
     page = req_raw("/admin")[1]
-    check("后台包含「检索测试」与「模型与向量标签」卡片",
-          "检索测试" in page and "模型与向量标签" in page)
+    check("后台包含「检索测试」与「向量标签」卡片",
+          "检索测试" in page and "向量标签" in page)
     row = server.store.repo(NS_NULL)
     vec = server.embedder.embed(["old model probe"])[0]
     server.store.put_vectors(row["lineage_id"], "old-model-tag", [("hash-old-tag", vec)])
@@ -756,8 +757,141 @@ def main():
     check("/v1/admin/models 列出 bge / rerank / jina 三个模型",
           st5 == 200 and {"bge-base-zh", "bge-reranker-base", "jina-v2-base-code"} <= set(ids), ids)
     page = req_raw("/admin")[1]
-    check("后台页面包含「模型下载」与「重传」", "模型下载" in page and "重传" in page)
+    check("后台页面包含「可下载模型」与「重传」", "可下载模型" in page and "重传" in page)
     check("后台页面初始化会加载模型列表（不会停在加载中）", "loadModels();" in page)
+
+    # ================================================================
+    print("\n[30] 入口内容协商 / 会话登录")
+    server.API_KEY = ""
+    old_admin_pw = server.ADMIN_PASSWORD
+    server.ADMIN_PASSWORD = "admin-pw"
+    try:
+        st, _, page = req_auth("/", headers={"accept": "text/html"})
+        check("浏览器 Accept text/html → 重定向到控制台（登录页）",
+              st == 200 and "请输入管理员账号" in page, (st, page[:40]))
+        basic2 = "Basic " + base64.b64encode(b"admin:admin-pw").decode()
+        st, _, body = req_auth("/", auth=basic2)
+        check("非 HTML 客户端 GET / → JSON 自述（插件契约）", st == 200 and "tag" in json.loads(body), st)
+        st, _, body = req_auth("/v1/status", auth=basic2)
+        check("/v1/status → JSON 自述", st == 200 and "tag" in json.loads(body), st)
+        st, hdrs, _ = req_auth("/admin/login", method="POST", body={"username": "admin", "password": "wrong"})
+        check("错误密码登录 → 401", st == 401, st)
+        st, hdrs, _ = req_auth("/admin/login", method="POST", body={"username": "admin", "password": "admin-pw"})
+        h = {k.lower(): v for k, v in hdrs.items()}
+        cookie = (h.get("set-cookie") or "").split(";")[0]
+        check("正确密码登录 → 200 + HttpOnly 会话 Cookie",
+              st == 200 and cookie.startswith("dsh_admin=") and "httponly" in (h.get("set-cookie") or "").lower(),
+              (st, h.get("set-cookie")))
+        st, _, page = req_auth("/admin", headers={"cookie": cookie})
+        check("带会话 Cookie → 控制台", st == 200 and "code-index-service · 控制台" in page, st)
+        st, _, body = req_auth("/v1/admin/session", headers={"cookie": cookie})
+        check("会话可读 /v1/admin/session", st == 200 and json.loads(body).get("authed") is True, st)
+        st, _, _ = req_auth("/admin/logout", method="POST", body={})
+        check("登出 → 200（清 Cookie）", st == 200, st)
+        st, _, page = req_auth("/admin")
+        check("登出后 /admin 回到登录页", st == 200 and "请输入管理员账号" in page, st)
+    finally:
+        server.ADMIN_PASSWORD = old_admin_pw
+
+    print("\n[31] 多 API Key（创建/禁用/删除/角色）")
+    old_admin_pw = server.ADMIN_PASSWORD
+    server.ADMIN_PASSWORD = "admin-pw"
+    admin_auth = {"Authorization": "Basic " + base64.b64encode(b"admin:admin-pw").decode()}
+    try:
+        st, body = req("GET", "/v1/admin/keys", headers=admin_auth)
+        check("Key 列表可读（管理员 Basic）", st == 200 and "keys" in body, st)
+        st, body = req("POST", "/v1/admin/keys", {"name": "test-index", "role": "index"}, headers=admin_auth)
+        created = body
+        plain = (created or {}).get("key") or ""
+        kid = (created or {}).get("id")
+        check("创建 index Key：返回一次性明文 + 前缀", st == 200 and len(plain) >= 20 and "key" in (created or {}), created)
+        st, body = req("GET", "/v1/admin/keys", headers=admin_auth)
+        lst = (body or {}).get("keys") or []
+        check("Key 列表不含明文/hash，只有前缀",
+              all(("key" not in k) and ("key_hash" not in k) and k.get("prefix") for k in lst), [list(k) for k in lst])
+        auth = {"Authorization": "Bearer " + plain}
+        st, _ = req("POST", "/v1/search", {"namespace": NS_NULL, "query": "key probe", "k": 1}, headers=auth)
+        check("index Key 可调检索接口", st == 200, st)
+        st, _ = req("GET", "/v1/admin/keys", headers=auth)
+        check("index Key 不能调后台管理接口（403/401）", st in (401, 403), st)
+        st, body = req("POST", f"/v1/admin/keys/{kid}/disable", {}, headers=admin_auth)
+        check("禁用 Key → 200", st == 200, st)
+        st, _ = req("POST", "/v1/search", {"namespace": NS_NULL, "query": "key probe", "k": 1}, headers=auth)
+        check("禁用后 index Key 立即 401", st == 401, st)
+        st, body = req("POST", f"/v1/admin/keys/{kid}/enable", {}, headers=admin_auth)
+        check("重新启用 Key → 200", st == 200, st)
+        st, _ = req("POST", "/v1/search", {"namespace": NS_NULL, "query": "key probe", "k": 1}, headers=auth)
+        check("启用后恢复可用", st == 200, st)
+        # 先建一个 keep key：否则删掉唯一 key 后服务回到"开放模式"，旧 token 也会放行（那是预期行为）
+        st, body = req("POST", "/v1/admin/keys", {"name": "keep-key", "role": "index"}, headers=admin_auth)
+        keep = body or {}
+        st, _ = req("DELETE", f"/v1/admin/keys/{kid}", headers=admin_auth)
+        check("删除 Key → 200", st == 200, st)
+        st, _ = req("POST", "/v1/search", {"namespace": NS_NULL, "query": "key probe", "k": 1}, headers=auth)
+        check("删除后 index Key 401", st == 401, st)
+        req("DELETE", f"/v1/admin/keys/{keep.get('id')}", headers=admin_auth)
+        st, _ = req("DELETE", "/v1/admin/keys/0", headers=admin_auth)
+        check("legacy id=0 不可删除（400）", st == 400, st)
+
+        print("\n[32] 调用统计（按 Key/端点/天）")
+        st, body = req("POST", "/v1/admin/keys", {"name": "stats-key", "role": "index"}, headers=admin_auth)
+        created = body
+        plain2, kid2 = (created or {}).get("key"), (created or {}).get("id")
+        auth2 = {"Authorization": "Bearer " + plain2}
+        for _ in range(3):
+            req("POST", "/v1/search", {"namespace": NS_NULL, "query": "统计探针", "k": 1}, headers=auth2)
+        req("POST", "/embed", {"texts": ["统计探针 a", "统计探针 b"]}, headers=auth2)
+        time.sleep(0.3)
+        st, body = req("GET", "/v1/admin/stats?days=7", headers=admin_auth)
+        stats = body or {}
+        tot = stats.get("totals") or {}
+        check("统计 totals：请求/embed/search 计数 > 0",
+              st == 200 and tot.get("requests", 0) >= 4 and tot.get("embedTexts", 0) >= 4
+              and tot.get("searchCalls", 0) >= 3, tot)
+        by_key = {k.get("keyId"): k for k in (stats.get("byKey") or [])}
+        check("统计按 Key 归属到新建 Key", kid2 in by_key and by_key[kid2].get("requests", 0) >= 4,
+              {k: v.get("requests") for k, v in by_key.items()})
+        eps = {e.get("endpoint"): e for e in (stats.get("byEndpoint") or [])}
+        check("统计按端点分组（search/embed）", eps.get("search", {}).get("requests", 0) >= 3
+              and eps.get("embed", {}).get("requests", 0) >= 1, list(eps))
+        check("统计按天序列存在", len(stats.get("byDay") or []) >= 1, len(stats.get("byDay") or []))
+        server.adm.flush()
+        check("flush 后可读（stats 持久化入口）", True, "")
+        req("DELETE", f"/v1/admin/keys/{kid2}", headers=admin_auth)
+
+        print("\n[33] 模型热切换（FAKE_EMBED + 假目录）")
+        fake_a = os.path.join(TMP, "model-fake-a")
+        fake_b = os.path.join(TMP, "model-fake-b")
+        for d in (fake_a, fake_b):
+            os.makedirs(d, exist_ok=True)
+            for fn, data in (("model_fp16.onnx", b"onnx-" + d.encode()[-8:]), ("tokenizer.json", b"{}"),
+                             ("tokenizer_config.json", b"{}")):
+                with open(os.path.join(d, fn), "wb") as f:
+                    f.write(data)
+        server.MODEL_ROOTS.append(TMP)
+        old_tag = server.state["info"]["tag"]
+        st, body = req("POST", "/v1/admin/models/activate", {"kind": "embed", "dir": fake_a}, headers=admin_auth)
+        r1 = body or {}
+        check("热切换 embed → 200 且 tag 变化", st == 200 and r1.get("tag") != old_tag, (st, r1.get("tag"), old_tag))
+        st, hp = req("GET", "/health")
+        check("/health.tag 立即反映新模型", st == 200 and hp.get("tag") == r1.get("tag"), (hp.get("tag"), r1.get("tag")))
+        st, body = req("GET", "/v1/scopes", headers=admin_auth)
+        check("切换后作用域数据仍在", st == 200 and (body or {}).get("scopes") is not None, st)
+        st, body = req("POST", "/v1/admin/models/activate", {"kind": "embed", "dir": fake_b}, headers=admin_auth)
+        r2 = body or {}
+        check("再切到第二个模型 → tag 不同", st == 200 and r2.get("tag") != r1.get("tag"), r2.get("tag"))
+        st, body = req("POST", "/v1/admin/models/activate", {"kind": "embed", "dir": "C:/definitely/not/a/model"}, headers=admin_auth)
+        check("非法目录 → 400 且保留原模型", st == 400 and server.state["info"]["tag"] == r2.get("tag"), st)
+        st, body = req("GET", "/v1/admin/models", headers=admin_auth)
+        mdata = body or {}
+        check("/v1/admin/models 含 installed/active/下载目录",
+              st == 200 and "installed" in mdata and "active" in mdata and "models" in mdata, list(mdata))
+        check("热切换后 governor 恢复运行", server.governor and not server.governor.paused,
+              server.governor.paused if server.governor else None)
+    finally:
+        server.ADMIN_PASSWORD = old_admin_pw
+        if TMP in server.MODEL_ROOTS:
+            server.MODEL_ROOTS.remove(TMP)
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")

@@ -54,7 +54,9 @@ from urllib.parse import parse_qs, urlparse, unquote
 import numpy as np
 
 import index_store
+import admin_store
 import model_downloader
+import models_admin
 
 APP = os.path.dirname(os.path.abspath(__file__))
 F = os.environ
@@ -104,6 +106,40 @@ RRF_K = 20  # 与插件 lib/search.js 的 RRF_K 保持一致
 MODEL_CATALOG = F.get("MODEL_CATALOG", "")
 downloader = model_downloader.ModelDownloader(MODELS_DIR, model_downloader.load_catalog(MODEL_CATALOG))
 
+# 管理侧：API Key / 调用统计 / 管理员密码 / 会话（独立 admin.db，不碰 1.6GB 的 index.db）
+ADMIN_DB = F.get("SERVER_ADMIN_DB", os.path.join(os.path.dirname(DB_PATH), "admin.db"))
+SESSION_TTL = float(F.get("SESSION_TTL", "43200"))  # 12h
+adm = admin_store.AdminStore(ADMIN_DB)
+
+# 模型热切换：白名单目录（镜像内置 /models + 下载目录 /data/models + 可选额外目录）
+MODEL_ROOTS = [p.strip() for p in F.get("MODEL_ROOTS", "/models,/data/models").split(",") if p.strip()]
+MODEL_ROOTS += [p.strip() for p in F.get("MODEL_EXTRA_DIRS", "").split(os.pathsep) if p.strip()]
+MODEL_LOCK = threading.RLock()  # embed/热切换互斥：切换时不能被推理线程用到半旧半新状态
+ACTIVE = {"embed_dir": MODEL_DIR, "embed_name": MODEL_NAME, "rerank_dir": RERANK_DIR}
+LOGIN_FAILS = {}  # ip -> [ts...]，简单登录限速（5 次 / 5 分钟）
+
+# 端点分组：统计按组聚合，避免 path 高基数（/v1/repos/<ns>/... 每个 ns 一行）
+def _endpoint_group(path):
+    if path == "/embed":
+        return "embed"
+    if path == "/rerank":
+        return "rerank"
+    if path == "/v1/search":
+        return "search"
+    if path.startswith("/v1/repos/") and path.endswith("/sync"):
+        return "sync"
+    if path.startswith("/v1/repos/") and (path.endswith("/chunks") or path.endswith("/vectors")):
+        return "vectors"
+    if path.startswith("/v1/repos/") and path.endswith("/embed"):
+        return "embed-queue"
+    if path.startswith("/v1/admin/"):
+        return "admin"
+    if path.startswith("/v1/scopes") or path.startswith("/v1/spaces") or path.startswith("/v1/lineages/"):
+        return "scopes"
+    if path in ("/", "/health", "/v1/status", "/log"):
+        return "status"
+    return "other"
+
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -126,7 +162,7 @@ ADMIN_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>code-index-service · 后台</title>
+<title>code-index-service · 控制台</title>
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --faint:#98a2b3;
           --ok:#067647; --ok-bg:#e7f6ec; --warn:#b54708; --warn-bg:#fef4e6; --bad:#b42318; --bad-bg:#fdecea;
@@ -138,7 +174,7 @@ ADMIN_HTML = """<!doctype html>
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:13px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
   .mono { font-family:var(--mono); }
-  header { display:flex; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:10; flex-wrap:wrap; }
+  header { display:flex; align-items:center; gap:10px; padding:11px 20px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:20; flex-wrap:wrap; }
   .brand { display:flex; align-items:baseline; gap:8px; }
   .logo { display:inline-flex; width:22px; height:22px; border-radius:6px; background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; font:600 11px/22px var(--mono); justify-content:center; }
   h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; }
@@ -147,25 +183,33 @@ ADMIN_HTML = """<!doctype html>
   button { padding:6px 11px; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; font-size:12.5px; transition:.15s; }
   button:hover { border-color:var(--muted); }
   button.primary { border-color:var(--blue); color:var(--blue); }
+  button.danger { border-color:var(--bad); color:var(--bad); }
   button:disabled { opacity:.45; cursor:default; }
+  input, select { padding:6px 9px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-size:12.5px; }
   .chip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); background:var(--card); white-space:nowrap; }
   .chip.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
   .chip.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
   .chip.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
+  .chip.blue { color:var(--blue); background:var(--blue-bg); border-color:transparent; }
   .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
-  #err { display:none; margin:12px 20px 0; padding:9px 12px; border-radius:8px; border:1px solid var(--bad); background:var(--bad-bg); color:var(--bad); font-size:12.5px; }
-  main { padding:16px 20px 28px; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
-  .card h2 { font-size:12px; margin:0 0 10px; font-weight:600; color:var(--muted); letter-spacing:.4px; text-transform:uppercase; }
-  .kv { display:grid; grid-template-columns:96px 1fr; gap:6px 12px; font-size:12.5px; align-items:baseline; }
+  nav.tabs { display:flex; gap:2px; padding:0 14px; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:48px; z-index:15; overflow-x:auto; }
+  nav.tabs button { border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:var(--muted); padding:10px 14px; font-size:13px; white-space:nowrap; }
+  nav.tabs button.active { color:var(--text); border-bottom-color:var(--blue); font-weight:600; }
+  main { padding:16px 20px 30px; }
+  .panel { display:none; }
+  .panel.active { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; min-width:0; }
+  .card h2 { font-size:12px; margin:0 0 10px; font-weight:600; color:var(--muted); letter-spacing:.4px; text-transform:uppercase; display:flex; align-items:center; gap:8px; }
+  .card h2 .tail { margin-left:auto; font-weight:400; text-transform:none; letter-spacing:0; font-size:11.5px; }
+  .kv { display:grid; grid-template-columns:100px 1fr; gap:6px 12px; font-size:12.5px; align-items:baseline; }
   .kv .k { color:var(--muted); }
   .kv .v { min-width:0; overflow-wrap:anywhere; }
   .wide { grid-column:1/-1; }
   .toolbar { display:flex; align-items:center; gap:10px; margin:0 0 10px; flex-wrap:wrap; }
-  .toolbar input[type=search] { flex:1; min-width:180px; max-width:320px; padding:6px 10px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-size:12.5px; }
+  .toolbar input[type=search] { flex:1; min-width:180px; max-width:320px; }
   .toolbar label { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12px; }
   .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:10px; }
-  table { width:100%; border-collapse:separate; border-spacing:0; font-size:12.5px; min-width:980px; }
+  table { width:100%; border-collapse:separate; border-spacing:0; font-size:12.5px; }
   thead th { position:sticky; top:0; background:var(--card); color:var(--muted); font-weight:600; text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); white-space:nowrap; z-index:2; }
   tbody td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle; white-space:nowrap; }
   tbody tr:last-child td { border-bottom:0; }
@@ -180,6 +224,7 @@ ADMIN_HTML = """<!doctype html>
   .bar { height:6px; width:88px; background:var(--line); border-radius:99px; overflow:hidden; flex:none; }
   .bar > i { display:block; height:100%; border-radius:99px; background:var(--ok); }
   .bar.warn > i { background:var(--warn); } .bar.bad > i { background:var(--bad); }
+  .bar.blue > i { background:var(--blue); }
   .muted { color:var(--muted); } .faint { color:var(--faint); }
   .ns { font-family:var(--mono); font-size:11.5px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; display:inline-block; vertical-align:middle; }
   .copy { border:0; background:transparent; color:var(--faint); cursor:pointer; padding:0 2px; font-size:12px; }
@@ -189,101 +234,213 @@ ADMIN_HTML = """<!doctype html>
   details.help summary { cursor:pointer; user-select:none; }
   details.help .grid { display:grid; gap:6px 18px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); margin-top:10px; }
   details.help b { color:var(--text); font-weight:600; }
-  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(10px); background:var(--text); color:var(--bg); padding:7px 14px; border-radius:8px; font-size:12.5px; opacity:0; pointer-events:none; transition:.2s; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(10px); background:var(--text); color:var(--bg); padding:7px 14px; border-radius:8px; font-size:12.5px; opacity:0; pointer-events:none; transition:.2s; z-index:50; }
   #toast.show { opacity:.95; transform:translateX(-50%) translateY(0); }
+  #banner { display:none; margin:12px 20px 0; padding:10px 13px; border-radius:9px; border:1px solid var(--warn); background:var(--warn-bg); color:var(--warn); font-size:12.5px; }
+  #banner.bad { border-color:var(--bad); background:var(--bad-bg); color:var(--bad); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:var(--card); }
+  .stat .n { font-size:19px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .stat .l { color:var(--muted); font-size:11.5px; margin-top:2px; }
+  .spark { display:flex; align-items:flex-end; gap:3px; height:86px; padding-top:6px; }
+  .spark .col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:3px; min-width:0; }
+  .spark .col i { display:block; width:100%; border-radius:3px 3px 0 0; background:var(--blue); min-height:2px; opacity:.85; }
+  .spark .col:hover i { opacity:1; }
+  .spark .col span { font-size:10px; color:var(--faint); transform:scale(.92); white-space:nowrap; }
+  .model-box { border:1px solid var(--line); border-radius:10px; padding:11px 13px; margin-bottom:10px; }
+  .model-box .head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .model-box .head b { font-size:13px; }
+  .grid2 { display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }
+  .key-reveal { display:none; margin:10px 0; border:1px solid var(--ok); background:var(--ok-bg); color:var(--ok); border-radius:9px; padding:10px 12px; }
+  .key-reveal .mono { word-break:break-all; color:var(--text); }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; background:var(--card); padding:5px 10px; font-size:12px; color:var(--muted); }
+  .seg button.active { background:var(--blue-bg); color:var(--blue); font-weight:600; }
+  .login-hint { color:var(--muted); font-size:12px; }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><span class="logo">CI</span><h1>code-index-service</h1><span class="sub">后台</span></div>
+  <div class="brand"><span class="logo">CI</span><h1>code-index-service</h1><span class="sub">控制台</span></div>
   <span id="ready" class="chip"><span class="dot"></span>…</span>
-  <span id="model" class="chip mono" title="向量模型 tag">—</span>
-  <span id="err" style="display:none"></span>
+  <span id="model" class="chip mono" title="当前向量模型 tag">—</span>
+  <span id="authchip" class="chip"></span>
   <span class="spacer"></span>
   <span id="refreshed" class="faint" style="font-size:12px"></span>
   <button id="btn-refresh">刷新</button>
   <button id="btn-pause">暂停嵌入</button>
   <button id="btn-resume">恢复嵌入</button>
   <button id="btn-sweep">立即清扫</button>
+  <button id="btn-logout">退出</button>
 </header>
-<div id="errbar" style="display:none;margin:12px 20px 0;padding:9px 12px;border-radius:8px;border:1px solid var(--bad);background:var(--bad-bg);color:var(--bad);font-size:12.5px"></div>
+<nav class="tabs">
+  <button data-tab="overview" class="active">概览</button>
+  <button data-tab="models">模型</button>
+  <button data-tab="keys">API Key</button>
+  <button data-tab="stats">统计</button>
+  <button data-tab="scopes">作用域</button>
+  <button data-tab="logs">日志</button>
+</nav>
+<div id="banner"></div>
 <main>
-  <section class="card">
-    <h2>运行时</h2>
-    <div class="kv" id="runtime"></div>
-  </section>
-  <section class="card">
-    <h2>嵌入治理</h2>
-    <div class="kv" id="governor"></div>
-  </section>
-  <section class="card">
-    <h2>存储与限额</h2>
-    <div class="kv" id="limits"></div>
-  </section>
-  <section class="card">
-    <h2>模型与向量标签</h2>
-    <div class="kv" id="tags"></div>
-    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button id="btn-purge-tags">清理非当前 tag 的向量</button>
-      <span class="faint" style="font-size:12px">同一 SQLite 库；换模型只新增 tag，旧 tag 占空间需手动清</span>
-    </div>
-  </section>
-  <section class="card wide">
-    <h2>检索测试</h2>
-    <div class="toolbar">
-      <select id="test-ns" style="max-width:380px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:12.5px"></select>
-      <input id="test-q" placeholder="输入查询，例如：订单支付后的库存扣减" style="flex:1;min-width:240px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:12.5px">
-      <input id="test-k" type="number" value="5" min="1" max="20" title="返回条数" style="width:64px;padding:6px 8px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
-      <button class="primary" id="btn-test">检索</button>
-    </div>
-    <div id="test-out" class="faint" style="font-size:12.5px">选择作用域、输入查询后点「检索」；结果来自服务端 kNN（附覆盖率与耗时）。</div>
-  </section>
-  <section class="card wide">
-    <h2>模型下载</h2>
-    <div id="models" class="faint" style="font-size:12.5px">加载中…</div>
-  </section>
-  <section class="card wide">
-    <h2>作用域（快照）<span class="muted" id="scope-count" style="font-weight:400"> </span></h2>
-    <div class="toolbar">
-      <input id="filter" type="search" placeholder="筛选 kind / ref / repoId / namespace…">
-      <label><input id="auto" type="checkbox" checked> 每 15 秒自动刷新</label>
-      <span class="faint" id="filtered"></span>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr>
-          <th>类型</th><th>引用</th><th>仓库</th><th class="num">块</th><th class="num">向量</th><th>覆盖率</th>
-          <th class="num">占用</th><th>创建</th><th>过期</th><th>保护</th><th>命名空间</th>
-        </tr></thead>
-        <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
-      </table>
-    </div>
-    <details class="help">
-      <summary>字段说明</summary>
-      <div class="grid">
-        <div><b>类型</b>：快照作用域。legacy = 接入作用域前的老命名空间（自动永久保护）；main/branch/pr/worktree = 新规范快照。</div>
-        <div><b>引用</b>：scope 的来源标识——分支名、PR 号、worktree 指纹；main/legacy 为空。</div>
-        <div><b>块 / 向量</b>：chunks 是落库的代码块数；vectors 是这些块在服务端已算好的向量数。</div>
-        <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入是限速异步的，刚同步完会从 0% 慢慢涨到 100%。</div>
-        <div><b>占用</b>：该作用域归属血统（同一仓库）的正文 + 向量总字节，按内容哈希共享，不是每个快照单独一份。</div>
-        <div><b>创建 / 过期</b>：快照创建时间与 TTL。main/legacy 永不过期，branch/pr/worktree 到期后被 janitor 自动删除。</div>
-        <div><b>保护（pinned）</b>：钉住的作用域不会被 janitor 回收；legacy 迁移时自动钉住。</div>
-        <div><b>仓库（名称 / ID）</b>：名称来自客户端同步时上报的仓库名；ID 是 <span class="mono">sha1(归一化 git origin URL)</span> 前 12 位——同一仓库的所有克隆/分支共享同一个 ID，换机器也不变；仓库没有 origin 时退回“本地路径哈希”，所以看起来是一串 key。</div>
-        <div><b>命名空间</b>：检索与同步的唯一键，结构是 <span class="mono">repoId@chunkFp#kind:ref</span>。其中 <span class="mono">chunkFp</span> 是切块配置的 sha256 前 8 位——切块策略变了就得换命名空间，避免新旧块混写；页面上只显示这 8 位，点 ⧉ 可复制完整值。</div>
-        <div><b>kNN 缓存</b>：服务端把某作用域的向量读进内存矩阵做精确检索；LRU 上限由 KNN_MAX_BYTES 控制。</div>
-        <div><b>限速 / batch</b>：后台嵌入每秒最多处理多少块、每次推理批大小（保护 CPU/GPU 不被打满）。</div>
-        <div><b>保留期</b>：作用域删除后，无人引用的正文/向量保留多少天才被 GC（不动仍被别的作用域引用的内容）。</div>
-        <div><b>每血统向量上限 / 作用域上限</b>：防爆配额；超限写入返回 507，单次检索最多同时查 4 个作用域。</div>
+  <!-- ============================ 概览 ============================ -->
+  <section id="tab-overview" class="panel active">
+    <section class="card">
+      <h2>运行时</h2>
+      <div class="kv" id="runtime"></div>
+    </section>
+    <section class="card">
+      <h2>嵌入治理</h2>
+      <div class="kv" id="governor"></div>
+    </section>
+    <section class="card">
+      <h2>存储与限额</h2>
+      <div class="kv" id="limits"></div>
+    </section>
+    <section class="card">
+      <h2>向量标签 <span class="tail"><button id="btn-purge-tags" style="padding:2px 8px">清理旧 tag</button></span></h2>
+      <div class="kv" id="tags"></div>
+    </section>
+    <section class="card wide">
+      <h2>鉴权状态</h2>
+      <div class="kv" id="auth-kv"></div>
+      <div id="setup-box" style="display:none;margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
+        <div class="login-hint" style="margin-bottom:8px">还没有管理员密码。设置后控制台需要登录（也可继续用环境变量 ADMIN_PASSWORD）。</div>
+        <input id="setup-pwd" type="password" placeholder="设置管理员密码（至少 8 位）" style="min-width:260px">
+        <button class="primary" id="btn-setup">设置密码</button>
       </div>
-    </details>
+    </section>
+  </section>
+
+  <!-- ============================ 模型 ============================ -->
+  <section id="tab-models" class="panel">
+    <section class="card wide">
+      <h2>当前模型</h2>
+      <div class="grid2" id="active-models"></div>
+    </section>
+    <section class="card wide">
+      <h2>已安装模型 <span class="tail faint" id="model-roots"></span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>用途</th><th>名称</th><th>向量 tag</th><th>目录</th><th class="num">大小</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="installed"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">切换后：<b>/health.tag</b> 立即变化，旧 tag 向量保留但检索不到；插件下次同步会按新 tag 全量重嵌（覆盖率从 0 恢复）。失败会自动保留原模型。</div>
+    </section>
+    <section class="card wide">
+      <h2>可下载模型</h2>
+      <div id="models" class="faint" style="font-size:12.5px">加载中…</div>
+    </section>
+  </section>
+
+  <!-- ============================ Key ============================ -->
+  <section id="tab-keys" class="panel">
+    <section class="card wide">
+      <h2>API Key</h2>
+      <div class="toolbar">
+        <input id="key-name" placeholder="名称，例如：本机插件 / review-service" style="min-width:200px">
+        <select id="key-role">
+          <option value="index">index（只能用索引/检索）</option>
+          <option value="admin">admin（可进后台管理）</option>
+        </select>
+        <button class="primary" id="btn-create-key">新建 Key</button>
+        <span class="faint" style="font-size:12px">明文只显示一次；服务端只存 sha256</span>
+      </div>
+      <div class="key-reveal" id="key-reveal">
+        <div style="margin-bottom:6px">新 Key（复制保存，关闭后不再显示）：</div>
+        <div class="mono" id="key-plain">—</div>
+        <div style="margin-top:8px"><button id="btn-copy-key" style="border-color:var(--ok);color:var(--ok)">复制</button></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>名称</th><th>前缀</th><th>角色</th><th>状态</th><th class="num">今日请求</th><th class="num">今日错误</th><th>最后使用</th><th>操作</th></tr></thead>
+          <tbody id="keys"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">环境变量 <span class="mono">API_KEY</span> 作为 legacy Key（id=0，admin 角色）始终有效，不可在页面删除。</div>
+    </section>
+  </section>
+
+  <!-- ============================ 统计 ============================ -->
+  <section id="tab-stats" class="panel">
+    <section class="card wide">
+      <h2>调用统计 <span class="tail"><span class="seg"><button data-days="7" class="active">近 7 天</button><button data-days="30">近 30 天</button></span></span></h2>
+      <div class="stats" id="stat-cards"></div>
+      <div style="margin-top:14px">
+        <div class="faint" style="font-size:11.5px;margin-bottom:4px">按天请求数</div>
+        <div class="spark" id="stat-spark"></div>
+      </div>
+    </section>
+    <section class="card wide">
+      <h2>按 Key</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Key</th><th>前缀</th><th>角色</th><th class="num">请求</th><th class="num">错误</th><th class="num">embed 文本</th><th class="num">search</th><th class="num">rerank</th></tr></thead>
+        <tbody id="stat-keys"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+      </table></div>
+    </section>
+    <section class="card wide">
+      <h2>按端点</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>端点</th><th class="num">请求</th><th class="num">错误</th><th class="num">平均延迟</th></tr></thead>
+        <tbody id="stat-endpoints"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+      </table></div>
+    </section>
+  </section>
+
+  <!-- ============================ 作用域 ============================ -->
+  <section id="tab-scopes" class="panel">
+    <section class="card wide">
+      <h2>检索测试</h2>
+      <div class="toolbar">
+        <select id="test-ns" style="max-width:380px"></select>
+        <input id="test-q" placeholder="输入查询，例如：订单支付后的库存扣减" style="flex:1;min-width:240px">
+        <input id="test-k" type="number" value="5" min="1" max="20" title="返回条数" style="width:64px">
+        <button class="primary" id="btn-test">检索</button>
+      </div>
+      <div id="test-out" class="faint" style="font-size:12.5px">选择作用域、输入查询后点「检索」；结果来自服务端 kNN（附覆盖率与耗时）。</div>
+    </section>
+    <section class="card wide">
+      <h2>作用域（快照）<span class="tail" id="scope-count"></span></h2>
+      <div class="toolbar">
+        <input id="filter" type="search" placeholder="筛选 kind / ref / repoId / namespace…">
+        <label><input id="auto" type="checkbox" checked> 每 15 秒自动刷新</label>
+        <span class="faint" id="filtered"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>类型</th><th>引用</th><th>仓库</th><th class="num">块</th><th class="num">向量</th><th>覆盖率</th>
+            <th class="num">占用</th><th>创建</th><th>过期</th><th>保护</th><th>命名空间</th>
+          </tr></thead>
+          <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <details class="help">
+        <summary>字段说明</summary>
+        <div class="grid">
+          <div><b>类型</b>：legacy = 接入作用域前的老命名空间（永久保护）；main/branch/pr/worktree = 新规范快照。</div>
+          <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入限速异步，刚同步完会从 0% 涨到 100%。</div>
+          <div><b>向量 tag</b>：模型指纹。热切换模型后 tag 变化，旧 tag 向量不会被检索，需要客户端重新同步。</div>
+        </div>
+      </details>
+    </section>
+  </section>
+
+  <!-- ============================ 日志 ============================ -->
+  <section id="tab-logs" class="panel">
+    <section class="card wide">
+      <h2>服务日志 <span class="tail"><button id="btn-logs">刷新</button></span></h2>
+      <pre id="log-lines" class="mono faint" style="margin:0;max-height:70vh;overflow:auto;font-size:11.5px;white-space:pre-wrap;line-height:1.5">加载中…</pre>
+    </section>
   </section>
 </main>
 <div id="toast"></div>
 <script>
 const $ = (s) => document.querySelector(s);
-// 后台鉴权走 HTTP Basic：浏览器会弹一次登录框（ADMIN_USER / ADMIN_PASSWORD），之后同源请求自动带 Authorization。
+const $$ = (s) => Array.from(document.querySelectorAll(s));
 const fmtNum = (n) => (n === null || n === undefined) ? '—' : Number(n).toLocaleString();
-const escapeHtml = (v) => String(v).replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[c]));
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function fmtBytes(n) {
   if (n === null || n === undefined) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = Number(n);
@@ -292,8 +449,7 @@ function fmtBytes(n) {
 }
 function rel(tsSec) {
   if (!tsSec) return '—';
-  const t = new Date(tsSec * 1000), diff = Math.max(0, (Date.now() - t.getTime()) / 1000);
-  const abs = t.toLocaleString('zh-CN', { hour12: false });
+  const t = new Date(tsSec * 1000); const diff = Math.max(0, (Date.now() - t.getTime()) / 1000);
   if (diff < 60) return '刚刚';
   if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
   if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
@@ -316,114 +472,155 @@ function chip(kind) {
   const k = String(kind || 'legacy');
   return '<span class="kind ' + k + '">' + k + '</span>';
 }
-function setErr(msg) {
-  const el = $('#errbar');
-  if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
-  el.style.display = 'block'; el.textContent = msg;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1500);
+}
+function banner(msg, bad) {
+  const b = $('#banner');
+  if (!msg) { b.style.display = 'none'; return; }
+  b.style.display = 'block'; b.textContent = msg; b.className = bad ? 'bad' : '';
 }
 async function api(path, opts = {}) {
   const headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
-  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  const r = await fetch(path, Object.assign({}, opts, { headers, credentials: 'same-origin' }));
   let body = null; try { body = await r.json(); } catch (e) {}
-  if (r.status === 401) setErr('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
+  if (r.status === 401) { location.replace('/admin'); }
   return { status: r.status, body };
 }
-const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div class="k">' + k + '</div><div class="v"' + (title ? ' title="' + title + '"' : '') + '>' + v + '</div>').join(''); };
+const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div class="k">' + k + '</div><div class="v"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + v + '</div>').join(''); };
+
+// ---------------- Tab 路由 ----------------
+const TABS = ['overview', 'models', 'keys', 'stats', 'scopes', 'logs'];
+function showTab(name) {
+  if (!TABS.includes(name)) name = 'overview';
+  $$('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
+  if (name === 'models') loadModels();
+  if (name === 'keys') loadKeys();
+  if (name === 'stats') loadStats(STATS_DAYS);
+  if (name === 'logs') loadLogs();
+  if (name === 'overview' || name === 'scopes') refreshHealth();
+  location.hash = name;
+}
+
+// ---------------- 概览 ----------------
+let HEALTH = null;
+function renderOverview() {
+  const d = HEALTH; if (!d) return;
+  const g = d.governor || {}, k = d.knn || {}, L = d.limits || {}, sc = d.scopes || {};
+  $('#ready').className = 'chip ' + (d.ready ? 'ok' : 'bad');
+  $('#ready').innerHTML = '<span class="dot"></span>' + (d.ready ? 'ready' : 'not ready');
+  $('#model').textContent = d.tag || '—';
+  $('#model').title = (d.providers || []).join(', ') + ' · ORT ' + (d.ort || '?') + ' · threads ' + (d.threads || '?');
+  const auth = d.admin || {};
+  $('#authchip').className = 'chip ' + (auth.authRequired ? 'ok' : 'warn');
+  $('#authchip').innerHTML = '<span class="dot"></span>' + (auth.authRequired ? '鉴权已开' : '未开鉴权');
+  kv($('#runtime'), [
+    ['模型', '<span class="mono">' + (d.model || '—') + '</span> <span class="faint">' + fmtBytes(d.model_bytes) + '</span>'],
+    ['模型目录', '<span class="mono">' + escapeHtml(d.model_dir || '—') + '</span>'],
+    ['向量 tag', '<span class="mono">' + escapeHtml(d.tag || '—') + '</span>'],
+    ['执行提供者', (d.providers || []).map(escapeHtml).join(', ') || '—'],
+    ['ORT / 线程', (d.ort || '?') + ' / ' + (d.threads || '?')],
+    ['重排', d.rerank_ready ? ('<span class="mono">' + escapeHtml(d.rerank_tag || 'ready') + '</span>') : '<span class="muted">off（未启用）</span>'],
+    ['进程 / 数据库', '<span class="mono">' + fmtNum(d.pid) + '</span> · <span class="mono">' + escapeHtml(d.db || '—') + '</span>'],
+    ['本模型启用时间', d.model_switched_at ? (rel(d.model_switched_at) + ' <span class="faint">(' + absTime(d.model_switched_at) + ')</span>') : '<span class="faint">启动时加载</span>'],
+  ]);
+  const hits = k.hits || 0, miss = k.misses || 0;
+  const rate = (hits + miss) ? Math.round(hits * 100 / (hits + miss)) + '%' : '—';
+  kv($('#governor'), [
+    ['状态', g.paused ? '<span class="chip warn"><span class="dot"></span>已暂停</span>' : '<span class="chip ok"><span class="dot"></span>运行中</span>'],
+    ['限速', fmtNum(g.rate) + ' 块 / 秒'],
+    ['批大小', fmtNum(g.batch)],
+    ['kNN 缓存', fmtNum(k.entries) + ' 个作用域 · ' + fmtBytes(k.bytes) + ' / ' + fmtBytes(k.maxBytes)],
+    ['kNN 命中率', rate + ' <span class="faint">(' + fmtNum(hits) + ' / ' + fmtNum(hits + miss) + ' · 淘汰 ' + fmtNum(k.evictions) + ')</span>'],
+  ]);
+  const used = (d.spaces || []).reduce((a, x) => a + (x.totalBytes || 0), 0);
+  kv($('#limits'), [
+    ['已用 / 上限', fmtBytes(used) + ' / ' + (L.maxTotalGb ? L.maxTotalGb + ' GB' : '—')],
+    ['保留期', fmtNum(L.retentionDays) + ' 天'],
+    ['每血统向量上限', fmtNum(L.maxVectorsPerLineage)],
+    ['作用域数 / 上限', fmtNum(sc.total) + ' / ' + fmtNum(L.maxScopes)],
+    ['单次检索作用域', '≤ ' + fmtNum(L.maxSearchScopes)],
+  ]);
+  const tags = d.tags || [];
+  kv($('#tags'), tags.length ? tags.map((t) => [
+    t.tag === d.tag ? '当前模型' : '旧 tag',
+    '<span class="mono">' + escapeHtml(t.tag) + '</span> <span class="faint">' + fmtNum(t.vectors) + ' 条 · ' + fmtBytes(t.bytes) + '</span>',
+  ]) : [['—', '<span class="faint">还没有向量</span>']]);
+  $('#btn-purge-tags').disabled = !tags.some((t) => t.tag !== d.tag && t.vectors > 0);
+  kv($('#auth-kv'), [
+    ['API 鉴权', auth.authRequired ? '<span class="chip ok"><span class="dot"></span>已强制 Bearer Key</span>' : '<span class="chip warn"><span class="dot"></span>未开启（任何人可检索）</span>'],
+    ['Key 数量', fmtNum(auth.keys) + ' <span class="faint">（含 legacy）</span>'],
+    ['管理员密码', auth.adminPasswordSet ? '<span class="chip ok"><span class="dot"></span>已设置</span>' : '<span class="chip warn"><span class="dot"></span>未设置</span>'],
+    ['登录方式', '<span class="faint">登录页 → HttpOnly Cookie（12h）；也支持 HTTP Basic 与 admin 角色 Key</span>'],
+  ]);
+  $('#setup-box').style.display = auth.adminPasswordSet ? 'none' : 'block';
+}
+async function refreshHealth() {
+  const h = await api('/health');
+  if (h.status !== 200 || !h.body) { $('#ready').className = 'chip bad'; $('#ready').innerHTML = '<span class="dot"></span>不可达'; return; }
+  HEALTH = h.body;
+  $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  if (HEALTH.admin && !HEALTH.admin.authRequired) banner('当前未强制 API Key：任何能访问此地址的人都能检索。建议到「API Key」页创建第一个 Key。', true);
+  else banner('');
+  renderOverview();
+  const s = await api('/v1/scopes');
+  ROWS = (s.body && s.body.scopes) || [];
+  renderScopes();
+}
+async function action(name) {
+  const r = await api('/v1/admin/' + name, { method: 'POST', body: '{}' });
+  toast(r.status === 200 ? name + ' 执行成功' : name + ' 失败（' + r.status + '）');
+  setTimeout(refreshHealth, 400);
+}
+async function purgeTags() {
+  if (!confirm('删除所有「非当前模型 tag」的向量？正文不受影响；删除后旧模型无法再检索。')) return;
+  const r = await api('/v1/admin/purge-tags', { method: 'POST', body: '{}' });
+  toast(r.status === 200 ? '已清理旧 tag 向量：' + ((r.body && r.body.deleted) || 0) : '清理失败（' + r.status + '）');
+  setTimeout(refreshHealth, 400);
+}
+async function setupAdmin() {
+  const pwd = $('#setup-pwd').value;
+  if (pwd.length < 8) { toast('密码至少 8 位'); return; }
+  const r = await api('/admin/setup', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (r.status === 200) { toast('管理员密码已设置'); $('#setup-pwd').value = ''; refreshHealth(); }
+  else toast('设置失败：' + (r.body && r.body.error || r.status));
+}
+
+// ---------------- 作用域 / 检索测试 ----------------
 let ROWS = [];
 function renderScopes() {
-  const q = $('#filter').value.trim().toLowerCase();
+  const q = ($('#filter').value || '').trim().toLowerCase();
   const rows = ROWS.filter((x) => !q || [x.kind, x.ref, x.repoId, x.namespace].some((v) => String(v || '').toLowerCase().includes(q)));
   $('#filtered').textContent = q ? '匹配 ' + rows.length + ' / ' + ROWS.length : '';
   $('#scope-count').textContent = '(' + ROWS.length + ')';
   const sel = $('#test-ns');
-  if (sel) {
-    const cur = sel.value;
-    sel.innerHTML = ROWS.map((x) => '<option value="' + x.namespace + '">' + escapeHtml(x.kind + (x.ref ? ':' + x.ref : '') + ' · ' + (x.repoName || x.repoId)) + '</option>').join('');
-    if (cur && ROWS.some((x) => x.namespace === cur)) sel.value = cur;
-  }
+  const cur = sel.value;
+  sel.innerHTML = ROWS.map((x) => '<option value="' + escapeHtml(x.namespace) + '">' + escapeHtml(x.kind + (x.ref ? ':' + x.ref : '') + ' · ' + (x.repoName || x.repoId)) + '</option>').join('');
+  if (cur && ROWS.some((x) => x.namespace === cur)) sel.value = cur;
   if (!rows.length) { $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">' + (ROWS.length ? '没有匹配的作用域' : '还没有作用域') + '</td></tr>'; return; }
   $('#scopes').innerHTML = rows.map((x) => {
     const pct = Math.round((x.coverage || 0) * 100);
     const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
     return '<tr>'
       + '<td>' + chip(x.kind) + '</td>'
-      + '<td>' + (x.ref ? x.ref : '<span class="faint">—</span>') + '</td>'
-      + '<td>' + (x.repoName
-        ? '<span class="repo">' + x.repoName + '</span> <span class="faint mono" style="font-size:11px">' + (x.repoId || '') + '</span>'
-        : '<span class="mono">' + (x.repoId || '—') + '</span>') + '</td>'
+      + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
+      + '<td>' + (x.repoName ? escapeHtml(x.repoName) + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(x.repoId || '') + '</span>' : '<span class="mono">' + escapeHtml(x.repoId || '—') + '</span>') + '</td>'
       + '<td class="num">' + fmtNum(x.chunks) + '</td>'
       + '<td class="num">' + fmtNum(x.vectors) + '</td>'
       + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
-      + '<td class="num" title="' + (x.totalBytes ? fmtBytes(x.totalBytes) + '（含共享正文/向量）' : '') + '">' + fmtBytes(x.totalBytes) + '</td>'
+      + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
       + '<td title="' + absTime(x.createdAt) + '">' + rel(x.createdAt) + '</td>'
-      + '<td' + (x.expiresAt ? ' title="' + absTime(x.expiresAt) + '"' : '') + '>' + ttl(x.expiresAt) + '</td>'
+      + '<td>' + ttl(x.expiresAt) + '</td>'
       + '<td>' + (x.pinned ? '<span class="chip ok">已钉住</span>' : '<span class="faint">—</span>') + '</td>'
-      + '<td><span class="ns" title="' + x.namespace + '">' + friendlyNs(x) + '</span> '
-      + '<button class="copy" data-ns="' + x.namespace + '" title="复制命名空间">⧉</button></td>'
+      + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span> '
+      + '<button class="copy" data-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
       + '</tr>';
   }).join('');
-  document.querySelectorAll('button.copy').forEach((b) => {
-    b.onclick = async () => {
-      try { await navigator.clipboard.writeText(b.dataset.ns); toast('已复制命名空间'); }
-      catch (e) { toast('复制失败（浏览器限制）'); }
-    };
+  $$('button.copy').forEach((b) => {
+    b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.ns); toast('已复制命名空间'); } catch (e) { toast('复制失败（浏览器限制）'); } };
   });
-}
-function toast(msg) {
-  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 1400);
-}
-async function refresh() {
-  setErr('');
-  const s = await api('/v1/scopes');
-  const h = await api('/health');
-  if (h.status !== 200 || !h.body) { $('#ready').className = 'chip bad'; $('#ready').innerHTML = '<span class="dot"></span>不可达'; return; }
-  const d = h.body, g = d.governor || {}, k = d.knn || {}, L = d.limits || {}, sc = d.scopes || {};
-  $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  $('#ready').className = 'chip ' + (d.ready ? 'ok' : 'bad');
-  $('#ready').innerHTML = '<span class="dot"></span>' + (d.ready ? 'ready' : 'not ready');
-  $('#model').textContent = d.tag || '—';
-  $('#model').title = (d.providers || []).join(', ') + ' · ORT ' + (d.ort || '?') + ' · threads ' + (d.threads || '?');
-  kv($('#runtime'), [
-    ['模型', '<span class="mono">' + (d.model || '—') + '</span> <span class="faint">' + fmtBytes(d.model_bytes) + '</span>'],
-    ['向量 tag', '<span class="mono">' + (d.tag || '—') + '</span>'],
-    ['执行提供者', (d.providers || []).join(', ') || '—', 'onnxruntime 实际使用的 EP'],
-    ['ORT / 线程', (d.ort || '?') + ' / ' + (d.threads || '?'), '推理运行时版本与线程数'],
-    ['重排', d.rerank_ready ? (d.rerank_tag || 'ready') : '<span class="muted">off（未装重排模型，客户端回退 RRF 顺序）</span>'],
-    ['进程 / 数据库', '<span class="mono">' + fmtNum(d.pid) + '</span> · <span class="mono">' + (d.db || '—') + '</span>'],
-  ]);
-  const hits = k.hits || 0, miss = k.misses || 0;
-  const rate = (hits + miss) ? Math.round(hits * 100 / (hits + miss)) + '%' : '—';
-  kv($('#governor'), [
-    ['状态', g.paused ? '<span class="chip warn"><span class="dot"></span>已暂停</span>' : '<span class="chip ok"><span class="dot"></span>运行中</span>', '后台嵌入线程状态'],
-    ['限速', fmtNum(g.rate) + ' 块 / 秒', 'EMBED_RATE'],
-    ['批大小', fmtNum(g.batch), 'EMBED_BATCH'],
-    ['kNN 缓存', fmtNum(k.entries) + ' 个作用域 · ' + fmtBytes(k.bytes) + ' / ' + fmtBytes(k.maxBytes), '内存向量矩阵（用于精确检索）'],
-    ['kNN 命中率', rate + ' <span class="faint">(' + fmtNum(hits) + ' 命中 / ' + fmtNum(miss) + ' 未命中 · 淘汰 ' + fmtNum(k.evictions) + ')</span>'],
-  ]);
-  const used = (d.spaces || []).reduce((a, x) => a + (x.totalBytes || 0), 0);
-  kv($('#limits'), [
-    ['已用 / 上限', fmtBytes(used) + ' / ' + (L.maxTotalGb ? L.maxTotalGb + ' GB' : '—'), '正文 + 向量总占用 / MAX_TOTAL_GB'],
-    ['保留期', fmtNum(L.retentionDays) + ' 天', 'RETENTION_DAYS：GC 前保留期'],
-    ['每血统向量上限', fmtNum(L.maxVectorsPerLineage), 'MAX_VECTORS_PER_LINEAGE'],
-    ['作用域数 / 上限', fmtNum(sc.total) + ' / ' + fmtNum(L.maxScopes), JSON.stringify(sc.byKind || {})],
-    ['单次检索作用域', '≤ ' + fmtNum(L.maxSearchScopes), 'MAX_SEARCH_SCOPES'],
-  ]);
-  const tags = d.tags || [];
-  kv($('#tags'), tags.length ? tags.map((t) => [
-    t.tag === d.tag ? '当前模型' : '旧 tag',
-    '<span class="mono">' + t.tag + '</span> <span class="faint">' + fmtNum(t.vectors) + ' 条 · ' + fmtBytes(t.bytes) + '</span>',
-  ]) : [['—', '<span class="faint">还没有向量</span>']]);
-  $('#btn-purge-tags').disabled = !tags.some((t) => t.tag !== d.tag && t.vectors > 0);
-  const byNs = {}; (d.spaces || []).forEach((x) => { byNs[x.namespace] = x.totalBytes; });
-  ROWS = ((s.body && s.body.scopes) || []).map((x) => Object.assign({}, x, { totalBytes: byNs[x.namespace] }));
-  if (s.status === 401) setErr('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
-  renderScopes();
-}
-async function action(name) {
-  const r = await api('/v1/admin/' + name, { method: 'POST', body: '{}' });
-  toast(r.status === 200 ? name + ' 执行成功' : name + ' 失败（' + r.status + '）');
-  setTimeout(refresh, 300);
 }
 async function searchTest() {
   const ns = $('#test-ns').value;
@@ -433,71 +630,103 @@ async function searchTest() {
   if (!ns || !q) { out.innerHTML = '<span style="color:var(--warn)">请选择作用域并输入查询</span>'; return; }
   out.textContent = '检索中…';
   const r = await api('/v1/search', { method: 'POST', body: JSON.stringify({ namespace: ns, query: q, k }) });
-  if (r.status !== 200) { out.innerHTML = '检索失败：' + escapeHtml(r.body?.error || r.status); return; }
+  if (r.status !== 200) { out.innerHTML = '检索失败：' + escapeHtml((r.body && r.body.error) || r.status); return; }
   const d = r.body, ms = d.ms || {};
   const head = '命中 ' + (d.hits || []).length + ' 条 · embed ' + ms.embed + ' ms · kNN ' + ms.knn + ' ms · 覆盖率 ' + Math.round((d.coverage || 0) * 100) + '%';
   out.innerHTML = '<div class="faint" style="margin-bottom:6px">' + head + '</div>'
     + ((d.hits || []).map((h) => '<div style="padding:4px 0;border-bottom:1px solid var(--line)">'
       + '<span class="mono">' + escapeHtml(h.path) + ':' + h.start + '-' + h.end + '</span> '
-      + '<span class="faint">score ' + h.score + '</span></div>').join('')
-      || '<span class="faint">没有命中（可能该作用域还没嵌入完）</span>');
+      + '<span class="faint">score ' + h.score + '</span></div>').join('') || '<span class="faint">没有命中（可能该作用域还没嵌入完）</span>');
 }
-async function purgeTags() {
-  if (!confirm('删除所有「非当前模型 tag」的向量？正文不受影响；删除后旧模型无法再检索。')) return;
-  const r = await api('/v1/admin/purge-tags', { method: 'POST', body: '{}' });
-  toast(r.status === 200 ? '已清理旧 tag 向量：' + (r.body?.deleted ?? 0) : '清理失败（' + r.status + '）');
-  setTimeout(refresh, 300);
-}
-let MODELS = [];
+
+// ---------------- 模型 ----------------
+let MODEL_DATA = null;
 let MODEL_TIMER = null;
-function modelChip(s) {
-  const map = { idle: 'chip', downloading: 'chip warn', done: 'chip ok', failed: 'chip bad', cancelled: 'chip warn', verifying: 'chip warn' };
+function modelStatusChip(s) {
+  const map = { idle: 'chip', downloading: 'chip warn', done: 'chip ok', failed: 'chip bad', cancelled: 'chip warn' };
   return '<span class="' + (map[s] || 'chip') + '"><span class="dot"></span>' + s + '</span>';
 }
-function renderModels() {
+function renderActiveModels() {
+  const a = (MODEL_DATA && MODEL_DATA.active) || {};
+  const e = a.embed || {}, r = a.rerank || {};
+  const box = (title, body) => '<div class="model-box"><div class="head">' + title + '</div>' + body + '</div>';
+  $('#active-models').innerHTML =
+    box('<b>嵌入（embed）</b> <span class="chip ok"><span class="dot"></span>active</span>' + '<span class="spacer"></span><span class="faint" style="font-size:11.5px">' + escapeHtml(e.dir || '') + '</span>',
+        '<div class="kv" style="margin-top:8px"><div class="k">名称</div><div class="v">' + escapeHtml(e.name || '—') + '</div>'
+        + '<div class="k">tag</div><div class="v mono">' + escapeHtml(e.tag || '—') + '</div>'
+        + '<div class="k">模型文件</div><div class="v mono">' + escapeHtml(e.model || '—') + '</div></div>')
+    + box('<b>重排（rerank）</b> ' + (r.ready ? '<span class="chip ok"><span class="dot"></span>active</span>' : '<span class="chip warn"><span class="dot"></span>off</span>') + '<span class="spacer"></span><span class="faint" style="font-size:11.5px">' + escapeHtml(r.dir || '') + '</span>',
+        '<div class="kv" style="margin-top:8px"><div class="k">tag</div><div class="v mono">' + escapeHtml(r.tag || '—') + '</div>'
+        + '<div class="k">模型文件</div><div class="v mono">' + escapeHtml(r.model || '—') + '</div>'
+        + '<div class="k">操作</div><div class="v">' + (r.ready ? '<button data-rerank-off="1">关闭重排</button>' : '<span class="faint">未启用（客户端自动跳过重排）</span>') + '</div></div>');
+  const off = document.querySelector('[data-rerank-off]');
+  if (off) off.onclick = deactivateRerank;
+}
+function renderInstalled() {
+  const inst = (MODEL_DATA && MODEL_DATA.installed) || {};
+  const rows = [];
+  (inst.embed || []).forEach((m) => rows.push({ kind: 'embed', m }));
+  (inst.rerank || []).forEach((m) => rows.push({ kind: 'rerank', m }));
+  $('#model-roots').textContent = ((MODEL_DATA && MODEL_DATA.roots) || []).join(' · ');
+  if (!rows.length) { $('#installed').innerHTML = '<tr><td colspan="7" class="empty">没有发现可用模型目录</td></tr>'; return; }
+  $('#installed').innerHTML = rows.map(({ kind, m }) => {
+    const active = !!m.active;
+    const op = kind === 'embed'
+      ? (active ? '<span class="chip ok">当前</span>' : '<button class="primary" data-switch-embed="' + escapeHtml(m.dir) + '">切换为嵌入</button>')
+      : (active ? '<button data-rerank-off="1">关闭</button>' : '<button class="primary" data-switch-rerank="' + escapeHtml(m.dir) + '">启用重排</button>');
+    return '<tr>'
+      + '<td>' + (kind === 'embed' ? '嵌入' : '重排') + '</td>'
+      + '<td>' + escapeHtml(m.name) + '</td>'
+      + '<td class="mono" style="font-size:11.5px">' + escapeHtml(m.tag || '—') + '</td>'
+      + '<td class="mono faint" style="font-size:11px">' + escapeHtml(m.dir) + '</td>'
+      + '<td class="num">' + fmtBytes(m.size_bytes || m.model_bytes) + '</td>'
+      + '<td>' + (active ? '<span class="chip ok">active</span>' : (m.ready ? '<span class="chip">ready</span>' : '<span class="chip bad">incomplete</span>')) + '</td>'
+      + '<td>' + op + '</td></tr>';
+  }).join('');
+  $$('[data-switch-embed]').forEach((b) => { b.onclick = () => switchModel('embed', b.dataset.switchEmbed); });
+  $$('[data-switch-rerank]').forEach((b) => { b.onclick = () => switchModel('rerank', b.dataset.switchRerank); });
+  $$('[data-rerank-off]').forEach((b) => { b.onclick = deactivateRerank; });
+}
+function renderDownloads() {
   const box = $('#models');
-  if (!MODELS.length) { box.innerHTML = '<span class="faint">没有可下载的模型</span>'; return; }
-  box.innerHTML = MODELS.map(function (m) {
+  const list = (MODEL_DATA && MODEL_DATA.models) || [];
+  if (!list.length) { box.innerHTML = '<span class="faint">没有可下载的模型</span>'; return; }
+  box.innerHTML = list.map((m) => {
     const pct = m.bytesTotal ? Math.min(100, Math.round(m.bytesDone * 100 / m.bytesTotal)) : (m.ready ? 100 : 0);
     const cls = m.status === 'failed' ? 'bad' : (m.status === 'downloading' ? 'warn' : '');
     const size = fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?');
     const speed = (m.status === 'downloading' && m.speedBps) ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
     const btn = m.status === 'downloading'
-      ? '<button data-cancel="' + m.name + '">取消</button>'
-      : '<button data-start="' + m.name + '"' + (m.ready ? ' disabled' : '') + '>' + (m.ready ? '已就绪' : ((m.status === 'failed' || m.status === 'cancelled') ? '重试' : '下载')) + '</button>'
-        + '<button data-force="' + m.name + '" title="删掉已下载文件，从头再下">重传</button>';
-    const enable = m.ready
-      ? '<details class="help"><summary>启用方式（需重启容器）</summary><div class="grid">'
-        + Object.keys(m.enable || {}).map(function (k) { return '<div><b>' + k + '</b> = <span class="mono">' + escapeHtml(m.enable[k]) + '</span></div>'; }).join('')
-        + '<div class="faint">目标目录：<span class="mono">' + escapeHtml(m.target) + '</span></div>'
-        + '<div class="faint">' + escapeHtml(m.note || '') + '</div></div></details>'
-      : '<div class="faint" style="font-size:11.5px">' + escapeHtml(m.error || m.message || '') + '</div>';
+      ? '<button data-cancel="' + escapeHtml(m.name) + '">取消</button>'
+      : '<button data-start="' + escapeHtml(m.name) + '"' + (m.ready ? ' disabled' : '') + '>' + (m.ready ? '已就绪' : ((m.status === 'failed' || m.status === 'cancelled') ? '重试' : '下载')) + '</button>'
+        + '<button data-force="' + escapeHtml(m.name) + '" title="删掉已下载文件，从头再下">重传</button>';
+    const hint = m.ready
+      ? '<div class="faint" style="font-size:11.5px;margin-top:6px">已就绪 · 目标目录 <span class="mono">' + escapeHtml(m.target) + '</span> · 到「已安装模型」里点切换即可热加载（无需重启）</div>'
+      : '<div class="faint" style="font-size:11.5px;margin-top:6px">' + escapeHtml(m.error || m.message || '') + '</div>';
     return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
-      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
-      + '<b>' + escapeHtml(m.name) + '</b> ' + modelChip(m.status)
-      + '<span class="faint">' + escapeHtml(m.label) + '</span>'
-      + '<span class="spacer"></span>' + btn + '</div>'
+      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>' + escapeHtml(m.name) + '</b> ' + modelStatusChip(m.status)
+      + '<span class="faint">' + escapeHtml(m.label || '') + '</span><span class="spacer"></span>' + btn + '</div>'
       + '<div class="cov" style="margin-top:8px"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span>'
-      + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>'
-      + enable + '</div>';
+      + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>' + hint + '</div>';
   }).join('');
-  document.querySelectorAll('[data-start]').forEach(function (b) { b.onclick = function () { startModel(b.dataset.start, false); }; });
-  document.querySelectorAll('[data-force]').forEach(function (b) { b.onclick = function () { if (confirm('删掉已下载文件，从头重新下载？')) startModel(b.dataset.force, true); }; });
-  document.querySelectorAll('[data-cancel]').forEach(function (b) { b.onclick = function () { cancelModel(b.dataset.cancel); }; });
+  $$('[data-start]').forEach((b) => { b.onclick = () => startModel(b.dataset.start, false); });
+  $$('[data-force]').forEach((b) => { b.onclick = () => { if (confirm('删掉已下载文件，从头重新下载？')) startModel(b.dataset.force, true); }; });
+  $$('[data-cancel]').forEach((b) => { b.onclick = () => cancelModel(b.dataset.cancel); });
 }
 async function loadModels() {
   const r = await api('/v1/admin/models');
   if (r.status !== 200 || !r.body) return;
-  MODELS = r.body.models || [];
-  renderModels();
-  if (MODELS.some(function (m) { return m.status === 'downloading'; })) ensureModelPolling();
+  MODEL_DATA = r.body;
+  renderActiveModels(); renderInstalled(); renderDownloads();
+  const busy = ((MODEL_DATA.models || []).some((m) => m.status === 'downloading'));
+  if (busy) ensureModelPolling();
 }
 function ensureModelPolling() {
   if (MODEL_TIMER) return;
-  MODEL_TIMER = setInterval(async function () {
+  MODEL_TIMER = setInterval(async () => {
     await loadModels();
-    if (!MODELS.some(function (m) { return m.status === 'downloading'; })) { clearInterval(MODEL_TIMER); MODEL_TIMER = null; }
-  }, 1000);
+    if (!((MODEL_DATA && MODEL_DATA.models) || []).some((m) => m.status === 'downloading')) { clearInterval(MODEL_TIMER); MODEL_TIMER = null; }
+  }, 1200);
 }
 async function startModel(name, force) {
   const r = await api('/v1/admin/models/' + encodeURIComponent(name) + '/download', { method: 'POST', body: JSON.stringify({ force: !!force }) });
@@ -509,31 +738,318 @@ async function cancelModel(name) {
   if (r.status !== 200) toast('取消失败：' + r.status);
   await loadModels();
 }
-$('#btn-refresh').onclick = refresh;
-$('#btn-test').onclick = searchTest;
-$('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
-$('#btn-purge-tags').onclick = purgeTags;
+async function switchModel(kind, dir) {
+  const what = kind === 'embed' ? '嵌入模型' : '重排模型';
+  if (!confirm('切换' + what + '？\n\n切换嵌入模型会改变向量 tag：旧向量保留但立即检索不到，客户端下次同步会全量重嵌（覆盖率从 0 恢复）。')) return;
+  toast('正在切换' + what + '…');
+  const r = await api('/v1/admin/models/activate', { method: 'POST', body: JSON.stringify({ kind, dir }) });
+  if (r.status !== 200) { toast('切换失败：' + ((r.body && (r.body.detail || r.body.error)) || r.status)); return; }
+  const b = r.body;
+  if (kind === 'embed') banner('已切换嵌入模型：' + (b.prevTag || '?') + ' → ' + b.tag + '（' + (b.ms || 0) + ' ms，' + (b.repos || 0) + ' 个仓库已改 tag）。旧向量保留但不可检索；等客户端重新同步后覆盖率会自动恢复。');
+  else banner('');
+  toast('切换完成（' + (b.ms || 0) + ' ms）');
+  await refreshHealth(); await loadModels();
+}
+async function deactivateRerank() {
+  if (!confirm('关闭重排？检索会跳过重排（客户端回退 RRF 顺序）。')) return;
+  const r = await api('/v1/admin/models/deactivate', { method: 'POST', body: JSON.stringify({ kind: 'rerank' }) });
+  toast(r.status === 200 ? '已关闭重排' : '失败：' + r.status);
+  await refreshHealth(); await loadModels();
+}
+
+// ---------------- API Key ----------------
+let KEYS = [];
+let LEGACY = false;
+async function loadKeys() {
+  const r = await api('/v1/admin/keys');
+  if (r.status !== 200) return;
+  KEYS = (r.body && r.body.keys) || [];
+  LEGACY = !!(r.body && r.body.legacy);
+  renderKeys();
+}
+function renderKeys() {
+  const rows = [];
+  if (LEGACY) rows.push({ id: 0, name: '环境变量 API_KEY', prefix: '（env）', role: 'admin', enabled: true, legacy: true, today: { requests: 0, errors: 0 } });
+  rows.push(...KEYS);
+  if (!rows.length) { $('#keys').innerHTML = '<tr><td colspan="8" class="empty">还没有 Key。可在上方新建（新建后所有索引/检索请求都必须带 Key）。</td></tr>'; return; }
+  $('#keys').innerHTML = rows.map((k) => {
+    const op = k.legacy ? '<span class="faint" style="font-size:11.5px">只读（env）</span>'
+      : '<button data-toggle="' + k.id + '">' + (k.enabled ? '禁用' : '启用') + '</button> <button class="danger" data-del="' + k.id + '">删除</button>';
+    return '<tr>'
+      + '<td>' + escapeHtml(k.name || '—') + (k.legacy ? ' <span class="chip blue">legacy</span>' : '') + '</td>'
+      + '<td class="mono">' + escapeHtml(k.prefix || '—') + '</td>'
+      + '<td>' + (k.role === 'admin' ? '<span class="chip blue">admin</span>' : '<span class="chip">index</span>') + '</td>'
+      + '<td>' + (k.enabled ? '<span class="chip ok"><span class="dot"></span>启用</span>' : '<span class="chip bad"><span class="dot"></span>禁用</span>') + '</td>'
+      + '<td class="num">' + fmtNum(k.today && k.today.requests) + '</td>'
+      + '<td class="num">' + fmtNum(k.today && k.today.errors) + '</td>'
+      + '<td title="' + absTime(k.lastUsedAt) + '">' + rel(k.lastUsedAt) + '</td>'
+      + '<td>' + op + '</td></tr>';
+  }).join('');
+  $$('[data-toggle]').forEach((b) => { b.onclick = () => toggleKey(Number(b.dataset.toggle)); });
+  $$('[data-del]').forEach((b) => { b.onclick = () => deleteKey(Number(b.dataset.del)); });
+}
+async function createKey() {
+  const name = $('#key-name').value.trim();
+  const role = $('#key-role').value;
+  if (!name) { toast('先填一个名称'); return; }
+  const r = await api('/v1/admin/keys', { method: 'POST', body: JSON.stringify({ name, role }) });
+  if (r.status !== 200) { toast('创建失败：' + ((r.body && r.body.error) || r.status)); return; }
+  $('#key-name').value = '';
+  $('#key-plain').textContent = r.body.key;
+  $('#key-reveal').style.display = 'block';
+  toast('已创建 Key（明文只显示这一次）');
+  loadKeys();
+}
+async function toggleKey(id) {
+  const cur = KEYS.find((k) => k.id === id);
+  if (!cur) return;
+  const r = await api('/v1/admin/keys/' + id + '/' + (cur.enabled ? 'disable' : 'enable'), { method: 'POST', body: '{}' });
+  toast(r.status === 200 ? '已' + (cur.enabled ? '禁用' : '启用') : '操作失败：' + r.status);
+  loadKeys();
+}
+async function deleteKey(id) {
+  const cur = KEYS.find((k) => k.id === id);
+  if (!confirm('删除 Key「' + (cur && cur.name || id) + '」？删除后用它认证的客户端会立即 401。')) return;
+  const r = await api('/v1/admin/keys/' + id, { method: 'DELETE' });
+  toast(r.status === 200 ? '已删除' : '删除失败：' + r.status);
+  loadKeys();
+}
+
+// ---------------- 统计 ----------------
+let STATS_DAYS = 7;
+function statTotal(d) {
+  const t = (d && d.totals) || {};
+  return [
+    ['请求总数', fmtNum(t.requests)], ['错误', fmtNum(t.errors)],
+    ['embed 文本', fmtNum(t.embedTexts)], ['search', fmtNum(t.searchCalls)],
+    ['rerank', fmtNum(t.rerankCalls)], ['平均延迟', (t.latencyAvg ? Math.round(t.latencyAvg) + ' ms' : '—')],
+    ['最大延迟', (t.latencyMax ? Math.round(t.latencyMax) + ' ms' : '—')],
+  ];
+}
+async function loadStats(days) {
+  STATS_DAYS = Number(days) || 7;
+  $$('[data-days]').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === STATS_DAYS));
+  const r = await api('/v1/admin/stats?days=' + STATS_DAYS);
+  if (r.status !== 200) return;
+  const d = r.body;
+  $('#stat-cards').innerHTML = statTotal(d).map(([l, n]) => '<div class="stat"><div class="n">' + n + '</div><div class="l">' + l + '</div></div>').join('');
+  const byDay = d.byDay || [];
+  const max = Math.max(1, ...byDay.map((x) => x.requests || 0));
+  $('#stat-spark').innerHTML = byDay.map((x) => {
+    const h = Math.max(2, Math.round((x.requests || 0) / max * 78));
+    return '<div class="col" title="' + escapeHtml(x.day) + '：请求 ' + fmtNum(x.requests) + ' · 错误 ' + fmtNum(x.errors) + ' · embed ' + fmtNum(x.embedTexts) + '"><i style="height:' + h + 'px"></i><span>' + escapeHtml(String(x.day || '').slice(5)) + '</span></div>';
+  }).join('') || '<span class="faint">没有数据</span>';
+  const keys = d.byKey || [];
+  $('#stat-keys').innerHTML = keys.length ? keys.map((k) => '<tr><td>' + escapeHtml(k.name || ('#' + k.keyId)) + (k.keyId === 0 ? ' <span class="chip blue">legacy</span>' : '') + '</td>'
+    + '<td class="mono">' + escapeHtml(k.prefix || '—') + '</td><td>' + escapeHtml(k.role || '—') + '</td>'
+    + '<td class="num">' + fmtNum(k.requests) + '</td><td class="num">' + fmtNum(k.errors) + '</td>'
+    + '<td class="num">' + fmtNum(k.embedTexts) + '</td><td class="num">' + fmtNum(k.searchCalls) + '</td><td class="num">' + fmtNum(k.rerankCalls) + '</td></tr>').join('')
+    : '<tr><td colspan="8" class="empty">没有数据</td></tr>';
+  const eps = d.byEndpoint || [];
+  $('#stat-endpoints').innerHTML = eps.length ? eps.map((e) => '<tr><td class="mono">' + escapeHtml(e.endpoint) + '</td>'
+    + '<td class="num">' + fmtNum(e.requests) + '</td><td class="num">' + fmtNum(e.errors) + '</td>'
+    + '<td class="num">' + (e.latencyAvg ? Math.round(e.latencyAvg) + ' ms' : '—') + '</td></tr>').join('')
+    : '<tr><td colspan="4" class="empty">没有数据</td></tr>';
+}
+
+// ---------------- 日志 ----------------
+async function loadLogs() {
+  const r = await api('/log?n=300');
+  if (r.status !== 200) return;
+  $('#log-lines').textContent = ((r.body && r.body.lines) || []).join('\n') || '（空）';
+}
+
+// ---------------- 初始化 ----------------
+$('#btn-refresh').onclick = () => { refreshHealth(); if (location.hash === '#models') loadModels(); if (location.hash === '#stats') loadStats(STATS_DAYS); if (location.hash === '#keys') loadKeys(); if (location.hash === '#logs') loadLogs(); };
 $('#btn-pause').onclick = () => action('pause');
 $('#btn-resume').onclick = () => action('resume');
 $('#btn-sweep').onclick = () => action('sweep');
+$('#btn-purge-tags').onclick = purgeTags;
+$('#btn-test').onclick = searchTest;
+$('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
+$('#btn-create-key').onclick = createKey;
+$('#btn-setup').onclick = setupAdmin;
+$('#btn-logs').onclick = loadLogs;
 $('#filter').oninput = renderScopes;
-let timer = setInterval(() => { if ($('#auto').checked) refresh(); }, 15000);
-refresh();
-// 模型下载卡片：进页面就加载一次（之前漏了这行，卡片一直停在「加载中…」）
+$$('[data-days]').forEach((b) => { b.onclick = () => loadStats(b.dataset.days); });
+$$('nav.tabs button').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
+$('#btn-logout').onclick = async () => { await fetch('/admin/logout', { method: 'POST' }); location.replace('/admin'); };
+$('#btn-copy-key').onclick = async () => { try { await navigator.clipboard.writeText($('#key-plain').textContent); toast('已复制'); } catch (e) { toast('复制失败（浏览器限制）'); } };
+$('#setup-pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') setupAdmin(); });
+window.addEventListener('hashchange', () => showTab((location.hash || '#overview').slice(1)));
+showTab((location.hash || '#overview').slice(1));
+refreshHealth();
 loadModels();
+setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && $('#auto').checked && (location.hash === '' || location.hash === '#overview' || location.hash === '#scopes')) refreshHealth(); }, 15000);
 </script>
 </body>
 </html>
 """
 
+LOGIN_HTML = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>code-index-service · 登录</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --blue:#175cd3; --bad:#b42318; --bad-bg:#fdecea; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1016; --card:#161a22; --line:#262c37; --text:#e7e9ee; --muted:#98a2b3; --blue:#84adff; --bad:#fda29b; --bad-bg:#3a1512; } }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--text);
+         font:13px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  .box { width:min(360px,92vw); background:var(--card); border:1px solid var(--line); border-radius:14px; padding:26px 24px; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  p.sub { margin:0 0 20px; color:var(--muted); font-size:12.5px; }
+  label { display:block; color:var(--muted); font-size:12px; margin:12px 0 5px; }
+  input { width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-size:13px; }
+  button { width:100%; margin-top:20px; padding:10px; border-radius:8px; border:1px solid var(--blue); background:var(--blue); color:#fff; font-size:13.5px; cursor:pointer; }
+  button:disabled { opacity:.5; }
+  #err { display:none; margin-top:14px; padding:8px 10px; border-radius:8px; border:1px solid var(--bad); background:var(--bad-bg); color:var(--bad); font-size:12.5px; }
+  .foot { margin-top:16px; color:var(--muted); font-size:11.5px; text-align:center; }
+</style></head>
+<body>
+<div class="box">
+  <h1>code-index-service</h1>
+  <p class="sub">管理控制台 · 请输入管理员账号</p>
+  <form id="f">
+    <label>用户名</label>
+    <input id="u" autocomplete="username" value="admin" spellcheck="false">
+    <label>密码</label>
+    <input id="p" type="password" autocomplete="current-password">
+    <button id="b" type="submit">登录</button>
+  </form>
+  <div id="err"></div>
+  <div class="foot">登录状态保持 12 小时 · HttpOnly Cookie</div>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+function showErr(m) { const e = $('#err'); e.textContent = m; e.style.display = 'block'; }
+$('#f').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const btn = $('#b'); btn.disabled = true; $('#err').style.display = 'none';
+  try {
+    const r = await fetch('/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: $('#u').value, password: $('#p').value }) });
+    if (r.status === 200) { location.replace('/admin'); return; }
+    const b = await r.json().catch(() => ({}));
+    showErr(b.error === 'too-many-attempts' ? '失败次数过多，请 5 分钟后再试' : '用户名或密码不正确');
+  } catch (e) { showErr('网络错误：' + e); }
+  btn.disabled = false;
+};
+</script>
+</body></html>
+"""
+
+
+# ---------------- 模型热切换（供 /v1/admin/models/activate 调用） ----------------
+def _load_ort():
+    import onnxruntime as ort
+    return ort
+
+
+def _make_embedder(directory, name, profile):
+    if FAKE_EMBED:
+        return FakeEmbedder(name=name)
+    ort = _load_ort()
+    providers = state.get("providers") or ["CPUExecutionProvider"]
+    return _load("embedder").Embedder(ort, directory, providers, THREADS, name, profile)
+
+
+def activate_embed(directory):
+    """热切换嵌入模型：暂停 governor → 等空闲 → 加载新模型 → 换全局 → 重新打 tag → kNN 失效。"""
+    global embedder
+    spec = models_admin.validate_embed_dir(directory, roots=MODEL_ROOTS)
+    t0 = time.time()
+    with MODEL_LOCK:
+        was_paused = bool(governor and governor.paused)
+        if governor:
+            governor.pause()
+            governor.wait_idle(15)
+        try:
+            new = _make_embedder(spec["dir"], spec["name"], spec.get("profile"))
+            info = new.info(state.get("ort_version", "?"))
+            info["available_providers"] = state.get("available_providers") or []
+            info["threads"] = THREADS
+            prev_tag = state["info"].get("tag")
+            embedder = new
+            if governor:
+                governor.embedder = new
+            state["info"] = info
+            state["model_dir"] = spec["dir"]
+            state["model_switched_at"] = time.time()
+            ACTIVE["embed_dir"] = spec["dir"]
+            ACTIVE["embed_name"] = spec["name"]
+            # 关键：repos.tag 立即指向新 tag → 旧 tag 向量不会再被检索到（等客户端重新同步）
+            repos = store.set_all_tags(info["tag"]) if store else 0
+            if knn:
+                knn.invalidate()
+            log(f"model switched: {prev_tag} -> {info['tag']} ({repos} repos retagged)")
+            return {"ok": True, "tag": info["tag"], "prevTag": prev_tag, "model": info.get("model"),
+                    "dir": spec["dir"], "name": spec["name"], "repos": repos,
+                    "ms": round((time.time() - t0) * 1000, 1)}
+        finally:
+            if governor and not was_paused:
+                governor.resume()
+
+
+def activate_rerank(directory):
+    global reranker
+    spec = models_admin.validate_rerank_dir(directory, roots=MODEL_ROOTS)
+    with MODEL_LOCK:
+        if FAKE_EMBED:
+            return {"ok": False, "error": "FAKE_EMBED 模式不能加载重排模型"}
+        ort = _load_ort()
+        providers = state.get("providers") or ["CPUExecutionProvider"]
+        new = _load("reranker").Reranker(ort, spec["dir"], providers, THREADS, RERANK_MAX_TOKENS, RERANK_BATCH)
+        reranker = new
+        state.update(rerank_ready=True, rerank_err=None, rerank_info=new.info())
+        ACTIVE["rerank_dir"] = spec["dir"]
+        log(f"rerank switched: {state['rerank_info']}")
+        return {"ok": True, "dir": spec["dir"], **new.info()}
+
+
+def deactivate_rerank():
+    global reranker
+    with MODEL_LOCK:
+        reranker = None
+        state.update(rerank_ready=False, rerank_err="disabled by admin", rerank_info={})
+        log("rerank disabled by admin")
+        return {"ok": True, "rerank_ready": False}
+
+
+def models_payload():
+    installed = {"embed": [], "rerank": []}
+    err = None
+    try:
+        installed = models_admin.discover(
+            roots=MODEL_ROOTS,
+            active_embed_dir=ACTIVE["embed_dir"],
+            active_rerank_dir=ACTIVE["rerank_dir"],
+        )
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    out = {
+        "root": MODELS_DIR,
+        "models": downloader.list(),
+        "installed": installed,
+        "roots": MODEL_ROOTS,
+        "active": {
+            "embed": {"dir": ACTIVE["embed_dir"], "name": ACTIVE["embed_name"],
+                      "tag": state["info"].get("tag"), "model": state["info"].get("model")},
+            "rerank": {"dir": ACTIVE["rerank_dir"], "ready": state["rerank_ready"],
+                       "tag": state["rerank_info"].get("rerank_tag"),
+                       "model": state["rerank_info"].get("rerank_model")},
+        },
+    }
+    if err:
+        out["error"] = err
+    return out
 
 
 class FakeEmbedder:
     """自测用：不需要 onnx 模型，向量由文本哈希确定，但仍保持 L2 归一化与确定性。"""
 
-    def __init__(self, dim=16):
+    def __init__(self, dim=16, name=""):
         self.dim = dim
-        self.tag = "fake-model-0000fake-fp32"
+        self.tag = f"{name or 'fake-model'}-0000fake-fp32"
         self.model_file = "fake.onnx"
         self.model_dir = "(fake)"
 
@@ -576,7 +1092,7 @@ def build():
         info = embedder.info("0")
         info["available_providers"] = ["Fake"]
         info["threads"] = THREADS
-        state.update(ready=True, info=info)
+        state.update(ready=True, info=info, providers=["Fake"], available_providers=["Fake"], ort_version="0")
         log(f"embed ready (fake): tag={info['tag']}")
     else:
         import onnxruntime as ort
@@ -588,7 +1104,7 @@ def build():
         info = embedder.info(ort.__version__)
         info["available_providers"] = avail
         info["threads"] = THREADS
-        state.update(ready=True, info=info)
+        state.update(ready=True, info=info, providers=providers, available_providers=avail, ort_version=ort.__version__)
         log(f"embed ready: tag={info['tag']} providers={info['providers']}")
 
         try:
@@ -755,7 +1271,8 @@ def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=No
     req_text = embed_text or query
     t0 = time.time()
     # ① 查询向量只 embed 一次（多作用域共享）
-    qvec = embedder.embed([req_text], is_query=True)[0]
+    with MODEL_LOCK:  # 热切换时避免新旧模型混用
+        qvec = embedder.embed([req_text], is_query=True)[0]
     embed_ms = (time.time() - t0) * 1000
 
     merged = {}
@@ -831,7 +1348,8 @@ def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=No
             bodies.update(store.bodies(lineage, hashes_in))
         t2 = time.time()
         try:
-            sc = reranker.score(query, [bodies.get(h["hash"], "") for h in pool])
+            with MODEL_LOCK:
+                sc = reranker.score(query, [bodies.get(h["hash"], "") for h in pool])
             rerank_ms = (time.time() - t2) * 1000
             for h, s in zip(pool, sc):
                 h["rerankScore"] = round(float(s), 6)
@@ -995,6 +1513,7 @@ class Handler(BaseHTTPRequestHandler):
     disable_nagle_algorithm = True  # 见文件头第 3 条
 
     def _send(self, code, payload, ctype="application/json", headers=None):
+        self._status = code
         body = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode()
         extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
         head = (
@@ -1016,17 +1535,57 @@ class Handler(BaseHTTPRequestHandler):
             raw = gzip.decompress(raw)
         return json.loads(raw or b"{}")
 
-    # ---------------- 鉴权：API 用 Bearer，后台用 HTTP Basic ----------------
+    # ---------------- 鉴权：API Key（多把）/ 后台会话或 Basic ----------------
+    def _bearer(self):
+        auth = self.headers.get("authorization", "")
+        if not auth.lower().startswith("bearer "):
+            return None
+        return auth.split(" ", 1)[1].strip()
+
+    def _auth_info(self):
+        """解析 Bearer：先匹配环境变量 legacy key（id=0, admin），再查 admin.db。"""
+        token = self._bearer()
+        if not token:
+            return None
+        if API_KEY and hmac.compare_digest(token, API_KEY):
+            return {"id": 0, "name": "env API_KEY", "role": "admin", "enabled": True}
+        row = adm.lookup(token)
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "name": row.get("name") or "",
+            "role": row.get("role") or "index",
+            "enabled": bool(row.get("enabled")),
+        }
+
+    def auth_required(self):
+        """有任意 Key（env 或 admin.db）就强制 API 鉴权；全空时保持开放（首次部署/自测）。"""
+        return bool(API_KEY) or adm.has_keys()
+
     def _api_ok(self):
-        """索引/检索客户端（插件、review-service）：Bearer API_KEY；未配置 API_KEY 时放行。"""
-        if not API_KEY:
+        """索引/检索客户端：Bearer Key（index 或 admin 角色均可）。"""
+        if not self.auth_required():
+            self._who = {"id": 0, "name": "open", "role": "admin", "enabled": True}
             return True
-        return hmac.compare_digest(self.headers.get("authorization", ""), f"Bearer {API_KEY}")
+        info = self._auth_info()
+        self._who = info
+        return bool(info and info["enabled"])
+
+    def _cookie(self, name):
+        raw = self.headers.get("cookie", "")
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return None
+
+    def _session_ok(self):
+        token = self._cookie("dsh_admin")
+        return bool(token and adm.verify_session(token))
 
     def _basic_ok(self):
-        """后台页面/治理：HTTP Basic。ADMIN_PASSWORD 为空时不启用。"""
-        if not ADMIN_PASSWORD:
-            return False
+        """后台页面：HTTP Basic（env ADMIN_USER/ADMIN_PASSWORD 或 admin.db 里的管理员密码）。"""
         auth = self.headers.get("authorization", "")
         if not auth.lower().startswith("basic "):
             return False
@@ -1035,11 +1594,91 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return False
         user, _, pwd = raw.partition(":")
-        return hmac.compare_digest(user, ADMIN_USER) and hmac.compare_digest(pwd, ADMIN_PASSWORD)
+        if not hmac.compare_digest(user, ADMIN_USER):
+            return False
+        if ADMIN_PASSWORD and hmac.compare_digest(pwd, ADMIN_PASSWORD):
+            return True
+        return adm.check_admin_password(pwd)
 
     def _admin_ok(self):
-        """后台数据接口：Basic（浏览器登录后台）或 Bearer（API 客户端）都接受。"""
-        return self._basic_ok() or self._api_ok()
+        """后台数据接口：会话 Cookie / HTTP Basic / admin 角色的 Bearer Key。"""
+        if self._session_ok() or self._basic_ok():
+            self._who = {"id": 0, "name": "admin", "role": "admin", "enabled": True}
+            return True
+        info = self._auth_info()
+        if info and info["enabled"] and info["role"] == "admin":
+            self._who = info
+            return True
+        self._who = info
+        # 只有「完全没配置任何凭据」才开放后台（首次部署引导）。
+        # 生产必须配 ADMIN_PASSWORD（或 admin.db 管理员密码）；index Key 一律不能进后台。
+        if (not self.auth_required() and not ADMIN_PASSWORD and not adm.has_admin_password()):
+            self._who = {"id": 0, "name": "open", "role": "admin", "enabled": True}
+            return True
+        return False
+
+    def _admin_creds_configured(self):
+        """是否已有管理员凭据（env 密码 / admin.db 密码 / env API_KEY / admin 角色 Key）。"""
+        if ADMIN_PASSWORD or adm.has_admin_password() or API_KEY:
+            return True
+        return any((k.get("role") == "admin") for k in adm.list_keys())
+
+    def _login_limited(self, ip):
+        now = time.time()
+        arr = [x for x in LOGIN_FAILS.get(ip, []) if now - x < 300]
+        LOGIN_FAILS[ip] = arr
+        return len(arr) >= 5
+
+    def _login_failed(self, ip):
+        LOGIN_FAILS.setdefault(ip, []).append(time.time())
+
+    def _set_session_cookie(self, token):
+        secure = (self.headers.get("x-forwarded-proto") or "").lower() == "https"
+        return f"dsh_admin={token}; HttpOnly; Path=/; SameSite=Strict; Max-Age={int(SESSION_TTL)}" + ("; Secure" if secure else "")
+
+    def _redirect(self, location):
+        return self._send(302, {"ok": True}, headers={"Location": location})
+
+    def _login(self):
+        ip = self.client_address[0]
+        if self._login_limited(ip):
+            return self._send(429, {"error": "too-many-attempts", "hint": "5 分钟内失败 5 次，请稍后再试"})
+        try:
+            req = self._body()
+        except Exception:
+            req = {}
+        user = str(req.get("username") or ADMIN_USER)
+        pwd = str(req.get("password") or "")
+        ok = hmac.compare_digest(user, ADMIN_USER) and (
+            (bool(ADMIN_PASSWORD) and hmac.compare_digest(pwd, ADMIN_PASSWORD)) or adm.check_admin_password(pwd)
+        )
+        if not ok:
+            self._login_failed(ip)
+            return self._send(401, {"error": "bad-credentials"})
+        token = adm.issue_session(SESSION_TTL)
+        log(f"admin login ok from {ip}")
+        return self._send(200, {"ok": True}, headers={"Set-Cookie": self._set_session_cookie(token)})
+
+    def _logout(self):
+        return self._send(200, {"ok": True}, headers={
+            "Set-Cookie": "dsh_admin=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0"
+        })
+
+    def _setup_admin(self):
+        """首次初始化管理员密码（仅当 env 与库都没有密码时允许；用于全新部署）。"""
+        if adm.has_admin_password() or ADMIN_PASSWORD:
+            return self._send(409, {"error": "already-initialized"})
+        try:
+            req = self._body()
+        except Exception:
+            req = {}
+        pwd = str(req.get("password") or "")
+        if len(pwd) < 8:
+            return self._send(400, {"error": "password-too-short", "hint": "至少 8 位"})
+        adm.set_admin_password(pwd)
+        token = adm.issue_session(SESSION_TTL)
+        log("admin password initialized")
+        return self._send(200, {"ok": True}, headers={"Set-Cookie": self._set_session_cookie(token)})
 
     def _unauthorized(self, basic=False):
         if basic:
@@ -1050,21 +1689,85 @@ class Handler(BaseHTTPRequestHandler):
             )
         return self._send(401, {"error": "unauthorized", "hint": "Authorization: Bearer <API_KEY>"})
 
+    def _begin(self):
+        self._t0 = time.time()
+        self._status = 200
+        self._counts = {"embed_texts": 0, "search_calls": 0, "rerank_calls": 0}
+        try:
+            self._who = self._auth_info()
+        except Exception:  # noqa: BLE001 —— 统计失败绝不能影响请求
+            self._who = None
+
+    def _end(self):
+        try:
+            path = urlparse(self.path).path
+            key_id = int(self._who["id"]) if self._who else 0
+            adm.record(key_id, _endpoint_group(path), self._status < 400,
+                       (time.time() - self._t0) * 1000.0, **self._counts)
+        except Exception:  # noqa: BLE001
+            pass
+
     def do_GET(self):
+        self._begin()
+        try:
+            self._do_GET()
+        finally:
+            self._end()
+
+    def do_POST(self):
+        self._begin()
+        try:
+            self._do_POST()
+        finally:
+            self._end()
+
+    def _do_GET(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
         if path in ("/admin", "/admin/"):
-            # 后台页面：配了 ADMIN_PASSWORD 就要求 Basic；没配则退回"页面开放、数据接口要 key"
-            if ADMIN_PASSWORD and not self._basic_ok():
-                return self._unauthorized(basic=True)
+            # 未登录 → 登录页（不再弹浏览器 Basic 框）；登录后 → 控制台
+            if not self._admin_ok():
+                return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
             return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
         if path == "/health":
             # 免鉴权，但无人认领时只返回最小探活字段（不泄露作用域/存储/治理信息）
             return self._send(200, self._status_payload(public=not self._admin_ok()))
-        if not self._admin_ok():
-            return self._unauthorized(basic=bool(ADMIN_PASSWORD))
+        if path == "/":
+            # 浏览器（Accept 含 text/html）→ 控制台；API 客户端（插件 describe 用 GET /）→ 原 JSON 自述
+            accept = (self.headers.get("accept") or "").lower()
+            q = parse_qs(u.query or "")
+            if "text/html" in accept and "json" not in q and "format" not in q:
+                return self._redirect("/admin")
+        if path.startswith("/v1/admin/"):
+            if not self._admin_ok():
+                return self._unauthorized(basic=bool(ADMIN_PASSWORD))
+        else:
+            # 索引客户端（插件 / review-service）用 Bearer Key 读自述、repo status、scopes
+            if not (self._api_ok() or self._admin_ok()):
+                return self._unauthorized(basic=bool(ADMIN_PASSWORD) and not adm.has_admin_password())
+        if path in ("/", "/v1/status"):
+            return self._send(200, self._status_payload())
+        if path == "/v1/admin/session":
+            return self._send(200, {
+                "authed": True,
+                "keys": adm.count_keys(),
+                "authRequired": self.auth_required(),
+                "legacyKey": bool(API_KEY),
+                "adminPasswordSet": bool(ADMIN_PASSWORD) or adm.has_admin_password(),
+                "model": state["info"].get("model"),
+                "tag": state["info"].get("tag"),
+            })
+        if path == "/v1/admin/keys":
+            return self._send(200, {"keys": adm.list_keys(), "legacy": bool(API_KEY)})
+        if path == "/v1/admin/stats":
+            q = parse_qs(u.query or "")
+            try:
+                days = int((q.get("days") or ["7"])[0])
+            except (TypeError, ValueError):
+                days = 7
+            return self._send(200, adm.stats(days))
         if path == "/v1/admin/models":
-            return self._send(200, {"root": MODELS_DIR, "models": downloader.list()})
+            return self._send(200, models_payload())
         if path == "/log":
             n = 200
             if "n=" in (u.query or ""):
@@ -1098,10 +1801,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
-        if not self._admin_ok():
+        if path.startswith("/v1/admin/"):
+            ok = self._admin_ok()
+        else:
+            ok = self._api_ok() or self._admin_ok()
+        if not ok:
             return self._unauthorized(basic=bool(ADMIN_PASSWORD))
         if not state["ready"]:
             return self._send(503, {"error": "not ready", "detail": state["err"]})
+        if path.startswith("/v1/admin/keys/"):
+            try:
+                kid = int(path[len("/v1/admin/keys/") :])
+            except ValueError:
+                return self._send(400, {"error": "bad key id"})
+            if kid == 0:
+                return self._send(400, {"error": "legacy key 不可删除", "hint": "环境变量 API_KEY"})
+            ok = adm.delete_key(kid)
+            return self._send(200 if ok else 404, {"ok": ok, "deleted": kid if ok else None})
         if path.startswith("/v1/scopes/"):
             ns = unquote(path[len("/v1/scopes/") :])
             return self._send(200, delete_scope(ns))
@@ -1114,10 +1830,14 @@ class Handler(BaseHTTPRequestHandler):
             ready=state["ready"],
             err=state["err"],
             pid=os.getpid(),
-            model_dir=MODEL_DIR,
+            model_dir=ACTIVE["embed_dir"],
+            model_name=ACTIVE["embed_name"],
+            model_switched_at=state.get("model_switched_at"),
             rerank_ready=state["rerank_ready"],
             rerank_err=state["rerank_err"],
-            rerank_model_dir=RERANK_DIR,
+            rerank_model_dir=ACTIVE["rerank_dir"],
+            admin={"keys": adm.count_keys(), "authRequired": self.auth_required(),
+                   "adminPasswordSet": bool(ADMIN_PASSWORD) or adm.has_admin_password()},
         )
         info.update(state["rerank_info"])
         if public:
@@ -1143,13 +1863,27 @@ class Handler(BaseHTTPRequestHandler):
         }
         return info
 
-    def do_POST(self):
+    def _do_POST(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
+        if path == "/admin/login":
+            return self._login()
+        if path == "/admin/logout":
+            return self._logout()
+        if path == "/admin/setup":
+            return self._setup_admin()
         # /v1/admin/* 是后台治理接口：Basic（页面）或 Bearer（脚本）都行；其余索引/检索接口只认 Bearer
         # /v1/search 也允许后台 Basic（admin 页面的「检索测试」用），索引客户端仍可用 Bearer
-        is_admin = path.startswith("/v1/admin/") or path == "/v1/search"
-        if not (self._admin_ok() if is_admin else self._api_ok()):
+        is_admin = path.startswith("/v1/admin/")
+        if is_admin:
+            ok = self._admin_ok()
+        elif path in ("/embed", "/rerank"):
+            ok = self._api_ok()
+        else:
+            # /v1/search、/v1/repos/*、/v1/scopes/resolve、/v1/scopes/*/pin…
+            # 索引客户端用 Bearer，控制台用会话/Basic
+            ok = self._api_ok() or self._admin_ok()
+        if not ok:
             return self._unauthorized(basic=bool(ADMIN_PASSWORD) and is_admin)
         if not state["ready"]:
             return self._send(503, {"error": "not ready", "detail": state["err"]})
@@ -1164,8 +1898,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not texts:
                     return self._send(400, {"error": "texts must be a non-empty array"})
                 texts = [str(t)[:MAX_TEXT_CHARS] for t in texts][:MAX_TEXTS]
+                self._counts["embed_texts"] += len(texts)
                 t0 = time.time()
-                vecs = embedder.embed(texts, bool(req.get("is_query")))
+                with MODEL_LOCK:  # 热切换时避免用半旧半新的会话
+                    vecs = embedder.embed(texts, bool(req.get("is_query")))
                 return self._send(
                     200,
                     {
@@ -1185,8 +1921,10 @@ class Handler(BaseHTTPRequestHandler):
                 query = str(req.get("query") or "")
                 if not texts or not query:
                     return self._send(400, {"error": "query and texts required"})
+                self._counts["rerank_calls"] += len(texts)
                 t0 = time.time()
-                scores = reranker.score(query, [str(t)[:MAX_TEXT_CHARS] for t in texts])
+                with MODEL_LOCK:
+                    scores = reranker.score(query, [str(t)[:MAX_TEXT_CHARS] for t in texts])
                 return self._send(
                     200,
                     {
@@ -1301,6 +2039,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "too-many-namespaces",
                                             "count": len(raw_namespaces), "limit": MAX_SEARCH_SCOPES})
                 entries = _namespaces_from_request(raw_namespaces, req.get("namespace"))
+                self._counts["search_calls"] += 1
+                # 检索也会 embed 1 次 query（计入 embed 文本数，便于统计算力消耗）
+                self._counts["embed_texts"] += 1
                 payload, code = search(
                     entries,
                     str(req.get("query") or ""),
@@ -1339,6 +2080,63 @@ class Handler(BaseHTTPRequestHandler):
                                         "expiresAt": row["expires_at"]})
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
+                if action == "keys":
+                    if not self._admin_creds_configured():
+                        return self._send(400, {"error": "admin-password-required",
+                                                "hint": "先设置管理员密码（POST /admin/setup），再创建 Key"})
+                    name = str(req.get("name") or "").strip()
+                    role = str(req.get("role") or "index").strip().lower()
+                    if not name:
+                        return self._send(400, {"error": "name required"})
+                    try:
+                        created = adm.create_key(name, role, str(req.get("note") or ""))
+                    except ValueError as e:
+                        return self._send(400, {"error": str(e)})
+                    log(f"api key created: id={created['id']} name={created['name']} role={created['role']}")
+                    return self._send(200, created)
+                if action.startswith("keys/"):
+                    rest = action[len("keys/"):]
+                    kid, _, verb = rest.partition("/")
+                    try:
+                        kid = int(kid)
+                    except ValueError:
+                        return self._send(400, {"error": "bad key id"})
+                    if kid == 0:
+                        return self._send(400, {"error": "legacy key 不可修改", "hint": "环境变量 API_KEY"})
+                    if verb in ("enable", "disable"):
+                        row = adm.set_enabled(kid, verb == "enable")
+                        if not row:
+                            return self._send(404, {"error": "unknown key"})
+                        return self._send(200, row)
+                    return self._send(400, {"error": "bad key action", "hint": "enable | disable"})
+                if action == "models/activate":
+                    kind = str(req.get("kind") or "embed").strip().lower()
+                    directory = req.get("dir")
+                    if not directory and req.get("name"):
+                        inst = models_payload()["installed"]
+                        pool = inst.get("rerank" if kind == "rerank" else "embed") or []
+                        hit = [x for x in pool if x.get("name") == req.get("name")]
+                        if not hit:
+                            return self._send(404, {"error": "unknown model", "name": req.get("name")})
+                        directory = hit[0]["dir"]
+                    if not directory:
+                        return self._send(400, {"error": "dir or name required"})
+                    try:
+                        if kind == "embed":
+                            return self._send(200, activate_embed(str(directory)))
+                        if kind == "rerank":
+                            return self._send(200, activate_rerank(str(directory)))
+                        return self._send(400, {"error": "bad kind", "hint": "embed | rerank"})
+                    except models_admin.ModelError as e:
+                        return self._send(400, {"error": "model-invalid", "detail": str(e)})
+                    except Exception as e:  # noqa: BLE001
+                        log(f"activate failed: {e}\n{traceback.format_exc()[-600:]}")
+                        return self._send(500, {"error": "activate-failed", "detail": str(e)})
+                if action == "models/deactivate":
+                    kind = str(req.get("kind") or "rerank").strip().lower()
+                    if kind == "rerank":
+                        return self._send(200, deactivate_rerank())
+                    return self._send(400, {"error": "只能关闭 rerank"})
                 if action.startswith("models/"):
                     rest = action[len("models/"):]
                     name, _, verb = rest.partition("/")
