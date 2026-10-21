@@ -84,21 +84,22 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
-| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**未带 key 时只返回最小探活字段**；`/`、`/log` 需鉴权（若设了 `API_KEY`） |
-| `GET /admin` | **后台查看页**（单文件 HTML，免鉴权；数据经上述 API 拉取，页面里填 API Key 即可）。支持查看运行时/治理/限额/作用域表，以及暂停/恢复嵌入、立即清扫 |
+| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/`、`/log` 需 Bearer 或后台 Basic |
+| `GET /admin` | **后台查看页**（单文件 HTML，HTTP Basic 登录）。支持查看运行时/治理/限额/作用域表，以及暂停/恢复嵌入、立即清扫 |
 
-### 鉴权（`API_KEY`）与后台页面
+### 鉴权：索引用 `API_KEY`，后台用 HTTP Basic
 
-设了 `API_KEY` 后：**所有 `POST`/`DELETE` 与数据类 `GET`（`/`、`/log`、`/v1/scopes`、`/v1/repos/*/status` 等）都要求**：
+两套独立凭据，各管一边：
 
-```
-Authorization: Bearer <API_KEY>
-```
+| 用途 | 凭据 | 方式 | 客户端配置 |
+|---|---|---|---|
+| 索引 / 检索客户端（插件、review-service） | `API_KEY` | `Authorization: Bearer <key>` | 插件 `remote.apiKey`、review `INDEX_API_KEY` |
+| 后台页面与治理操作 | `ADMIN_USER` / `ADMIN_PASSWORD` | **HTTP Basic**（浏览器自动弹登录框） | 服务端环境变量 |
 
-免鉴权白名单只有两个：`GET /health`（未带 key 时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）和 `GET /admin`（页面壳，不含数据）。
-
-- 客户端：插件 `remote.apiKey`、review-service `INDEX_API_KEY`；
-- 管理页：浏览器打开 `http://<host>:18000/admin`，首次拉数据会弹窗要求输入 key，存在该浏览器的 `localStorage`（`dshAdminKey`），不会回传服务端之外的地方；也可以用 `http://<host>:18000/admin#key=<API_KEY>` 一次性打开（hash 只留在本地浏览器，页面会立刻 `history.replaceState` 清掉，不会发给服务端）；
+- 设了 `API_KEY` 后，**索引必须带 key**：`sync`/`chunks`/`embed`/`vectors`/`search`/`status` 等接口都要求 Bearer；
+- 设了 `ADMIN_PASSWORD` 后，`GET /admin` 需要 Basic；页面用到的数据接口（`/v1/scopes`、`/health` 完整版、`/v1/admin/*`）同时接受 Basic 与 Bearer；
+- 免鉴权只剩 `GET /health`（无人认领时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）；
+- 两个都不配时服务为开放状态（仅建议在隔离内网这样跑）：`API_KEY` 空 = 索引接口开放，`ADMIN_PASSWORD` 空 = 后台页面开放（数据仍受 `API_KEY` 约束）。
 - 页面只做「查看 + 暂停/恢复/清扫」，删除作用域等破坏性操作仍走 curl/API。
 
 **`sync` 的三个分支**：`repoState` 与库中一致 → 直接 `unchanged`（1 个 RTT、0 字节正文）；
@@ -333,7 +334,8 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 | `MAX_SEARCH_SCOPES` | `4` | 单次检索最多作用域数，超限 400 |
 | `WARMUP` | `1` | 启动后台预热（嵌入会话、重排内核、最大命名空间的 kNN 矩阵与计数）：把"重启后第一个查询"从 2.4 s 降到 **25 ms**；`0` 关闭 |
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
-| `API_KEY` | 空 | 设了则所有写操作与数据类 GET 要求 `Authorization: Bearer`；`/health`（最小字段）与 `/admin`（页面壳）免鉴权 |
+| `API_KEY` | 空 | 索引/检索客户端的 Bearer key（插件 `remote.apiKey`）；设了则写操作与数据接口都要 key |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / 空 | 后台页面与治理接口的 HTTP Basic 凭据；`ADMIN_PASSWORD` 为空则不启用 Basic |
 | `FAKE_EMBED` | 空 | `1` = 不加载模型（自测用） |
 | `HOST_PORT` | `18000` | **compose 专用**：宿主机端口（只绑 127.0.0.1） |
 | `FLAVOR` | `cpu` | **构建参数**：`cpu` / `gpu`（gpu 装 CUDA 12 的 cublas/cudnn/curand/cufft） |
@@ -357,6 +359,6 @@ docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app
 
 ## 安全
 
-- 默认按"局域网 / 内网可信"设计。设 `API_KEY` 可加一层 Bearer 鉴权。
-- 暴露到公网请在 Traefik 上配 basicAuth / IP 白名单，不要只靠 `API_KEY`。
+- 默认按"局域网 / 内网可信"设计。生产建议 `API_KEY`（索引）与 `ADMIN_USER`/`ADMIN_PASSWORD`（后台）都配。
+- 暴露到公网请在 Traefik/Nginx 上再加一层认证或 IP 白名单，不要只靠服务自身的凭据。
 - 服务端**存源码正文**（`blobs`），这是 rerank 与片段返回的前提；请把它当成代码仓库同等敏感。
