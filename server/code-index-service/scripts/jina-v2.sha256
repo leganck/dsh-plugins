@@ -1,0 +1,10 @@
+# jina-embeddings-v2-base-code ONNX 产物校验清单
+#
+# 用途：scripts/fetch-jina-model.mjs 下载 Release 资产后逐行校验（sha256sum -c 格式）。
+# 生成：scripts/export-jina-onnx.py 重新导出后，把打印出的清单替换到这里并提交。
+#
+0b8988c2076a5ca27e10192b8c7abff7c907a77d9ceb4f2947368d0a0baeb872  model_fp16.onnx
+b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5  tokenizer.json
+e426aa684c7f9a95c5f020aa855faf93a24f065f5fad0c9e17b124670cabdea6  config.json
+f477aeb15ff9f78d3c1ddf2361d2b0b8b20cf55220f839f29a37f3a18efddd89  tokenizer_config.json
+06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f  special_tokens_map.json

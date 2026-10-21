@@ -110,6 +110,25 @@ FROM base AS embed
 # 改名会让向量标签（tag）变化 → 客户端全量重嵌。
 COPY --from=models /model /models/model
 
+# ---------------------------------------------------------------- 嵌入模型（jina-code 变体）
+# 代码检索专用：jina-embeddings-v2-base-code（Apache-2.0，768 维，8k 上下文）。
+# 与 bge 的差异全部用 ENV 表达，不需要改 Python：
+#   - ONNX 图内已烘焙 mean pooling + L2 归一化 → 输出 [batch,768]（2D 分支直接使用）
+#   - 不需要 query 指令前缀（QUERY_PREFIX 为空）
+#   - tokenizer 的 pad 是 <pad> / id=1（bge 是 [PAD] / 0）
+#   - 没有 BERT 的 [SEP]=102，禁用末位替换（SEP_ID=0）
+# 构建：
+#   docker buildx build --build-context models=./models --build-arg FLAVOR=gpu \
+#     --target embed-jina -t dsh-embed:jina-gpu .
+FROM base AS embed-jina
+COPY --from=models /model-jina /models/model
+ENV MODEL_NAME=jina-embeddings-v2-base-code \
+    POOLING=auto \
+    QUERY_PREFIX= \
+    PAD_TOKEN=<pad> \
+    PAD_ID=1 \
+    SEP_ID=0
+
 # ---------------------------------------------------------------- 嵌入 + 重排
 FROM base AS embed-rerank
 COPY --from=models /model /models/model
