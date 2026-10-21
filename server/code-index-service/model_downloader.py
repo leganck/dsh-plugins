@@ -311,8 +311,24 @@ def _sha256(path: str) -> str:
 
 
 def _http_size(url: str, timeout: float) -> int:
-    req = urllib.request.Request(url, method="HEAD")
+    """取文件总大小：HEAD 优先；ModelScope 等 CDN 的 HEAD 不返回长度，
+    退化为 `Range: bytes=0-0` 读 `Content-Range: bytes 0-0/TOTAL`。"""
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            n = int(r.headers.get("Content-Length") or 0)
+            if n > 0:
+                return n
+    except Exception:  # noqa: BLE001 —— 有些源直接不支持 HEAD
+        pass
+    req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
+        cr = r.headers.get("Content-Range") or ""
+        if "/" in cr:
+            try:
+                return int(cr.rsplit("/", 1)[1])
+            except ValueError:
+                pass
         return int(r.headers.get("Content-Length") or 0)
 
 
