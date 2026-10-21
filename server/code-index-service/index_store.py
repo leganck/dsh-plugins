@@ -809,6 +809,28 @@ class IndexStore:
         with self.lock:
             return int(self.db.execute(sql, args).fetchone()["n"])
 
+    def tag_stats(self):
+        """所有向量 tag 的条数与占用（换模型后旧 tag 会继续占空间，需要显式清理）。"""
+        with self.lock:
+            rows = self.db.execute(
+                "select tag, count(*) as vectors, coalesce(sum(length(v)),0) as bytes"
+                " from vectors group by tag order by vectors desc"
+            ).fetchall()
+        return [{"tag": r["tag"], "vectors": int(r["vectors"]), "bytes": int(r["bytes"])} for r in rows]
+
+    def purge_tag_vectors(self, keep_tag=None, drop_tag=None):
+        """删指定 tag 的向量，或保留 keep_tag 删其余所有 tag；返回 {deleted}。"""
+        if drop_tag is None and keep_tag is None:
+            raise ValueError("drop_tag 或 keep_tag 必须给一个")
+        with self.lock:
+            if drop_tag is not None:
+                cur = self.db.execute("delete from vectors where tag = ?", (drop_tag,))
+            else:
+                cur = self.db.execute("delete from vectors where tag is null or tag != ?", (keep_tag,))
+            self.db.commit()
+            self._invalidate()
+            return {"deleted": int(cur.rowcount or 0), "keptTag": keep_tag, "droppedTag": drop_tag}
+
     def total_bytes(self):
         with self.lock:
             b = self.db.execute("select coalesce(sum(length(body)),0) as n from blobs").fetchone()["n"]

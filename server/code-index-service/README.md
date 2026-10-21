@@ -100,7 +100,20 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - 设了 `ADMIN_PASSWORD` 后，`GET /admin` 需要 Basic；页面用到的数据接口（`/v1/scopes`、`/health` 完整版、`/v1/admin/*`）同时接受 Basic 与 Bearer；
 - 免鉴权只剩 `GET /health`（无人认领时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）；
 - 两个都不配时服务为开放状态（仅建议在隔离内网这样跑）：`API_KEY` 空 = 索引接口开放，`ADMIN_PASSWORD` 空 = 后台页面开放（数据仍受 `API_KEY` 约束）。
-- 页面只做「查看 + 暂停/恢复/清扫」，删除作用域等破坏性操作仍走 curl/API。
+- 页面只做「查看 + 暂停/恢复/清扫 + 检索测试」，删除作用域等破坏性操作仍走 curl/API。
+- **检索测试**：选一个作用域、输入 query、点「检索」，直接调 `/v1/search` 展示命中 `path:start-end`、score、embed/kNN 耗时与覆盖率；后台 Basic 即可调用（`/v1/search` 对 Basic 与 Bearer 都开放）。
+- **模型与向量标签**：页面显示当前模型 tag 以及所有 tag 的条数/占用，并提供「清理非当前 tag 的向量」。
+
+### 换模型后还是同一个数据库吗？
+
+是，还是同一个 `/data/index.db`。但向量的主键是 `(lineage_id, tag, hash)`：
+
+- `tag` = 模型指纹（如 `bge-base-zh-v1.5-c4fa1e57-fp16`）。换模型/换精度 → tag 变；
+- 服务端同步时把 `repos.tag` 更新成新 tag，kNN 矩阵按 `(namespace, tag)` 构建，**新旧向量不会混用**；
+- 新 tag 的向量会重新嵌入（按内容哈希，只有正文变了的块才要新算）；**旧 tag 的向量仍留在库里占空间**，
+  因为正文块还被引用，普通 GC 不会删它们；
+- 需要回收就点后台「清理非当前 tag 的向量」，或 `POST /v1/admin/purge-tags`（不带参数 = 删所有非当前 tag）；
+- `/health` 的 `tags` 字段会列出每个 tag 的 `vectors/bytes`，迁移前可以先看一眼占用。
 
 **`sync` 的三个分支**：`repoState` 与库中一致 → 直接 `unchanged`（1 个 RTT、0 字节正文）；
 `mode:'diff'` 且 `revision` 不是服务端当前值 → `409 {needFull:true}`（客户端改发全量自愈）；
