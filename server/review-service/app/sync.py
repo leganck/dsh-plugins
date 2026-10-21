@@ -1,15 +1,18 @@
 """索引同步客户端（Python 版）：把 worktree 切块后同步到 code-index-service。
 
-协议（与服务端/插件完全一致，服务端零改动）：
+协议（与服务端/插件完全一致）：
   POST /v1/repos/{namespace}/sync
     {repoId, chunkFp, url, tag, repoState, revision, mode:'full'|'diff',
      upsert:[{path, hash, chunks:[{hash,start,end}]}], remove:[path],
-     chunkCount, noEmbed}
-    → {revision, unchanged, missing:[hash...], chunks, vectors, coverage}
+     chunkCount, noEmbed, scope?:{kind, ref, commit?, ttlDays?}}
+    → {revision, unchanged, missing:[hash...], chunks, vectors, coverage, namespace?}
   POST /v1/repos/{namespace}/chunks   {bodies:[{hash, body}]}
   POST /v1/repos/{namespace}/embed    {rate?}   （触发服务端后台嵌入）
 
-namespace = `{repoId}@{chunkFp}`；`repoState = sha256(排序后的 "path\\0sha")`。
+默认 namespace = `{repoId}@{chunkFp}`（旧行为，INDEX_SCOPE_MODE=repo 时不变）；
+档3 作用域模式下由 worker 先 `POST /v1/scopes/resolve` 拿到 namespace 再传进来，
+并附带 `scope` 元数据；响应里的 `namespace` 优先（服务端为准）。
+`repoState = sha256(排序后的 "path\\0sha")`。
 增量策略：本地记录了 (repoState, revision) 且未变 → 只发指纹+revision（1 个 RTT、0 字节正文）。
 """
 
@@ -137,14 +140,22 @@ class IndexSync:
         state: dict | None = None,
         no_embed: bool = False,
         chunking: dict | None = None,
+        namespace: str | None = None,
+        scope: dict | None = None,
         log_fn=log,
     ) -> SyncResult:
+        """同步一个 worktree。
+
+        - `namespace=None, scope=None`：旧行为（`{repo_id}@{chunk_fp}`），服务端零感知；
+        - `namespace=<服务端 resolve 结果>, scope={kind,ref,...}`：档3 作用域快照，
+          payload 带 scope，最终 namespace 以响应体为准（没给则回退本地值）。
+        """
         import time
 
         t0 = time.monotonic()
-        namespace = f"{repo_id}@{chunk_fp}"
+        local_ns = namespace or f"{repo_id}@{chunk_fp}"
         manifest, bodies, repo_state, chunk_count = build_manifest(worktree, chunking=chunking)
-        res = SyncResult(namespace=namespace, repo_state=repo_state, files=len(manifest))
+        res = SyncResult(namespace=local_ns, repo_state=repo_state, files=len(manifest))
 
         base = {
             "repoId": repo_id,
@@ -155,9 +166,11 @@ class IndexSync:
             "noEmbed": no_embed,
             "chunkCount": chunk_count,
         }
+        if scope:
+            base["scope"] = dict(scope)
         last_state = (state or {}).get("repo_state")
         last_rev = (state or {}).get("revision")
-        ns_path = f"/v1/repos/{urllib.parse.quote(namespace, safe='')}"
+        ns_path = f"/v1/repos/{urllib.parse.quote(local_ns, safe='')}"
 
         if last_state == repo_state and last_rev is not None:
             payload = {**base, "mode": "diff", "revision": int(last_rev)}
@@ -177,6 +190,8 @@ class IndexSync:
                 raise
 
         missing = list(resp.get("missing") or [])
+        # 档3：以服务端返回的 namespace 为准；旧服务端没有该字段时沿用本地值
+        res.namespace = str((resp or {}).get("namespace") or local_ns)
         res.revision = int(resp.get("revision") or 0)
         res.unchanged = bool(resp.get("unchanged"))
         res.missing = len(missing)

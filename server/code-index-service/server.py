@@ -21,18 +21,23 @@
 端点
 ----
     GET  /                         自述：模型/tag/providers/重排状态/治理状态/命名空间概览
-    GET  /health                   同上
+    GET  /health                   同上（spaces[] 带 scope，顶层 scopes:{total,byKind}）
     GET  /log?n=200                日志尾巴
     POST /embed                    {texts, is_query} -> {vectors_b64, dim, count, ms}   （兼容 0.7.0）
     POST /rerank                   {query, texts, max_tokens} -> {scores, ms}          （兼容 0.7.0）
-    POST /v1/repos/{ns}/sync       {repoState, revision?, mode, upsert, remove, tag, url, repoId, chunkFp}
-                                   -> {revision, unchanged, missing[], chunks, vectors, coverage}
+    POST /v1/repos/{ns}/sync       {repoState, revision?, mode, upsert, remove, tag, url, repoId, chunkFp,
+                                    scope?{kind,ref,commit?,ttlDays?}} -> {revision, unchanged, missing[], chunks, vectors, coverage, namespace}
     POST /v1/repos/{ns}/chunks     {bodies:[{hash, body}]} -> {accepted, deduped}
     POST /v1/repos/{ns}/embed      {order?, batch?} -> 入队后台嵌入
-    GET  /v1/repos/{ns}/status     -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes}
-    POST /v1/search                {namespace, query, k?, tag?, rerank?:{candidates}} -> {hits[], ms{}}
-    POST /v1/admin/pause | /resume | /rate | /gc
+    GET  /v1/repos/{ns}/status     -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes, scope{}}
+    POST /v1/search                {namespace} 或 {namespaces:[{namespace,weight?}]}, query, k?, tag?,
+                                    rerank?:{candidates} -> {hits[]（带 namespace/scope）, ms{}, coverage, byScope[]}
+    POST /v1/admin/pause | /resume | /rate | /gc | /sweep
     POST /v1/lineages/{id}/adopt   {from, hashes?} 显式跨血统借用
+    GET  /v1/scopes?repoId=&kind=  作用域清单（kind/ref/TTL/占用）
+    POST /v1/scopes/resolve        {repoId, chunkFp, kind, ref, commit?} -> {namespace, exists, revision?}
+    POST /v1/scopes/{ns}/pin       {pinned, ttlDays?} -> {namespace, pinned, expiresAt}
+    DELETE /v1/scopes/{ns}         -> {deleted, chunks}
 """
 import base64
 import gzip
@@ -42,9 +47,11 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, unquote
+from urllib.parse import parse_qs, urlparse, unquote
 
 import numpy as np
+
+import index_store
 
 APP = os.path.dirname(os.path.abspath(__file__))
 F = os.environ
@@ -72,6 +79,20 @@ API_KEY = F.get("API_KEY", "")
 FAKE_EMBED = F.get("FAKE_EMBED", "") not in ("", "0", "false")
 MAX_TEXTS = 512
 MAX_TEXT_CHARS = 8000
+
+# ---------------- 档 3：作用域（快照）生命周期 ----------------
+# TTL 单位是"天"；main / legacy 永久。janitor 周期见 SCOPE_SWEEP_INTERVAL。
+SCOPE_TTL_BRANCH = int(F.get("SCOPE_TTL_BRANCH", "30"))
+SCOPE_TTL_PR = int(F.get("SCOPE_TTL_PR", "14"))
+SCOPE_TTL_WORKTREE = int(F.get("SCOPE_TTL_WORKTREE", "1"))
+SCOPE_TTL = {"branch": SCOPE_TTL_BRANCH, "pr": SCOPE_TTL_PR, "worktree": SCOPE_TTL_WORKTREE,
+             "main": None, "legacy": None}
+SCOPE_SWEEP = F.get("SCOPE_SWEEP", "1") not in ("0", "false", "no")
+SCOPE_SWEEP_INTERVAL = max(1, int(float(F.get("SCOPE_SWEEP_INTERVAL", "3600"))))
+SCOPE_SWEEP_FIRST_DELAY = max(0, int(float(F.get("SCOPE_SWEEP_FIRST_DELAY", "30"))))  # 避开 warmup
+MAX_SCOPES = int(F.get("MAX_SCOPES", "200"))
+MAX_SEARCH_SCOPES = int(F.get("MAX_SEARCH_SCOPES", "4"))
+RRF_K = 20  # 与插件 lib/search.js 的 RRF_K 保持一致
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -158,11 +179,15 @@ def build():
             state.update(rerank_ready=False, rerank_err=f"{type(e).__name__}: {e}")
             log("rerank unavailable: " + state["rerank_err"])
 
-    store = _load("index_store").IndexStore(DB_PATH)
+    store = index_store.IndexStore(DB_PATH, scope_ttl=SCOPE_TTL)
     knn = _load("knn").KnnCache(store, KNN_MAX_BYTES)
     governor = _load("governor").EmbedGovernor(store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log)
     governor.start()
     log(f"index store ready: db={DB_PATH} rate={EMBED_RATE}/s batch={EMBED_BATCH} knnMax={KNN_MAX_BYTES}B")
+    if SCOPE_SWEEP:
+        # janitor：启动后延迟 SCOPE_SWEEP_FIRST_DELAY 再跑第一次（避开 warmup 抢 CPU），此后周期扫。
+        threading.Thread(target=_janitor_loop, name="scope-janitor", daemon=True).start()
+        log(f"scope janitor on: interval={SCOPE_SWEEP_INTERVAL}s firstDelay={SCOPE_SWEEP_FIRST_DELAY}s")
     if WARMUP:
         threading.Thread(target=_warmup, name="warmup", daemon=True).start()
 
@@ -205,39 +230,185 @@ def _warmup():
         log(f"warmup: knn 失败（忽略）{type(e).__name__}: {e}")
 
 
+def run_sweep(now=None):
+    """扫一遍过期 scope：删 scope → 失效 kNN → 对受影响 lineage 做 retention GC。
+
+    janitor 线程与 `POST /v1/admin/sweep` 共用这一条路径，保证两边行为一致。
+    """
+    now = int(time.time()) if now is None else int(now)
+    result = store.sweep_scopes(now)
+    for ns in result.get("deleted", []):
+        knn.invalidate(ns)
+        log(f"janitor: scope expired & deleted: {ns}")
+    gc_stats = {}
+    for lineage in result.get("lineages", []):
+        try:
+            stats = store.gc(lineage, RETENTION_DAYS)
+            gc_stats[lineage] = stats
+            log(f"janitor: gc lineage={lineage} blobs={stats['blobs']} vectors={stats['vectors']}")
+        except Exception as e:  # gc 失败不能影响其余 scope 的清理
+            log(f"janitor: gc failed lineage={lineage}: {type(e).__name__}: {e}")
+    out = {"deleted": result.get("deleted", []), "lineages": result.get("lineages", [])}
+    if gc_stats:
+        out["gc"] = gc_stats
+    return out
+
+
+def _janitor_loop():
+    time.sleep(SCOPE_SWEEP_FIRST_DELAY)
+    while True:
+        try:
+            run_sweep()
+        except Exception as e:
+            log(f"janitor sweep failed: {type(e).__name__}: {e}")
+        time.sleep(SCOPE_SWEEP_INTERVAL)
+
+
 # ------------------------------------------------------------------ 业务
-def search(namespace, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
-    repo = store.repo(namespace)
+def _namespaces_from_request(raw, single):
+    """把 {namespaces:[{namespace,weight?}]} / {namespace:"..."} 归一成 [(namespace, weight)]。
+
+    旧客户端只传 namespace → 单元素数组，走同一实现（与旧结果等价）。
+    """
+    entries = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                if item:
+                    entries.append((item, 1.0))
+            elif isinstance(item, dict):
+                ns = item.get("namespace") or ""
+                if not ns:
+                    continue
+                weight = item.get("weight", 1.0)
+                try:
+                    weight = max(0.0, float(weight))
+                except (TypeError, ValueError):
+                    weight = 1.0
+                entries.append((str(ns), weight))
+    if not entries and single:
+        entries.append((str(single), 1.0))
+    if not entries:
+        # 保持旧行为：namespace 缺失 → 404 unknown-namespace
+        entries.append(("", 1.0))
+    return entries
+
+
+def _hit_scope(repo):
     if not repo:
-        return {"error": "unknown-namespace", "namespace": namespace}, 404
-    use_tag = tag or repo["tag"]
-    if not use_tag:
-        return {"hits": [], "reason": "该命名空间还没有模型标签（先同步一次）", "ms": {}}, 200
+        return {"kind": "legacy", "ref": None}
+    return {"kind": repo["scope_kind"] or "legacy", "ref": repo["scope_ref"]}
+
+
+def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
+    """多作用域检索：embed 一次 → 每 ns topk → 按 hash 去重 + 加权 RRF(k=20) → 可选重排。
+
+    单 namespace（或数组长度 1）与旧实现等价：hits 的 hash/顺序/score 一致，旧字段全保留。
+    """
+    if isinstance(namespaces, str) or namespaces is None:
+        namespaces = [(namespaces or "", 1.0)]
+    entries = list(namespaces)
+    single = len(entries) == 1
+    by_scope = []
+    usable = []
+    for ns, weight in entries:
+        repo = store.repo(ns)
+        if not repo:
+            by_scope.append({"namespace": ns, "error": "unknown-namespace"})
+            continue
+        use_tag = tag or repo["tag"]
+        if not use_tag:
+            by_scope.append({"namespace": ns, "error": "no-tag",
+                             "reason": "该命名空间还没有模型标签（先同步一次）"})
+            continue
+        usable.append({"namespace": ns, "weight": weight, "repo": repo, "tag": use_tag})
+    if not usable:
+        if single:
+            repo = store.repo(entries[0][0])
+            if repo is None:
+                return {"error": "unknown-namespace", "namespace": entries[0][0]}, 404
+            return {"hits": [], "reason": "该命名空间还没有模型标签（先同步一次）", "ms": {},
+                    "byScope": by_scope}, 200
+        return {"hits": [], "reason": "没有可检索的作用域（未知命名空间或还没同步过模型标签）",
+                "ms": {}, "byScope": by_scope}, 200
+
     req_text = embed_text or query
     t0 = time.time()
-    # `embedText`：客户端带了「当前文件片段」时，用它构造查询向量（更贴近正在编辑的上下文），
-    # 而 `rerank` 仍然用原始 query —— 两件事的"提问"不一样，混用会污染重排。
+    # ① 查询向量只 embed 一次（多作用域共享）
     qvec = embedder.embed([req_text], is_query=True)[0]
     embed_ms = (time.time() - t0) * 1000
-    hashes, mat, meta = knn.get(namespace, use_tag)
-    if mat.shape[0] == 0:
-        return {"hits": [], "reason": "该命名空间还没有向量", "ms": {"embed": round(embed_ms, 1)}}, 200
-    if qvec.shape[0] != mat.shape[1]:
-        return {"error": "dim-mismatch", "detail": f"query dim {qvec.shape[0]} != index dim {mat.shape[1]}"}, 409
-    t1 = time.time()
-    take = max(int(k), int(rerank_candidates or 0))
-    order, scores = knn.topk(mat, qvec, take)
-    knn_ms = (time.time() - t1) * 1000
-    hits = []
-    for idx, sc in zip(order, scores):
-        h = hashes[int(idx)]
-        path, start, end = meta[h]
-        hits.append({"hash": h, "path": path, "start": start, "end": end, "score": round(float(sc), 6)})
 
+    merged = {}
+    knn_total_ms = 0.0
+    dim_error = None
+    for item in usable:
+        ns = item["namespace"]
+        repo = item["repo"]
+        use_tag = item["tag"]
+        weight = item["weight"]
+        coverage = store.counts(ns)["coverage"]
+        item["coverage"] = coverage
+        hashes, mat, meta = knn.get(ns, use_tag)
+        if mat.shape[0] == 0:
+            by_scope.append({"namespace": ns, "hits": 0, "coverage": coverage,
+                             "ms": {"embed": round(embed_ms, 1), "knn": 0}})
+            continue
+        if qvec.shape[0] != mat.shape[1]:
+            dim_error = f"query dim {qvec.shape[0]} != index dim {mat.shape[1]}"
+            by_scope.append({"namespace": ns, "error": "dim-mismatch", "detail": dim_error})
+            continue
+        t1 = time.time()
+        # ② 每个 ns 取 topk(max(k, rerank_candidates) * 2)：给跨作用域融合留余量
+        take = max(int(k), int(rerank_candidates or 0)) * 2
+        order, scores = knn.topk(mat, qvec, take)
+        knn_ms = (time.time() - t1) * 1000
+        knn_total_ms += knn_ms
+        seen = set()
+        ns_rank = 0
+        for idx, sc in zip(order, scores):
+            h = hashes[int(idx)]
+            if h in seen:  # 同一 ns 内同内容多路径 → 只算一次，避免重复加权
+                continue
+            seen.add(h)
+            ns_rank += 1
+            path, start, end = meta[h]
+            # ③ 合并：key=hash；score 取最高，来源保留首个 ns；rrf += weight/(k+rank)（rank 从 1 起，与插件一致）
+            contribution = weight / (RRF_K + ns_rank)
+            cur = merged.get(h)
+            if cur is None:
+                merged[h] = {
+                    "hash": h, "path": path, "start": start, "end": end,
+                    "score": float(sc), "namespace": ns,
+                    "scope": _hit_scope(repo), "rrf": contribution,
+                }
+            else:
+                cur["rrf"] += contribution
+                if float(sc) > cur["score"]:
+                    cur["score"] = float(sc)
+        by_scope.append({"namespace": ns, "hits": len(seen), "coverage": coverage,
+                         "ms": {"embed": round(embed_ms, 1), "knn": round(knn_ms, 1)}})
+
+    if not merged:
+        if single:
+            if dim_error:
+                return {"error": "dim-mismatch", "detail": dim_error}, 409
+            return {"hits": [], "reason": "该命名空间还没有向量",
+                    "ms": {"embed": round(embed_ms, 1)}, "byScope": by_scope}, 200
+        return {"hits": [], "ms": {"embed": round(embed_ms, 1), "knn": round(knn_total_ms, 1)},
+                "byScope": by_scope}, 200
+
+    ranked = sorted(merged.values(), key=lambda h: (-h["rrf"], -h["score"], h["hash"]))
     rerank_ms = 0.0
-    if rerank_candidates and reranker is not None and len(hits) > 1:
-        pool = hits[: int(rerank_candidates)]
-        bodies = store.bodies(repo["lineage_id"], [h["hash"] for h in pool])
+    if rerank_candidates and reranker is not None and len(ranked) > 1:
+        pool = ranked[: int(rerank_candidates)]
+        # 正文按 lineage 批量取（多作用域可能跨血统）
+        groups = {}
+        for h in pool:
+            repo = store.repo(h["namespace"]) or usable[0]["repo"]
+            groups.setdefault(repo["lineage_id"], []).append(h["hash"])
+        bodies = {}
+        for lineage, hashes_in in groups.items():
+            bodies.update(store.bodies(lineage, hashes_in))
         t2 = time.time()
         try:
             sc = reranker.score(query, [bodies.get(h["hash"], "") for h in pool])
@@ -245,14 +416,30 @@ def search(namespace, query, k=10, tag=None, rerank_candidates=0, embed_text=Non
             for h, s in zip(pool, sc):
                 h["rerankScore"] = round(float(s), 6)
             pool.sort(key=lambda h: h["rerankScore"], reverse=True)
-            hits = pool + hits[len(pool) :]
+            ranked = pool + ranked[len(pool):]
         except Exception as e:
             rerank_ms = (time.time() - t2) * 1000
-            hits[0]["rerankError"] = str(e)[:160]
+            ranked[0]["rerankError"] = str(e)[:160]
+
+    hits = []
+    for h in ranked[: int(k)]:
+        hit = {"hash": h["hash"], "path": h["path"], "start": h["start"], "end": h["end"],
+               "score": round(float(h["score"]), 6),
+               "namespace": h["namespace"], "scope": h["scope"], "rrf": round(h["rrf"], 6)}
+        if "rerankScore" in h:
+            hit["rerankScore"] = h["rerankScore"]
+        elif "rerankError" in h:
+            hit["rerankError"] = h["rerankError"]
+        hits.append(hit)
+
+    # 顶层 coverage：多作用域按权重加权平均（单作用域时与旧值完全一致）
+    total_weight = sum(max(0.0, item["weight"]) for item in usable) or len(usable)
+    coverage = sum(item["coverage"] * max(0.0, item["weight"]) for item in usable) / total_weight
     return {
-        "hits": hits[: int(k)],
-        "ms": {"embed": round(embed_ms, 1), "knn": round(knn_ms, 1), "rerank": round(rerank_ms, 1)},
-        "coverage": store.counts(namespace)["coverage"],
+        "hits": hits,
+        "ms": {"embed": round(embed_ms, 1), "knn": round(knn_total_ms, 1), "rerank": round(rerank_ms, 1)},
+        "coverage": round(coverage, 4),
+        "byScope": by_scope,
     }, 200
 
 
@@ -268,6 +455,14 @@ def repo_status(namespace):
         "revision": repo["revision"],
         "tag": repo["tag"],
         "repoState": repo["repo_state"],
+        "scope": {
+            "kind": repo["scope_kind"] or "legacy",
+            "ref": repo["scope_ref"],
+            "commit": repo["commit_sha"],
+            "createdAt": repo["created_at"],
+            "expiresAt": repo["expires_at"],
+            "pinned": bool(repo["pinned"]),
+        },
     }
     out.update(store.counts(namespace))
     out.update(store.lineage_bytes(repo["lineage_id"]))
@@ -276,8 +471,81 @@ def repo_status(namespace):
         "maxVectorsPerLineage": MAX_VECTORS_PER_LINEAGE,
         "maxTotalGb": round(MAX_TOTAL_BYTES / 1024**3, 2),
         "retentionDays": RETENTION_DAYS,
+        "maxScopes": MAX_SCOPES,
+        "maxSearchScopes": MAX_SEARCH_SCOPES,
+        "scopeTtlDays": {k: v for k, v in SCOPE_TTL.items() if v is not None},
     }
     return out, 200
+
+
+def scope_list(repo_id=None, kind=None):
+    """GET /v1/scopes 的响应体：把 scope_overview() 映射成契约里的字段名。"""
+    out = []
+    for it in store.scope_overview(repo_id=repo_id, kind=kind, limit=max(50, MAX_SCOPES)):
+        scope = it.get("scope") or {}
+        out.append({
+            "namespace": it["namespace"],
+            "kind": scope.get("kind") or "legacy",
+            "ref": scope.get("ref"),
+            "repoId": it["repo_id"],
+            "chunkFp": it["chunk_fp"],
+            "revision": it["revision"],
+            "commit": scope.get("commit"),
+            "chunks": it.get("chunks", 0),
+            "vectors": it.get("vectors", 0),
+            "coverage": it.get("coverage", 0.0),
+            "createdAt": scope.get("createdAt"),
+            "expiresAt": scope.get("expiresAt"),
+            "pinned": bool(scope.get("pinned")),
+            "ttlRemaining": it.get("ttlRemaining"),
+        })
+    return out
+
+
+def delete_scope(namespace):
+    """DELETE /v1/scopes/{ns}：删 scope + 失效 kNN + 对血统做 retention GC（共享内容不会被误删）。"""
+    result = store.delete_scope(namespace)
+    if result.get("deleted"):
+        knn.invalidate(namespace)
+        lineage = result.get("lineage")
+        if lineage:
+            try:
+                store.gc(lineage, RETENTION_DAYS)
+            except Exception as e:
+                log(f"delete scope gc failed lineage={lineage}: {type(e).__name__}: {e}")
+        log(f"scope deleted: {namespace} chunks={result.get('chunks', 0)}")
+    return {"deleted": bool(result.get("deleted")), "chunks": result.get("chunks", 0)}
+
+
+def _scope_from_sync(req, ns):
+    """解析 sync 里的可选 scope 元数据 → (canonical_ns, scope_meta)。
+
+    namespace 以服务端推导出的 canonical 为准（响应里回给客户端）；
+    没有 scope 时原样返回路径里的 namespace（老客户端/legacy 行为不变）。
+    """
+    scope = req.get("scope")
+    if not isinstance(scope, dict):
+        return ns, None
+    existing = store.repo(ns)
+    repo_id = req.get("repoId") or (existing or {}).get("repo_id")
+    chunk_fp = req.get("chunkFp") or (existing or {}).get("chunk_fp")
+    if not repo_id or not chunk_fp:
+        guess_repo, guess_fp = index_store.namespace_identity(ns)
+        repo_id = repo_id or guess_repo
+        chunk_fp = chunk_fp or guess_fp
+    ttl_days = scope.get("ttlDays")
+    if ttl_days is not None:
+        try:
+            ttl_days = int(ttl_days)
+        except (TypeError, ValueError):
+            raise index_store.ScopeFormatError("bad-ttl-days", f"ttlDays={ttl_days!r}")
+    canonical = index_store.canonical_namespace(repo_id, chunk_fp, scope.get("kind"), scope.get("ref"))
+    return canonical, {
+        "kind": scope.get("kind"),
+        "ref": scope.get("ref"),
+        "commit": scope.get("commit"),
+        "ttl_days": ttl_days,
+    }
 
 
 def ensure_capacity(lineage):
@@ -351,8 +619,27 @@ class Handler(BaseHTTPRequestHandler):
             ns = unquote(path[len("/v1/repos/") : -len("/status")])
             payload, code = repo_status(ns)
             return self._send(code, payload)
+        if path == "/v1/scopes":
+            if not store:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            q = parse_qs(u.query or "")
+            repo_id = (q.get("repoId") or [None])[0] or None
+            kind = (q.get("kind") or [None])[0] or None
+            return self._send(200, {"scopes": scope_list(repo_id, kind)})
         if path == "/v1/spaces":
-            return self._send(200, {"spaces": store.overview() if store else []})
+            return self._send(200, {"spaces": store.scope_overview() if store else []})
+        return self._send(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        path = u.path.rstrip("/") or "/"
+        if not self._auth_ok():
+            return self._send(401, {"error": "unauthorized"})
+        if not state["ready"]:
+            return self._send(503, {"error": "not ready", "detail": state["err"]})
+        if path.startswith("/v1/scopes/"):
+            ns = unquote(path[len("/v1/scopes/") :])
+            return self._send(200, delete_scope(ns))
         return self._send(404, {"error": "not found"})
 
     def _status_payload(self):
@@ -372,12 +659,16 @@ class Handler(BaseHTTPRequestHandler):
         if knn:
             info["knn"] = knn.stats()
         if store:
-            info["spaces"] = store.overview()
+            info["spaces"] = store.scope_overview()
+            info["scopes"] = store.scope_stats()
             info["db"] = DB_PATH
         info["limits"] = {
             "maxVectorsPerLineage": MAX_VECTORS_PER_LINEAGE,
             "maxTotalGb": round(MAX_TOTAL_BYTES / 1024**3, 2),
             "retentionDays": RETENTION_DAYS,
+            "maxScopes": MAX_SCOPES,
+            "maxSearchScopes": MAX_SEARCH_SCOPES,
+            "scopeTtlDays": {k: v for k, v in SCOPE_TTL.items() if v is not None},
         }
         return info
 
@@ -441,9 +732,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": "bad path"})
                 if action == "sync":
                     body = dict(req)
-                    body.setdefault("tag", state["info"].get("tag"))
+                    # 显式 null 与"缺键"同义：用服务端当前模型 tag。
+                    # 不能只用 setdefault —— review-service 会固定发 "tag": null，setdefault 不覆盖显式 null，
+                    # 结果是 repos.tag=NULL → governor 认为未定模型不嵌入 → /v1/search 永远 no-tag（实测踩到）。
+                    if not body.get("tag"):
+                        body["tag"] = state["info"].get("tag")
+                    # 可选 scope 元数据：namespace 以服务端推导为准（老客户端没有 scope，保持原 ns）
                     try:
-                        payload = store.sync(ns, body)
+                        effective_ns, scope_meta = _scope_from_sync(req, ns)
+                    except index_store.ScopeFormatError as e:
+                        return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                    existed = store.repo(effective_ns) is not None
+                    # 配额：新建 repos 行前检查 MAX_SCOPES（只限 scope/快照路径，不拦老客户端的 legacy 行）
+                    if not existed and (scope_meta is not None or "#" in effective_ns):
+                        count = store.count_scopes()
+                        if count >= MAX_SCOPES:
+                            return self._send(507, {"error": "scope-cap", "count": count, "limit": MAX_SCOPES,
+                                                    "hint": "DELETE /v1/scopes/{ns} 清理不用的快照，或调大 MAX_SCOPES"})
+                    try:
+                        payload = store.sync(effective_ns, body)
                     except Exception as e:
                         name = type(e).__name__
                         if name == "RevisionConflict":
@@ -451,15 +758,33 @@ class Handler(BaseHTTPRequestHandler):
                         if name == "SyncDiverged":
                             return self._send(400, {"error": "diverged", "detail": str(e)})
                         raise
-                    repo = store.repo(ns)
+                    repo = store.repo(effective_ns)
+                    # 注册/刷新 scope 元数据：新行落默认 TTL；老行只更新 commit/updated_at，
+                    # 不覆盖 pinned/expires_at（除非 ttlDays 显式给出）。
+                    try:
+                        if scope_meta is not None:
+                            store.register_scope(
+                                effective_ns, scope_meta["kind"], scope_meta["ref"],
+                                commit_sha=scope_meta["commit"], ttl_days=scope_meta["ttl_days"],
+                                pinned=0 if not existed else None, new_row=not existed,
+                            )
+                        elif "#" in effective_ns:
+                            meta = index_store.parse_scope_namespace(effective_ns)
+                            store.register_scope(
+                                effective_ns, meta["kind"], meta["token"], scope_ref=meta["scope_ref"],
+                                pinned=0 if not existed else None, new_row=not existed,
+                            )
+                    except index_store.ScopeFormatError as e:
+                        return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                    payload["namespace"] = effective_ns
                     cap = ensure_capacity(repo["lineage_id"]) if repo else None
                     if cap:
                         return self._send(507, cap)
                     if payload["missing"]:
                         # 外部预热（seed）时客户端自己算向量，别让服务端再算一遍
                         if not req.get("noEmbed"):
-                            governor.kick(ns)
-                    knn.invalidate(ns)
+                            governor.kick(effective_ns)
+                    knn.invalidate(effective_ns)
                     return self._send(200, payload)
                 if action == "chunks":
                     r = store.put_chunks(ns, req.get("bodies") or [])
@@ -497,8 +822,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, governor.status(ns))
                 return self._send(404, {"error": "unknown repo action"})
             if path == "/v1/search":
+                raw_namespaces = req.get("namespaces")
+                if isinstance(raw_namespaces, list) and len(raw_namespaces) > MAX_SEARCH_SCOPES:
+                    return self._send(400, {"error": "too-many-namespaces",
+                                            "count": len(raw_namespaces), "limit": MAX_SEARCH_SCOPES})
+                entries = _namespaces_from_request(raw_namespaces, req.get("namespace"))
                 payload, code = search(
-                    req.get("namespace") or "",
+                    entries,
                     str(req.get("query") or ""),
                     int(req.get("k", 10)),
                     req.get("tag"),
@@ -506,6 +836,33 @@ class Handler(BaseHTTPRequestHandler):
                     req.get("embedText"),
                 )
                 return self._send(code, payload)
+            # ---------------- 作用域（快照）管理 ----------------
+            if path == "/v1/scopes/resolve":
+                try:
+                    ns = index_store.canonical_namespace(
+                        req.get("repoId"), req.get("chunkFp"), req.get("kind"), req.get("ref")
+                    )
+                except index_store.ScopeFormatError as e:
+                    return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                repo = store.repo(ns)
+                out = {"namespace": ns, "exists": repo is not None}
+                if repo:
+                    out["revision"] = repo["revision"]
+                return self._send(200, out)
+            if path.startswith("/v1/scopes/") and path.endswith("/pin"):
+                ns = unquote(path[len("/v1/scopes/") : -len("/pin")])
+                if not store.repo(ns):
+                    return self._send(404, {"error": "unknown-namespace", "namespace": ns})
+                update_ttl = "ttlDays" in req
+                ttl_days = req.get("ttlDays")
+                if update_ttl and ttl_days is not None:
+                    try:
+                        ttl_days = int(ttl_days)
+                    except (TypeError, ValueError):
+                        return self._send(400, {"error": "bad-scope", "reason": "bad-ttl-days"})
+                row = store.pin_scope(ns, bool(req.get("pinned", True)), ttl_days=ttl_days, update_ttl=update_ttl)
+                return self._send(200, {"namespace": ns, "pinned": bool(row["pinned"]),
+                                        "expiresAt": row["expires_at"]})
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
                 if action == "pause":
@@ -519,6 +876,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not lineage:
                         return self._send(400, {"error": "lineage required"})
                     return self._send(200, store.gc(lineage, req.get("retentionDays", RETENTION_DAYS)))
+                elif action == "sweep":
+                    return self._send(200, run_sweep())
                 else:
                     return self._send(404, {"error": "unknown admin action"})
                 return self._send(200, governor.status())

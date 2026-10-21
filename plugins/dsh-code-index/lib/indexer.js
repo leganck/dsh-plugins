@@ -91,7 +91,9 @@ export async function buildIndex({
   depsFallbackDirs = [],
   /**
    * 远端索引（`vectorStore: 'remote'` 时传入）：
-   *   { client, repoId, url, tag, uploadBatch? }
+   *   { client, repoId, url, tag, namespace?, scope?, uploadBatch? }
+   * namespace / scope 是档 3 的作用域：namespace 决定写入哪个快照（客户端用 lib/scope.js 推导），
+   * scope 随 sync payload 交给服务端注册元数据（kind/ref/ttlDays）。
    * 传了就**不做本地嵌入**，改为把块清单/正文推给服务端、由服务端算向量。
    */
   remote = null,
@@ -205,6 +207,9 @@ export async function buildIndex({
   let remoteError = null
   if (remote) {
     try {
+      // 写作用域：显式 namespace 优先；否则用回调按**本轮指纹**推导；都没有则由 syncRemote 走旧默认
+      const namespace =
+        remote.namespace ?? (typeof remote.namespaceFor === 'function' ? remote.namespaceFor(fingerprint) : null)
       remoteInfo = await syncRemote({
         store,
         client: remote.client,
@@ -212,6 +217,9 @@ export async function buildIndex({
         url: remote.url,
         tag: remote.tag,
         lineage: remote.lineage ?? null,
+        // 档 3：写作用域（调用方按 lib/scope.js 推导）+ 服务端注册用的 scope 元数据
+        namespace,
+        scope: remote.scope ?? null,
         noEmbed: !!remote.noEmbed,
         rateLimit: remote.rateLimit ?? null,
         fingerprint,
@@ -340,9 +348,29 @@ export function computeRepoState(store) {
  * @param {object} o
  * @param {import('./store.js').Store} o.store
  * @param {object} o.client createRemoteIndex() 的返回值
+ * @param {string} [o.namespace] 写作用域命名空间（由调用方按 lib/scope.js 推导；
+ *   省略时回退旧默认 `<repoId>@<fingerprint>`，保持 0.10.x 行为）
+ * @param {{kind:string, ref:string, ttlDays?:number|null}|null} [o.scope]
+ *   作用域元数据：有配置时随 payload 发给服务端（`POST /v1/repos/{ns}/sync` 的可选字段）
  */
-export async function syncRemote({ store, client, repoId, url, tag, lineage = null, noEmbed = false, rateLimit = null, fingerprint, changedFiles, removed, uploadBatch = 256, log = () => {} }) {
-  const namespace = `${repoId}@${fingerprint}`
+export async function syncRemote({
+  store,
+  client,
+  repoId,
+  url,
+  tag,
+  lineage = null,
+  namespace = null,
+  scope = null,
+  noEmbed = false,
+  rateLimit = null,
+  fingerprint,
+  changedFiles,
+  removed,
+  uploadBatch = 256,
+  log = () => {},
+}) {
+  const ns = namespace || `${repoId}@${fingerprint}`
   const state = computeRepoState(store)
   const lastState = store.getMeta('remote_repo_state')
   const lastRev = store.getMeta('remote_revision')
@@ -353,6 +381,16 @@ export async function syncRemote({ store, client, repoId, url, tag, lineage = nu
     tag,
     repoState: state,
     lineage: lineage ?? undefined,
+    // 只有配置了作用域才带 scope：旧服务端不该被多出来的字段打扰（它对未知字段的容忍度未测）
+    ...(scope
+      ? {
+          scope: {
+            kind: scope.kind,
+            ref: scope.ref,
+            ...(scope.ttlDays === undefined || scope.ttlDays === null ? {} : { ttlDays: scope.ttlDays }),
+          },
+        }
+      : {}),
     noEmbed,
     // 指纹必须**连块数一起**交给服务端：只有指纹一致、块数也一致，才算"内容确实一样"。
     // 否则"本地早已建好、本轮 0 变更"的空清单会让服务端记下指纹却没有内容（实测踩过）。
@@ -364,28 +402,31 @@ export async function syncRemote({ store, client, repoId, url, tag, lineage = nu
   const skipManifest = lastState === state && !firstContact
   if (skipManifest) {
     // 指纹一致：只发指纹 + revision，服务端直接回 unchanged（连清单都不用比对）
-    res = await client.sync(namespace, { ...base, mode: 'diff', revision: Number(lastRev) })
+    res = await client.sync(ns, { ...base, mode: 'diff', revision: Number(lastRev) })
   } else if (firstContact) {
     // **首次连这台服务端：状态未知**，必须发全量清单。
     // 否则"本地索引早就建好、本轮 0 变更"会发一份空清单，服务端据此认为库里没有块，
     // 于是 missing=0 —— 表现是"同步成功但一个向量都没算"（ES 16 万块那次就是这么踩到的）。
-    res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+    res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
   } else {
     try {
-      res = await client.sync(namespace, { ...base, mode: 'diff', revision: Number(lastRev), upsert: changedFiles, remove: removed })
+      res = await client.sync(ns, { ...base, mode: 'diff', revision: Number(lastRev), upsert: changedFiles, remove: removed })
     } catch (e) {
       if (e.code !== 'revision-conflict') throw e
       // 服务端的 revision 与本地记录不一致（多客户端/服务端重置）→ 全量自愈
       log(`远端 revision 冲突（服务端 ${e.revision}），改走全量清单`)
-      res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+      res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
     }
   }
   // 自愈：服务端报告 0 块但本地确有块 → 它被重置过，补一次全量。
   // 注意**必须也覆盖 unchanged 分支**：本地 meta 记着"已同步"，服务端却空了，短路会一直骗自己。
   if ((res.chunks ?? 0) === 0 && store.stats().chunks > 0) {
     log('服务端报告 0 块但本地有索引 → 补发全量清单')
-    res = await client.sync(namespace, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+    res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
   }
+  // **以服务端返回的 namespace 为准**：命名空间规范的唯一权威是服务端（旧服务端可能不做任何
+  // 规范化、或把 legacy 空间原样返回）。它没回时才用本地推导值。
+  const serverNamespace = typeof res.namespace === 'string' && res.namespace ? res.namespace : ns
 
   // 只上传服务端缺向量的那些块的正文（幂等：已存在的会被服务端计入 deduped）
   const missing = res.missing ?? []
@@ -395,18 +436,20 @@ export async function syncRemote({ store, client, repoId, url, tag, lineage = nu
     const bodies = store.bodiesByHashes(part)
     const payload = [...bodies.entries()].map(([hash, body]) => ({ hash, body }))
     if (payload.length) {
-      const r = await client.uploadChunks(namespace, payload)
+      const r = await client.uploadChunks(serverNamespace, payload)
       uploaded += r.accepted ?? 0
     }
   }
-  if (missing.length && !noEmbed) await client.kickEmbed(namespace, rateLimit ? { rate: rateLimit } : {})
+  if (missing.length && !noEmbed) await client.kickEmbed(serverNamespace, rateLimit ? { rate: rateLimit } : {})
 
   store.setMeta('remote_repo_state', state)
   store.setMeta('remote_revision', String(res.revision))
-  store.setMeta('remote_namespace', namespace)
+  store.setMeta('remote_namespace', serverNamespace)
 
   return {
-    namespace,
+    namespace: serverNamespace,
+    /** 本次同步使用的作用域元数据（没有按作用域同步时为 null） */
+    scope: scope ?? null,
     revision: res.revision,
     unchanged: !!res.unchanged,
     missing: missing.length,

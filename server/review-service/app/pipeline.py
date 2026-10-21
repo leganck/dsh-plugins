@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from .clients import IndexClient, RepoReader
+from .clients import IndexClient, RepoReader, normalize_namespaces
 from .context import ContextSettings, build_context as build_context_sources
 from .parallel import Deadline, map_limited
 from .diff import FileDiff, mr_fingerprint, parse_gitlab_diffs, summarize_skips
@@ -86,6 +86,7 @@ class ReviewOutcome:
     stopped_reason: str = ""
     diff_fp: str = ""
     seconds: float = 0.0
+    namespaces: list[str] = field(default_factory=list)  # 档3：本次检索用到的作用域
 
 
 # ---------------------------------------------------------------- 规范
@@ -151,14 +152,21 @@ def changed_files_payload(files: list[FileDiff], settings: ReviewSettings) -> li
 def build_context(
     index: IndexClient,
     reader: RepoReader,
-    namespace: str,
+    namespaces,
     query: str,
     settings: ReviewSettings,
     *,
     exclude_paths: set[str] | None = None,
 ) -> list[dict]:
-    """检索"相关代码"并把正文取回来（索引只给位置，正文从仓库读）。"""
-    hits = index.search(namespace, query, k=settings.max_context_chunks)
+    """检索"相关代码"并把正文取回来（索引只给位置，正文从仓库读）。
+
+    `namespaces` 可以是单个 namespace 字符串（旧调用）或 list（档3 多作用域）；
+    命中项若带 `namespace`/`scope`，一并写进上下文（进 evidence，便于审计来源快照）。
+    """
+    nss = normalize_namespaces(namespaces)
+    if not nss:
+        return []
+    hits = index.search(nss, query, k=settings.max_context_chunks)
     out: list[dict] = []
     seen: set[tuple[str, int, int]] = set()
     for h in hits:
@@ -177,7 +185,12 @@ def build_context(
             text = reader.read(path, start, end)
         except Exception:
             continue
-        out.append({"path": path, "start": start, "end": end, "text": text[: settings.context_chars]})
+        item = {"path": path, "start": start, "end": end, "text": text[: settings.context_chars]}
+        if h.get("namespace"):
+            item["namespace"] = str(h["namespace"])
+        if isinstance(h.get("scope"), dict):
+            item["scope"] = h["scope"]
+        out.append(item)
         if len(out) >= settings.max_context_chunks:
             break
     return out
@@ -265,18 +278,31 @@ def review_block(
     return [item for item in raw[: settings.max_candidates] if isinstance(item, dict)]
 
 
+def _hit_brief(h: dict) -> str:
+    """把检索命中渲染成一行证据（带来源作用域；没有新字段时与旧格式一致）。"""
+    label = f"{h.get('path')}:{h.get('start')}-{h.get('end')} (score {h.get('score')}"
+    if h.get("namespace"):
+        label += f", ns={h.get('namespace')}"
+    scope = h.get("scope")
+    if isinstance(scope, dict) and scope.get("kind"):
+        label += f", scope={scope.get('kind')}:{scope.get('ref')}"
+    return label + ")"
+
+
 def verify_finding(
     llm: LLM,
     reader: RepoReader,
     index: IndexClient,
-    namespace: str,
+    namespaces,
     finding: dict,
     settings: ReviewSettings,
 ) -> tuple[bool, str, list[dict]]:
     """Verifier：最多 N 轮取证。拿不到证据 → 丢弃（宁漏勿噪）。
 
+    `namespaces` 支持单个字符串（旧调用）或 list（多作用域）。
     返回 (keep, reason, transcript_steps)
     """
+    nss = normalize_namespaces(namespaces)
     evidence: list[dict] = []
     steps: list[dict] = []
     for _ in range(settings.max_verifier_steps):
@@ -304,8 +330,8 @@ def verify_finding(
             steps.append({"step": "verify-read", "path": path})
             continue
         if action == "search":
-            hits = index.search(namespace, str(data.get("query") or ""), k=4)
-            brief = "\n".join(f"{h.get('path')}:{h.get('start')}-{h.get('end')} (score {h.get('score')})" for h in hits)
+            hits = index.search(nss, str(data.get("query") or ""), k=4)
+            brief = "\n".join(_hit_brief(h) for h in hits)
             evidence.append({"action": f"search {data.get('query')}", "result": brief or "无结果"})
             steps.append({"step": "verify-search"})
             continue
@@ -329,6 +355,7 @@ def run_review(
     reader: RepoReader,
     settings: ReviewSettings,
     namespace: str = "",
+    namespaces: list[str] | None = None,
     code_map: dict | None = None,
     static_findings: list[dict] | None = None,
     posted_keys: set[str] | None = None,
@@ -339,11 +366,15 @@ def run_review(
     deadline_s: float = 300.0,
     progress=None,
 ) -> ReviewOutcome:
-    """跑完整条流水线。任何一步异常都不应让整个任务崩（除了预算超限）。"""
+    """跑完整条流水线。任何一步异常都不应让整个任务崩（除了预算超限）。
+
+    `namespaces`（档3 多作用域）优先；`namespace` 保留给旧调用（单值等价）。
+    """
     t0 = time.monotonic()
+    ns_list = normalize_namespaces(namespaces if namespaces else ([namespace] if namespace else []))
     files = files if files is not None else parse_gitlab_diffs(list(diffs or []), list(settings.ignore_globs))
     skips = summarize_skips(files)
-    outcome = ReviewOutcome(files=files, skips=skips, diff_fp=mr_fingerprint(files))
+    outcome = ReviewOutcome(files=files, skips=skips, diff_fp=mr_fingerprint(files), namespaces=ns_list)
     say = progress or (lambda msg: log(msg))
 
     changed = [fd for fd in files if not fd.skip_reason()]
@@ -385,7 +416,7 @@ def run_review(
                 index=index,
                 graph=graph,
                 reader=reader,
-                namespace=namespace,
+                namespaces=ns_list,
                 query=query,
                 changed_paths=set(block["files"]),
                 symbol_ids=symbol_ids,
@@ -434,7 +465,7 @@ def run_review(
         kept: list[dict] = []
 
         def _verify(f):
-            return verify_finding(llm, reader, index, namespace, _finding_payload(f), settings)
+            return verify_finding(llm, reader, index, ns_list, _finding_payload(f), settings)
 
         verify_results = map_limited(
             _verify, pre.posted, concurrency=concurrency, deadline=deadline, raise_on=(BudgetExceeded,)
@@ -557,6 +588,7 @@ def outcome_payload(outcome: ReviewOutcome) -> dict:
         "diff_fp": outcome.diff_fp,
         "stopped_reason": outcome.stopped_reason,
         "plan": outcome.plan,
+        "namespaces": outcome.namespaces,
         "candidates": len(outcome.candidates),
         "kept": outcome.kept,
         "posted": [
