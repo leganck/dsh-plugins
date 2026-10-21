@@ -408,8 +408,16 @@ export async function syncRemote({
   const firstContact = lastRev === undefined || lastRev === null
   const skipManifest = lastState === state && !firstContact
   if (skipManifest) {
-    // 指纹一致：只发指纹 + revision，服务端直接回 unchanged（连清单都不用比对）
-    res = await client.sync(ns, { ...base, mode: 'diff', revision: Number(lastRev) })
+    // 指纹一致：只发指纹 + revision，服务端直接回 unchanged（连清单都不用比对）。
+    // 但服务端可能被删过/重置过（例如后台清理了命名空间）→ diff 会 409，必须同样自愈成全量，
+    // 否则会一直卡在"同步冲突"（实测：删掉 scope 后本地 meta 仍记着旧 revision）。
+    try {
+      res = await client.sync(ns, { ...base, mode: 'diff', revision: Number(lastRev) })
+    } catch (e) {
+      if (e.code !== 'revision-conflict') throw e
+      log(`远端 revision 冲突（服务端 ${e.revision}），改走全量清单`)
+      res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+    }
   } else if (firstContact) {
     // **首次连这台服务端：状态未知**，必须发全量清单。
     // 否则"本地索引早就建好、本轮 0 变更"会发一份空清单，服务端据此认为库里没有块，
