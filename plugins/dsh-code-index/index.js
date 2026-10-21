@@ -30,13 +30,14 @@ import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
+import { canonicalNamespace, normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
 
 /** 0.10.0 remote-only：本地只保留 parser（切块）依赖组，embed 组不再安装 */
 const PARSER_GROUPS = GROUP_NAMES.filter((g) => g.startsWith('parser'))
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-18.9'
+export const BUILD = '2026-10-21.1'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -116,8 +117,15 @@ const REMOTE_DEFAULTS = {
   /** ---- 以下只对 vectorStore: 'remote' 有意义 ---- */
   /** 血统标识覆盖（默认由 git origin URL 推导；fork/镜像想共用一份向量时用它或 lineage） */
   repoId: null,
-  /** 命名空间覆盖（默认 `<repoId>@<切块指纹>`） */
+  /** 命名空间覆盖（默认 `<repoId>@<切块指纹>`；给了它的优先级最高） */
   namespace: null,
+  /**
+   * 作用域推导（档 3）：未显式给 namespace 时按 `main|branch|pr|worktree` 推导命名空间，
+   * 让 main / 分支 / PR / worktree 各写各的快照、互不覆盖。null = 沿用旧默认（不分作用域）。
+   */
+  scope: null,
+  /** 额外**读取**的命名空间（如主干 main）；只参与检索，不会被写入 */
+  readScopes: [],
   /** 显式指定服务端血统 id（fork / 镜像共用同一份向量时用） */
   lineage: null,
   /** 服务端嵌入限速（块/秒）；null = 用服务端默认 */
@@ -133,7 +141,7 @@ const REMOTE_DEFAULTS = {
  */
 const USER_DEFAULTS = {
   roots: [],
-  remote: { url: null, apiKey: null },
+  remote: { url: null, apiKey: null, namespace: null, scope: null, readScopes: [] },
   vectors: 'auto', // auto（有 remote.url 就用远端）| remote（强制，缺地址报错）| off（纯关键词）
   rerank: 'off', // off | fast | quality（远端）
   exclude: [], // 目录名，或含 "/" 的仓库相对路径前缀
@@ -149,7 +157,8 @@ const USER_DEFAULTS = {
   },
 }
 const USER_TOP_KEYS = Object.keys(USER_DEFAULTS)
-const USER_REMOTE_KEYS = ['url', 'apiKey']
+/** remote 下允许用户写的键（0.11.0 新增 namespace / scope / readScopes，见 docs/scope-tier3.md §6） */
+const USER_REMOTE_KEYS = ['url', 'apiKey', 'namespace', 'scope', 'readScopes']
 const USER_ADVANCED_KEYS = Object.keys(USER_DEFAULTS.advanced)
 
 /** 0.10.0 移除的键 → 迁移提示（不要用一句"未知配置项"打发） */
@@ -264,7 +273,9 @@ function userConfigToInternal(raw) {
   }
   const unknownRemote = Object.keys(userRemote).filter((k) => !USER_REMOTE_KEYS.includes(k))
   if (unknownRemote.length) {
-    throw new ConfigError(`未知远端配置：${unknownRemote.map((k) => `remote.${k}`).join(', ')}；可用：remote.url, remote.apiKey`)
+    throw new ConfigError(
+      `未知远端配置：${unknownRemote.map((k) => `remote.${k}`).join(', ')}；可用：${USER_REMOTE_KEYS.map((k) => `remote.${k}`).join(', ')}`,
+    )
   }
   if (userRemote.url !== undefined && userRemote.url !== null && typeof userRemote.url !== 'string') {
     throw new ConfigError(`config.remote.url 必须是字符串或 null，收到 ${typeof userRemote.url}`)
@@ -348,6 +359,10 @@ function userConfigToInternal(raw) {
       timeoutMs: adv.remoteTimeoutMs,
       rateLimit: adv.remoteRateLimit,
       fallbackLocal: false,
+      // 档 3 作用域：原样带下去，语义校验放在 normalizeConfig（好集中给键路径）
+      namespace: userRemote.namespace ?? null,
+      scope: userRemote.scope ?? null,
+      readScopes: userRemote.readScopes ?? [],
     },
   }
 }
@@ -473,9 +488,6 @@ function normalizeConfig(userRaw = {}) {
   if (cfg.remote.repoId !== null && typeof cfg.remote.repoId !== 'string') {
     throw new ConfigError(`config.remote.repoId 必须是字符串或 null，收到 ${typeof cfg.remote.repoId}`)
   }
-  if (cfg.remote.namespace !== null && typeof cfg.remote.namespace !== 'string') {
-    throw new ConfigError(`config.remote.namespace 必须是字符串或 null，收到 ${typeof cfg.remote.namespace}`)
-  }
   if (cfg.remote.lineage !== null && typeof cfg.remote.lineage !== 'string') {
     throw new ConfigError(`config.remote.lineage 必须是字符串或 null，收到 ${typeof cfg.remote.lineage}`)
   }
@@ -485,6 +497,54 @@ function normalizeConfig(userRaw = {}) {
   if (!Number.isInteger(cfg.remote.uploadBatch) || cfg.remote.uploadBatch < 1) {
     throw new ConfigError(`config.remote.uploadBatch 必须是 >= 1 的整数，收到 ${JSON.stringify(cfg.remote.uploadBatch)}`)
   }
+  // ---- 档 3 作用域（remote.namespace / remote.scope / remote.readScopes）----
+  // 规则在 lib/scope.js（与夹具同源）；这里只负责把错误翻成**带键路径**的 ConfigError。
+  if (cfg.remote.namespace !== null && typeof cfg.remote.namespace !== 'string') {
+    throw new ConfigError(`config.remote.namespace 必须是字符串或 null，收到 ${typeof cfg.remote.namespace}`)
+  }
+  if (typeof cfg.remote.namespace === 'string') {
+    if (!cfg.remote.namespace.trim()) {
+      throw new ConfigError('config.remote.namespace 不能是空字符串；不区分作用域请写 null 或删掉该键')
+    }
+    cfg.remote.namespace = cfg.remote.namespace.trim()
+  }
+  if (cfg.remote.scope !== null) {
+    if (typeof cfg.remote.scope !== 'object' || Array.isArray(cfg.remote.scope)) {
+      throw new ConfigError(`config.remote.scope 必须是对象（{kind, ref, ttlDays}）或 null，收到 ${Array.isArray(cfg.remote.scope) ? 'array' : typeof cfg.remote.scope}`)
+    }
+    const unknownScope = Object.keys(cfg.remote.scope).filter((k) => !SCOPE_CONFIG_KEYS.includes(k))
+    if (unknownScope.length) {
+      throw new ConfigError(
+        `未知远端配置：${unknownScope.map((k) => `remote.scope.${k}`).join(', ')}；可用：${SCOPE_CONFIG_KEYS.map((k) => `remote.scope.${k}`).join(', ')}`,
+      )
+    }
+    try {
+      cfg.remote.scope = validateScope(cfg.remote.scope)
+    } catch (e) {
+      if (e instanceof ScopeError) throw new ConfigError(`config.remote.scope 非法：${e.message}`)
+      throw e
+    }
+  }
+  if (!Array.isArray(cfg.remote.readScopes)) {
+    throw new ConfigError(`config.remote.readScopes 必须是字符串数组（额外读取的命名空间），收到 ${typeof cfg.remote.readScopes}`)
+  }
+  {
+    const seen = new Set()
+    const readScopes = []
+    for (const item of cfg.remote.readScopes) {
+      if (typeof item !== 'string' || !item.trim()) {
+        throw new ConfigError(`config.remote.readScopes 的元素必须是非空字符串，收到 ${JSON.stringify(item)}`)
+      }
+      // legacy（不含 #）原样保留；这里只做最小校验 + 去重（保序）
+      const ns = normalizeNamespace(item)
+      if (!seen.has(ns)) {
+        seen.add(ns)
+        readScopes.push(ns)
+      }
+    }
+    cfg.remote.readScopes = readScopes
+  }
+  // 同时给 namespace 和 scope 不算错：按契约 namespace 优先（scope 只用于展示/只读推导）。
   if (typeof cfg.sync.watch !== 'boolean') {
     throw new ConfigError(`config.sync.watch 必须是 true/false，收到 ${JSON.stringify(cfg.sync.watch)}`)
   }
@@ -536,6 +596,16 @@ function resolveCurrentFile(repoRoot, file) {
 const textResult = (value, text) => ({ content: [{ type: 'text', text }], structuredContent: value })
 const fail = (message) => ({ content: [{ type: 'text', text: `错误：${message}` }] })
 
+/**
+ * 服务端时间戳既可能是秒也可能是毫秒（Python `time.time()` 是秒；JS 侧习惯毫秒）。
+ * 按量级判断，避免把 2026 年显示成 1970 —— 这种展示错误会让人以为 TTL 坏了。
+ */
+function formatEpoch(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return new Date(n < 1e12 ? n * 1000 : n).toLocaleString()
+}
+
 export function apply(ctx, rawConfig = {}) {
   bootLog('apply-entered', { configKeys: Object.keys(rawConfig ?? {}) })
   try {
@@ -584,7 +654,16 @@ function applyInner(ctx, rawConfig = {}) {
             // 远端只记**地址与开关**，绝不记 apiKey（标记文件是明文的，会被归档/分享）
             remote:
               config.vectors === 'remote'
-                ? { url: config.remote.url, timeoutMs: config.remote.timeoutMs, rateLimit: config.remote.rateLimit, apiKeySet: Boolean(config.remote.apiKey) }
+                ? {
+                    url: config.remote.url,
+                    timeoutMs: config.remote.timeoutMs,
+                    rateLimit: config.remote.rateLimit,
+                    apiKeySet: Boolean(config.remote.apiKey),
+                    // 档 3：记录作用域配置 —— 否则"重启后到底按哪个作用域写入"无法回答
+                    namespace: config.remote.namespace,
+                    scope: config.remote.scope,
+                    readScopes: config.remote.readScopes,
+                  }
                 : null,
             rerank: {
               tier: config.rerank,
@@ -697,9 +776,51 @@ function applyInner(ctx, rawConfig = {}) {
     }
     return remoteIndexPromise
   }
-  /** 命名空间 = 血统 + 切块指纹（切块配置不同就换空间，避免两端 (path,start) 互相覆盖） */
-  const namespaceFor = (repoRoot, store) =>
-    config.remote.namespace || `${repoIdOf(repoRoot, config.remote.repoId)}@${store.getMeta('chunk_fingerprint') ?? 'default'}`
+  /**
+   * 命名空间优先级（档 3 §6）：
+   *   `remote.namespace`（显式覆盖，最高）
+   *   > `remote.scope` 按规范推导（lib/scope.js 的 canonicalNamespace）
+   *   > 旧默认 `<repoId>@<chunkFp>`（0.10.x 行为，向后兼容：不配新键就一切照旧）
+   *
+   * 单独拆出 `resolveNamespace(repoRoot, chunkFp)`：**切块指纹只有在建库扫描之后才知道**
+   * （它是切块配置 + 本仓库实际可用语法的哈希），所以建库路径必须把「按 fp 算」的回调传进去，
+   * 不能提前用 default 算一个值 —— 否则首次建库会写进 `repo@default#...`，下次又换一个空间。
+   */
+  const resolveNamespace = (repoRoot, chunkFp) => {
+    if (config.remote.namespace) return config.remote.namespace
+    const repoId = repoIdOf(repoRoot, config.remote.repoId)
+    const scope = config.remote.scope
+    if (scope) return canonicalNamespace(repoId, chunkFp, scope.kind, scope.ref)
+    return `${repoId}@${chunkFp}`
+  }
+  const namespaceFor = (repoRoot, store) => resolveNamespace(repoRoot, store.getMeta('chunk_fingerprint') ?? 'default')
+  /** 一次检索要读的全部作用域：写作用域在前 + readScopes，去重保序 */
+  const namespacesFor = (writeNamespace) => [...new Set([writeNamespace, ...config.remote.readScopes])]
+  /**
+   * 当前仓库的作用域信息（写作用域 / 要读的列表 / 来源 / TTL）。
+   * 工具输出的 structuredContent 与文本行都从它派生，避免两处口径漂移。
+   */
+  const scopeInfoFor = (repoRoot, store) => {
+    const namespace = namespaceFor(repoRoot, store)
+    return {
+      namespace,
+      namespaces: namespacesFor(namespace),
+      scope: config.remote.scope ? { ...config.remote.scope } : null,
+      readScopes: [...config.remote.readScopes],
+      source: config.remote.namespace ? 'namespace' : config.remote.scope ? 'scope' : 'legacy',
+    }
+  }
+  /** 作用域的一行说明：只有配了新键才输出，旧配置的输出不变（不制造噪音） */
+  const renderScopeLine = (info) => {
+    if (!info.scope && !info.readScopes.length && info.source !== 'namespace') return null
+    const ttl = info.scope?.ttlDays ? `，TTL ${info.scope.ttlDays} 天` : ''
+    const write = info.scope
+      ? `写作用域 ${describeScope(info.scope)}（${info.namespace}${ttl}）`
+      : `写作用域 ${info.namespace}`
+    return info.readScopes.length
+      ? `作用域：${write}；只读 ${info.readScopes.length} 个：${info.readScopes.join(', ')}`
+      : `作用域：${write}`
+  }
 
   /**
    * 远端重排器（**懒加载**）：只在配置开启且真的用到时才连接。
@@ -756,13 +877,21 @@ function applyInner(ctx, rawConfig = {}) {
         if (args.status_only) {
           const st = scanStatus(store, repoRoot, scanOptsOf(config))
           const s = store.stats()
+          // status_only 不动远端，只把**将要写入**的作用域带上（配置有 scope 时才出现）
+          const scopeInfo = config.vectorStore === 'remote' ? scopeInfoFor(repoRoot, store) : null
+          const scopeLine = scopeInfo ? renderScopeLine(scopeInfo) : null
           return textResult(
-            { repoRoot, dbPath, status: st, stats: s },
-            `索引状态 ${repoRoot}\n` +
-              `  已入库：${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量\n` +
-              `  仓库当前：${st.scanned} 个候选文件\n` +
-              `  待更新：${st.changed} 改 / ${st.removed} 删；未变 ${st.unchanged}\n` +
+            { repoRoot, dbPath, status: st, stats: s, scope: scopeInfo },
+            [
+              `索引状态 ${repoRoot}`,
+              `  已入库：${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
+              `  仓库当前：${st.scanned} 个候选文件`,
+              `  待更新：${st.changed} 改 / ${st.removed} 删；未变 ${st.unchanged}`,
+              scopeLine ? '  ' + scopeLine : null,
               `  ${st.stale ? '索引已过期，运行 code_index 刷新' : '索引是最新的'}`,
+            ]
+              .filter(Boolean)
+              .join('\n'),
           )
         }
 
@@ -792,11 +921,19 @@ function applyInner(ctx, rawConfig = {}) {
                 repoId: repoIdOf(repoRoot, config.remote.repoId),
                 url: gitOriginUrl(repoRoot),
                 lineage: config.remote.lineage,
+                // 档 3：写作用域由**本轮确定的切块指纹**推导（namespace 优先级见 resolveNamespace）；
+                // 传回调而不是现成字符串，避免首次建库时用 default 指纹算错空间。
+                namespaceFor: (chunkFp) => resolveNamespace(repoRoot, chunkFp),
+                // 显式 namespace 优先于 scope：两者同时给时**不发 scope**，否则服务端会按 scope
+                // 重新推导 canonical 命名空间，把用户的显式覆盖顶掉（契约 §6 的优先级）。
+                scope: config.remote.namespace ? null : config.remote.scope,
                 rateLimit: config.remote.rateLimit,
                 uploadBatch: config.remote.uploadBatch,
               }
             : null,
         })
+        // 建库后切块指纹已确定（store.meta），此时算出的作用域才是本轮真正写入的那个
+        const scopeInfo = remoteMode ? scopeInfoFor(repoRoot, store) : null
         if (remoteMode) {
           // 远端是否真的可达，以本轮同步结果为准：失败进入冷却，成功则解除
           if (r.remoteError) markRemoteDown(new Error(r.remoteError))
@@ -820,6 +957,8 @@ function applyInner(ctx, rawConfig = {}) {
             : remoteMode
               ? `  向量位置：远端 ${config.remote.url}（命名空间 ${r.remote?.namespace ?? '-'}）`
               : `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,
+          // 作用域只在配了新键时多一行：旧配置输出保持原样（不制造噪音）
+          scopeInfo ? renderScopeLine(scopeInfo) : null,
           keywordOnly ? null : `  ${r.embedNote}`,
           `  用时 ${(r.elapsedMs / 1000).toFixed(1)}s；库 ${dbPath}`,
         ]
@@ -842,7 +981,7 @@ function applyInner(ctx, rawConfig = {}) {
           )
         }
         ensureWatch(repoRoot)
-        return textResult({ repoRoot, dbPath, ...r }, lines.filter((l) => l !== null).join('\n'))
+        return textResult({ repoRoot, dbPath, ...r, scope: scopeInfo }, lines.filter((l) => l !== null).join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
@@ -953,28 +1092,51 @@ function applyInner(ctx, rawConfig = {}) {
         const excludePaths = cf && (args.exclude_current ?? true) ? [cf.rel] : []
         const boostPrefix = cf?.dirPrefix ?? null
         let r
+        let scopeInfo = null
         if (config.vectorStore === 'remote') {
           // 远端索引模式：本地 BM25 + 远端 kNN（可选远端重排）→ 客户端 RRF 融合。
           // 远端失败**只丢语义召回**，绝不抛错 —— 这条是硬规则，有测试钉住。
-          const namespace = namespaceFor(repoRoot, store)
+          scopeInfo = scopeInfoFor(repoRoot, store)
+          // 一次检索多个作用域：写作用域 + readScopes（去重保序）。单作用域时 remote.js
+          // 仍发旧协议 `{namespace}`，旧服务端零回归。
+          const namespaces = scopeInfo.namespaces
           const remoteRerank = tier && config.rerankBackend === 'remote' ? tier.candidates : 0
           let remoteHits = []
           let remoteMeta = null
           let remoteError = null
+          let scopeFallback = null
           const t0 = Date.now()
+          const queryOpts = { k: 40, rerankCandidates: remoteRerank, embedText }
           if (!remoteGateOpen()) {
             // 冷却期内直接跳过：省掉必然超时的等待
             remoteError = remoteCooldownNote()
           } else try {
-            const res = await getRemoteIndex().search(namespace, args.query, {
-              k: 40,
-              rerankCandidates: remoteRerank,
-              embedText,
-            })
-            remoteHits = (res.hits ?? []).map((h) => ({ hash: h.hash, score: h.score, rerankScore: h.rerankScore }))
+            let res
+            try {
+              res = await getRemoteIndex().search(namespaces, args.query, queryOpts)
+            } catch (e) {
+              // 兼容旧服务端（档 3 §10）：它不认 `namespaces` → 400（参数被拒）或 404（路由没有）。
+              // 只回退一次，且只回退到**写作用域**：readScopes 是增强，丢了只是少召回；
+              // 整次检索失败才是硬故障。回退事实写进结果，不静默。
+              if (namespaces.length > 1 && (e?.status === 400 || e?.status === 404)) {
+                res = await getRemoteIndex().search(namespaces[0], args.query, queryOpts)
+                scopeFallback = `旧服务端不支持多作用域（HTTP ${e.status}），已退回单作用域 ${namespaces[0]}`
+              } else throw e
+            }
+            remoteHits = (res.hits ?? []).map((h) => ({
+              hash: h.hash,
+              score: h.score,
+              rerankScore: h.rerankScore,
+              // 命中来源：多作用域结果必须能回答"这条来自哪个快照"
+              namespace: h.namespace ?? null,
+              scope: h.scope ?? null,
+            }))
             remoteMeta = {
-              namespace,
+              namespace: scopeInfo.namespace,
+              namespaces,
+              scope: scopeInfo.scope,
               ms: res.ms ?? null,
+              byScope: res.byScope ?? null,
               coverage: res.coverage ?? null,
               elapsedMs: Date.now() - t0,
               rerank: remoteRerank
@@ -1003,6 +1165,28 @@ function applyInner(ctx, rawConfig = {}) {
             boostPrefix,
           })
           if (remoteError) r.note = [r.note, `远端不可用，已退化为纯关键词：${remoteError}`].filter(Boolean).join('；')
+          if (scopeFallback) r.note = [r.note, scopeFallback].filter(Boolean).join('；')
+          // 命中项带来源（§6）：远端命中按内容哈希映射回本地块，给结果补 scope。
+          // 只映射**远端命中**——纯本地 BM25 命中不属于任何远端快照，不硬塞来源。
+          if (remoteHits.length && r.results.length) {
+            const remoteByHash = new Map(remoteHits.map((h) => [h.hash, h]))
+            const chunks = store.chunksByHashes([...remoteByHash.keys()])
+            const byPathStart = new Map()
+            for (const [hash, c] of chunks) {
+              const h = remoteByHash.get(hash)
+              if (h) byPathStart.set(`${c.path}:${c.startLine}`, h)
+            }
+            for (const hit of r.results) {
+              const h = byPathStart.get(`${hit.path}:${hit.startLine}`)
+              if (!h) continue
+              const scope = { namespace: h.namespace ?? scopeInfo.namespace }
+              if (h.scope?.kind) {
+                scope.kind = h.scope.kind
+                scope.ref = h.scope.ref
+              }
+              hit.scope = scope
+            }
+          }
         } else {
           // vectors=off：纯关键词（本地 FTS5），不需要任何模型
           const embedder = null
@@ -1020,14 +1204,23 @@ function applyInner(ctx, rawConfig = {}) {
         // 纯关键词模式下的 note 必然是「向量通道未启用」这类说明 —— 那是设计如此，不是故障。
         // 远端模式的降级 note 必须保留（否则"服务端挂了"会被悄悄吞掉）。
         if (config.vectorStore !== 'remote') r.note = ''
+        // 作用域只在新配置下展示：旧配置输出不变（向后兼容的展示面）
+        const scopeLine = scopeInfo ? renderScopeLine(scopeInfo) : null
         if (!r.results.length) {
           return textResult(
-            { repoRoot, mode: r.mode, terms: r.terms, results: [], rerank: r.rerank },
-            `没有命中（通道 ${r.mode}，词项 ${r.terms.join(' / ') || '无'}）。${r.note}\n`
-              + `建议：换更具体的标识符（类名/方法名/错误码），或先用 grep 找确切字符串。`,
+            { repoRoot, mode: r.mode, terms: r.terms, results: [], rerank: r.rerank, scope: scopeInfo },
+            [
+              `没有命中（通道 ${r.mode}，词项 ${r.terms.join(' / ') || '无'}）。${r.note}`,
+              scopeLine,
+              `建议：换更具体的标识符（类名/方法名/错误码），或先用 grep 找确切字符串。`,
+            ]
+              .filter(Boolean)
+              .join('\n'),
           )
         }
         const lines = [`命中 ${r.results.length} 条（通道 ${r.mode}；词项 ${r.terms.join(' / ')}）`]
+        // 契约 §6：code_search 头部提示多作用域（只有配了 scope/readScopes 才出现）
+        if (scopeLine) lines.push('  ' + scopeLine)
         if (cf) {
           const ex = r.boosted ? `，同目录 ${r.boosted} 条加权` : ''
           const keepSelf = (args.exclude_current ?? true) ? '已排除自身' : '保留自身'
@@ -1052,7 +1245,7 @@ function applyInner(ctx, rawConfig = {}) {
           lines.push(`\n[${hit.rank}] ${hit.path}:${hit.startLine}-${hit.endLine}  (fts ${hit.ftsRank ?? '-'} / vec ${hit.vecRank ?? '-'}${rs})`)
           lines.push(hit.snippet.split('\n').map((l) => '    ' + l).join('\n'))
         }
-        return textResult({ repoRoot, mode: r.mode, terms: r.terms, results: r.results, rerank: r.rerank }, lines.join('\n'))
+        return textResult({ repoRoot, mode: r.mode, terms: r.terms, results: r.results, rerank: r.rerank, scope: scopeInfo }, lines.join('\n'))
       } catch (e) {
         return fail(String(e.message))
       }
@@ -1083,33 +1276,59 @@ function applyInner(ctx, rawConfig = {}) {
         const remoteMode = config.vectorStore === 'remote'
         // 0.10.0 remote-only：vectors=off 就是纯关键词（本地 FTS5），不涉及任何模型
         const keywordOnly = !remoteMode
+        // 档 3：写作用域 + readScopes（只有远端模式有意义；keywordOnly 时保持旧输出）
+        const scopeInfo = remoteMode ? scopeInfoFor(repoRoot, store) : null
+        const scopeLine = scopeInfo ? renderScopeLine(scopeInfo) : null
         const lines = [
           `索引：${repoRoot}`,
           `  库文件 ${dbPath}（${(s.dbBytes / 1048576).toFixed(1)} MB）`,
           `  覆盖 ${s.files} 文件 / ${s.chunks} 块`,
           `  最后建库：${store.getMeta('last_build_at') ? new Date(Number(store.getMeta('last_build_at'))).toLocaleString() : '从未'}`,
           remoteMode
-            ? store.stats().chunks === 0
+            ? s.chunks === 0
               ? `  向量位置：远端 ${config.remote.url}（本机只保留 BM25；命名空间在建库后由切块指纹确定）`
-              : `  向量位置：远端 ${config.remote.url}（命名空间 ${namespaceFor(repoRoot, store)}；本机只保留 BM25）`
+              : `  向量位置：远端 ${config.remote.url}（命名空间 ${scopeInfo.namespace}；本机只保留 BM25）`
             : `  模式：纯关键词（本地 FTS5；vectors=${config.vectorsMode}${config.vectorsMode === 'auto' ? ' → 未配 remote.url' : ''}）`,
-        ]
+          // 作用域说明：scope 配置了 TTL 就展示；本机还没建库时命名空间还没定（chunkFp=default）
+          scopeLine && s.chunks > 0 ? scopeLine : null,
+          scopeLine && s.chunks === 0 && (scopeInfo.scope || scopeInfo.readScopes.length)
+            ? `  作用域：${[
+                scopeInfo.scope ? `写作用域 ${describeScope(scopeInfo.scope)}${scopeInfo.scope.ttlDays ? `（TTL ${scopeInfo.scope.ttlDays} 天）` : ''}` : null,
+                scopeInfo.readScopes.length ? `只读 ${scopeInfo.readScopes.length} 个：${scopeInfo.readScopes.join(', ')}` : null,
+              ]
+                .filter(Boolean)
+                .join('；')}（命名空间在建库后由切块指纹确定）`
+            : null,
+        ].filter((l) => l !== null)
         if (remoteMode) {
           // 远端状态是"索引到底建了多少"的唯一真相来源：本地只知道清单，不知道向量进度。
           // 但**本机还没建库时命名空间是 `@default`（没有 chunkFp）**，去问服务端必然 404 ——
           // 那不是"远端坏了"，而是"还没开始"。直接给出下一步，别报错吓人。
-          if (store.stats().chunks === 0) {
+          if (s.chunks === 0) {
             lines.push('  远端索引：本机尚未建库（先跑 code_index，命名空间由切块配置的指纹决定）')
           } else if (!remoteGateOpen()) {
             lines.push(`  ${remoteCooldownNote()}`)
           } else try {
-            const rs = await getRemoteIndex().status(namespaceFor(repoRoot, store))
+            const rs = await getRemoteIndex().status(scopeInfo.namespace)
             markRemoteUp()
             lines.push(
               `  远端索引：revision ${rs.revision}；${rs.chunks} 块 / ${rs.vectors} 向量（覆盖 ${((rs.coverage ?? 0) * 100).toFixed(0)}%）；待嵌 ${rs.pending ?? '?'}`,
               `  远端嵌入：${rs.paused ? '已暂停' : '运行中'}（${rs.rate} 块/s）；血统占用 ${((rs.totalBytes ?? 0) / 1048576).toFixed(0)} MB（向量上限 ${rs.limits?.maxVectorsPerLineage ?? '-'} / 血统）`,
             )
             if (rs.repoId) lines.push(`  血统：${rs.repoId}（追踪的远端：${normalizeRemoteUrl(gitOriginUrl(repoRoot)) || '无 git（本机血统）'}）`)
+            // 档 3 §4.2：status 响应里的 scope 是 TTL/pinned 的权威（本地配置只知道 ttlDays 意图）
+            if (rs.scope && typeof rs.scope === 'object') {
+              const scp = rs.scope
+              const created = formatEpoch(scp.createdAt)
+              const expires = formatEpoch(scp.expiresAt)
+              const bits = [
+                expires ? `到期 ${expires}` : '不过期',
+                scp.pinned ? 'pinned' : null,
+                scp.commit ? `commit ${String(scp.commit).slice(0, 8)}` : null,
+                created ? `创建 ${created}` : null,
+              ].filter(Boolean)
+              lines.push(`  远端作用域：${scp.kind ?? '-'}:${scp.ref ?? '-'}（${bits.join('；')}）`)
+            }
           } catch (e) {
             markRemoteDown(e)
             lines.push(`  ⚠️ 远端不可用：${String(e?.message ?? e).slice(0, 160)}（${Math.ceil(REMOTE_COOLDOWN_MS / 1000)}s 内跳过重试）`)
@@ -1138,6 +1357,8 @@ function applyInner(ctx, rawConfig = {}) {
             stats: s,
             scan: st,
             vectors: config.vectorStore,
+            // 档 3：写作用域 / 读取列表 / 来源（legacy|scope|namespace）
+            scope: scopeInfo,
           },
           lines.join('\n'),
         )
@@ -1298,10 +1519,18 @@ function applyInner(ctx, rawConfig = {}) {
     })
     .join(' ')
 
+  /** 加载日志里的作用域摘要（档 3）：没配 scope/readScopes 时保持旧日志形态 */
+  const scopeLog =
+    config.vectors === 'remote' && config.remote.scope
+      ? `，scope=${describeScope(config.remote.scope)}${config.remote.scope.ttlDays ? `(TTL ${config.remote.scope.ttlDays}d)` : ''}`
+      : config.vectors === 'remote' && config.remote.namespace
+        ? `，namespace=${config.remote.namespace}`
+        : ''
+  const readLog = config.vectors === 'remote' && config.remote.readScopes.length ? `，readScopes=${config.remote.readScopes.length}` : ''
   ctx.logger?.info?.(
     `dsh-code-index ${BUILD} 已加载（remote-only：vectors=${config.vectorsMode}${config.vectors === 'remote' ? `@${config.remote.url}` : ''}，roots=${config.allowedRoots.length || '任意'}，` +
       `rerank=${config.rerank}${config.rerank !== 'off' ? `@远端` : ''}，` +
-      `chunking=${config.chunking.strategy}，deps=${expandPath(config.depsDir) ?? defaultDepsDir()}）`,
+      `chunking=${config.chunking.strategy}，deps=${expandPath(config.depsDir) ?? defaultDepsDir()}${scopeLog}${readLog}）`,
   )
   ctx.logger?.info?.(`dsh-code-index 切块策略表：${sample}（表见 lib/strategies.js，可用 advanced.chunking.byExt 覆盖）`)
   bootLog('tools-registered', { tools: ['code_index', 'code_search', 'code_map', 'code_index_status', 'code_index_deps'] })

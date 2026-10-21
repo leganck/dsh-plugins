@@ -6,11 +6,25 @@ import os
 from dataclasses import dataclass, field
 
 from .pipeline import DEFAULT_GUIDELINES_PATHS, DEFAULT_IGNORE_GLOBS, ReviewSettings
-from .util import env_bool, env_float, env_int, env_str
+from .util import env_bool, env_float, env_int, env_str, log
+
+# 档3：索引作用域模式（契约见 server/code-index-service/docs/scope-tier3.md §7）
+SCOPE_MODES = ("repo", "branch", "pr")
 
 
 class ConfigError(RuntimeError):
     pass
+
+
+def _parse_scope_mode(text: str) -> str:
+    """INDEX_SCOPE_MODE 只认 repo|branch|pr；写错时退回默认 repo（启动不因笔误失败）。"""
+    value = (text or "").strip().lower()
+    if not value:
+        return "repo"
+    if value not in SCOPE_MODES:
+        log(f"INDEX_SCOPE_MODE={text!r} 非法（可选 {'|'.join(SCOPE_MODES)}），按 repo 处理")
+        return "repo"
+    return value
 
 
 @dataclass
@@ -41,6 +55,10 @@ class AppConfig:
     index_api_key: str = ""
     index_namespace: str = ""
     index_namespace_map: dict = field(default_factory=dict)
+    # 档3：作用域快照（repo=旧行为不变；branch=按目标分支；pr=按 MR，可选 head 临时作用域）
+    index_scope_mode: str = "repo"
+    index_pr_head: bool = False
+    index_pr_ttl_days: int = 14
 
     # 预算
     max_calls: int = 24
@@ -146,6 +164,9 @@ def load_config(env: dict | None = None) -> AppConfig:
         index_api_key=env_str("INDEX_API_KEY", ""),
         index_namespace=env_str("INDEX_NAMESPACE", ""),
         index_namespace_map=_parse_json_map(env_str("INDEX_NAMESPACE_MAP", "")),
+        index_scope_mode=_parse_scope_mode(env_str("INDEX_SCOPE_MODE", "repo")),
+        index_pr_head=env_bool("INDEX_PR_HEAD", False),
+        index_pr_ttl_days=max(0, env_int("INDEX_PR_TTL_DAYS", 14)),
         max_calls=env_int("MAX_LLM_CALLS", 24),
         max_tokens_in=env_int("MAX_TOKENS_IN", 160_000),
         max_tokens_out=env_int("MAX_TOKENS_OUT", 20_000),
