@@ -363,9 +363,12 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   const c = fakeCtx()
   apply(c.ctx, cfgOf({ remote: { url: stub.url } }))
   await c.registry.get('code_index').execute({ path: repo }, {})
-  const legacyNs = stub.state.syncCalls.at(-1).namespace
-  check('旧配置（无 scope/readScopes）命名空间保持 repoId@chunkFp（不含 #）', /^[0-9a-f]{12}@[0-9a-f]{64}$/.test(legacyNs), legacyNs)
-  check('旧配置 sync payload 不带 scope 字段', !('scope' in stub.state.syncCalls.at(-1).body), JSON.stringify(Object.keys(stub.state.syncCalls.at(-1).body)))
+  const defaultNs = stub.state.syncCalls.at(-1).namespace
+  check('默认（未配 scope）自动落到 #main:default，不再产生 legacy 命名空间',
+    /^[0-9a-f]{12}@[0-9a-f]{64}#main:default$/.test(defaultNs), defaultNs)
+  const defaultBody = stub.state.syncCalls.at(-1).body
+  check('默认配置 sync payload 带自动作用域（main:default）',
+    defaultBody.scope?.kind === 'main' && defaultBody.scope?.ref === 'default', JSON.stringify(defaultBody.scope))
   await stub.close()
 }
 

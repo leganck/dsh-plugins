@@ -179,8 +179,12 @@ remote:
 
 **TTL / 生命周期**：`ttlDays` 只是把意图发给服务端；实际到期时间与 `pinned` 以
 `code_index_status` 里"远端作用域"一行为准（服务端按 kind 有默认 TTL：branch 30 天 / PR 14 天 /
-worktree 1 天，main 与 legacy 永久）。`remote.namespace` / `remote.scope` / `remote.readScopes`
+worktree 1 天，main 永久；`legacy` 只可能是旧数据）。`remote.namespace` / `remote.scope` / `remote.readScopes`
 都会记进加载标记 `_loaded.json`，重启后能确认"到底按哪个作用域在写"。
+
+**0.11.4 起 `remote.scope` 默认就是 `auto`**：未配置也会按 git 分支推导（main/master → `#main:default`，
+其余分支 → `#branch:<name>`；非 git 目录落到 `#main:default`），**不再写入 legacy 命名空间**
+（`repoId@chunkFp`）。旧的 legacy 数据可在后台/`DELETE /v1/scopes/{ns}` 清掉，重新 `code_index` 即生成快照。
 
 ### 从 0.9 及更早迁移：旧键 → 新键
 
