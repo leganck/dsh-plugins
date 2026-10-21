@@ -95,11 +95,17 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 - id: code-index
   name: "@local/dsh-code-index"          # 插件源 / install_bundle 安装后，模块名 = 包名
   config:
-    # —— 用户只需要这 6 个 ——
+    # —— 用户只需要这几个 ——
     roots: ["D:/Code"]                    # 安全白名单；空 = 允许任意路径
     remote:
       url: "https://dsh-embed.example.com"   # 向量服务（/embed + /v1 索引 + /rerank）
       apiKey: null                        # 服务端设了 API_KEY 才需要
+      namespace: null                     # 显式写作用域命名空间（优先级最高；一般不用写）
+      scope:                              # 未给 namespace 时按规范推导快照（0.11.0，可省略）
+        kind: "branch"                    # main | branch | pr | worktree
+        ref: "feat/x"                     # 分支名 / PR 号 / 工作树标识（main 可省）
+        ttlDays: 14                       # 可选；不写由服务端按 kind 的默认 TTL 决定
+      readScopes: []                      # 额外**读取**的命名空间（如主干），只读、不写入
     vectors: "auto"                       # auto（默认：有 remote.url 即走远端）| remote | off（纯关键词）
     rerank: "off"                         # off | fast（top-10）| quality（top-20），远端重排
     exclude: []                           # 目录名，或含 "/" 的仓库相对路径前缀
@@ -124,6 +130,57 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 > 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，不需要任何模型）。
 > 旧配置（`embedding`、`vectorStore`、`preset`、`rerankBackend`、`excludeDirs/excludePaths`、
 > 顶层 `indexDirBase/chunking/sync` 等）会**直接报错并给出迁移提示**，不会静默降级。
+>
+> **0.11.0（档 3）**：新增可选的 `remote.namespace` / `remote.scope` / `remote.readScopes`，
+> 让 main / 分支 / PR / worktree 各写各的快照（见下节）。**不配这些键时行为与 0.10.x 完全一致**，
+> 命名空间仍是 `<repoId>@<切块指纹>`，旧服务端/旧配置零迁移。
+
+### 作用域（0.11.0）：main / 分支 / PR / worktree 各写各的快照
+
+0.10.x 全仓库只有一个命名空间，切到另一个分支再建库就会**覆盖**上一个分支的远端索引
+（内容层按哈希复用不会重嵌，但"这个快照包含哪些块"会被换掉）。0.11.0 用快照命名空间解决：
+
+```
+canonical_namespace(repoId, chunkFp, kind, ref) = "<repoId>@<chunkFp>#<kind>:<refToken>"
+
+kind=main      -> refToken = "default"                      （ref 忽略；主干只有一份）
+kind=branch    -> refToken = safe(ref) + "-" + sha1(ref)[:6] （safe：非法字符压成 "-"，空则 "x"）
+kind=pr        -> refToken = str(int(ref))                  （ref 必须是纯数字）
+kind=worktree  -> refToken = sha1(ref)[:8]                  （命名空间里写作 #wt:）
+```
+
+示例：`r1234@fp1#branch:feat-x-d6e256`、`r1234@fp1#pr:1234`、`r1234@fp1#main:default`。
+
+**命名空间优先级**：`remote.namespace`（显式覆盖）> `remote.scope` 推导 > 旧默认 `<repoId>@<切块指纹>`。
+`remote.namespace` 与 `remote.scope` 同时给时以 `namespace` 为准（`scope` 只用于展示）。
+
+**多作用域读取**：分支上查询时，通常还想看主干已有的实现 —— 把主干的命名空间放进 `readScopes`，
+`code_search` 会一次检索 `[写作用域, ...readScopes]`（去重保序），服务端结果再按内容哈希合并：
+
+```yaml
+remote:
+  url: "https://dsh-embed.example.com"
+  scope: { kind: branch, ref: "feat/refund-limit", ttlDays: 14 }
+  readScopes:
+    - "r1234@fp1#main:default"        # 主干快照（只读）
+```
+
+输出会显式标注作用域，命中项也可能带来源：
+
+```
+命中 8 条（通道 hybrid-remote；词项 refundOverLimit）
+  作用域：写作用域 branch:feat/refund-limit（r1234@fp1#branch:feat-refund-limit-9c1f2a，TTL 14 天）；只读 1 个：r1234@fp1#main:default
+[1] src/main/java/.../RefundLimit.java:81-120  (fts 1 / vec 2)
+```
+
+**向后兼容（旧服务端）**：多作用域请求发 `{namespaces:[{namespace},...]}`；旧服务端不认这个字段时
+返回 400/404，客户端**自动回退成单作用域（写作用域）重试一次**，并在结果里写明"已退回单作用域"。
+只有 1 个作用域时仍发旧协议 `{namespace}`，旧服务端零回归。
+
+**TTL / 生命周期**：`ttlDays` 只是把意图发给服务端；实际到期时间与 `pinned` 以
+`code_index_status` 里"远端作用域"一行为准（服务端按 kind 有默认 TTL：branch 30 天 / PR 14 天 /
+worktree 1 天，main 与 legacy 永久）。`remote.namespace` / `remote.scope` / `remote.readScopes`
+都会记进加载标记 `_loaded.json`，重启后能确认"到底按哪个作用域在写"。
 
 ### 从 0.9 及更早迁移：旧键 → 新键
 
@@ -141,6 +198,13 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 | `defaultTopK` | `code_search` 的 `top_k` 参数 |
 | `maxEmbedPerRun` | `code_index` 的 `max_embed` 参数 |
 | `indexDir` | `advanced.indexDirBase` |
+
+### 从 0.10.x 升级（0.11.0）
+
+**不用改配置**：不写 `remote.namespace` / `remote.scope` / `remote.readScopes` 时，命名空间与 0.10.x
+完全相同（`<repoId>@<切块指纹>`），旧服务端照常同步/检索。
+需要"多分支各存一份快照"时加 `remote.scope`；分支上还想检索主干已有实现时加 `readScopes`。
+服务端可以灰度升级：新客户端对旧服务端会自动回退单作用域，旧客户端对新服务端行为不变。
 
 ### `exclude`：一种写法，两种语义
 
@@ -246,7 +310,7 @@ vectors: off
 ```
 
 服务端在仓库根目录 [`server/code-index-service/`](../../server/code-index-service/)，
-自测 43 项（`selftest.py`）、客户端桩测试 30 项（`test-remote.mjs`，本地 HTTP 桩，不需要网络与模型）。
+自测 43 项（`selftest.py`）、客户端桩测试 85 项（`test-remote.mjs`，本地 HTTP 桩，不需要网络与模型）。
 
 ```yaml
 vectors: remote
@@ -295,6 +359,7 @@ advanced:
 index.js              插件入口：apply(ctx, config) + 五个工具定义 + 加载标记
 lib/store.js          SQLite schema（files / chunks / chunks_fts / vectors / meta）+ FTS/地图/清单查询
 lib/repo.js           仓库身份：repoId / git origin 归一化 / 远端命名空间
+lib/scope.js          作用域命名规范：canonicalNamespace / refToken / safeRef / 配置校验（档 3）
 lib/parser-hints.js   "这个仓库本可按语法切块但缺语法包"的检测与提示渲染
 lib/reranker.js       重排档位定义（off / fast / quality 的候选数）
 lib/strategies.js     切块策略表（扩展名 → ast|heuristic|window）+ 配置覆盖解析
@@ -315,15 +380,15 @@ tools/build-oss-index.mjs  给任意仓库建纯全文索引（评测/演示用�
 tools/verify-cases.mjs     校验题库里的期望文件真实存在
 tools/remote-index-sync.mjs 手动触发远端索引同步
 build-release.mjs     打包发布（tgz 落在 release/，产物不进 git）
-test-remote.mjs       远端地址/重排/配置校验（本地 HTTP 桩）
+test-remote.mjs       远端地址/重排/配置校验/作用域夹具与多作用域回退（本地 HTTP 桩）
 ```
 
 ## 测试
 
 ```console
 # 在插件目录里（或不带 --repo，用自动夹具仓库）
-node test-remote.mjs                            # 30 项：远端地址/重排/配置校验（本地 HTTP 桩）
-node test.mjs                                   # 96 项（Windows）/ 90 项（Linux）：建库/检索/增量/切块/排除
+node test-remote.mjs                            # 85 项：地址/重排/配置校验/作用域夹具/多作用域回退（本地 HTTP 桩）
+node test.mjs                                   # 125 项（Windows）/ 119 项（Linux）：建库/检索/增量/切块/排除/作用域
 node test-plugin.mjs                            # 74 项：契约与接口、五个工具真实调用
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 

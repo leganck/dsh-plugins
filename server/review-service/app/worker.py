@@ -8,6 +8,13 @@
 - clone 失败自动回退 API（并在汇总里如实说明）；
 - 索引/图谱失败不阻塞评审（降级为"只按 diff 审"）；
 - 任务有租约，worker 崩溃后过期重抢；同 diff 内容指纹重复直接 skipped。
+
+档3 索引作用域（`INDEX_SCOPE_MODE`）：
+- `repo`（默认）：与旧版完全一致，namespace = `{prefix}-{project}@{chunkFp}` / 配置映射；
+- `branch`：base 工作树 → `kind=branch, ref=target_branch`；
+- `pr`：base → `branch:<target>`；`INDEX_PR_HEAD=1` 时 head → `kind=pr, ref=<iid>`（带 TTL）。
+namespace 一律以服务端 `/v1/scopes/resolve` / `/sync` 返回为准（review 侧不复制 canonical 规则）；
+检索时把这些 namespace 作为列表传给 `/v1/search`（服务端按 hash 去重 + RRF 融合）。
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from .context import ContextSettings
 from .diff import mr_fingerprint, parse_gitlab_diffs
 from .gitdiff import git_diff
 from .graph import Graph
-from .index_state import IndexState
+from .index_state import IndexState, dump_scope_json, parse_scope_json, scope_part
 from .llm import Budget, LLM
 from .parallel import Deadline
 from .pipeline import ReviewSettings, outcome_payload, run_review
@@ -30,6 +37,8 @@ from .repo import MirrorManager
 from .store import Store
 from .sync import IndexSync
 from .util import log
+
+SCOPE_MODES = ("repo", "branch", "pr")
 
 
 def is_superseded(reviewed: str, current: str) -> bool:
@@ -43,6 +52,54 @@ def resolve_namespace(cfg: AppConfig, project_id: str | int) -> str:
     if mapping.get(str(project_id)):
         return mapping[str(project_id)]
     return cfg.index_namespace
+
+
+def scope_plan(
+    cfg: AppConfig,
+    iid: int,
+    target_branch: str,
+    *,
+    base_commit: str = "",
+    head_commit: str = "",
+) -> dict:
+    """按 `INDEX_SCOPE_MODE` 推导本次任务的 scope 元数据（不含 namespace）。
+
+    返回 `{"mode": ..., "base": scope|None, "head": scope|None}`：
+    - repo   ：base/head 都为 None → 完全走旧行为，不向服务端发 scope；
+    - branch ：base = {"kind":"branch","ref":target_branch}；
+    - pr     ：base = {"kind":"branch","ref":target_branch}；
+               `INDEX_PR_HEAD=1` 时 head = {"kind":"pr","ref":str(iid),"ttlDays":N}。
+
+    commit 可选（`/v1/scopes/resolve` 与 sync.scope 都接受）；拿不到就不带。
+    """
+    mode = getattr(cfg, "index_scope_mode", "repo") or "repo"
+    if mode not in SCOPE_MODES:
+        mode = "repo"
+    target_branch = str(target_branch or "main")
+    plan: dict = {"mode": mode, "base": None, "head": None}
+    if mode == "repo":
+        return plan
+    base: dict = {"kind": "branch", "ref": target_branch}
+    if base_commit:
+        base["commit"] = str(base_commit)
+    plan["base"] = base
+    if mode == "pr" and bool(getattr(cfg, "index_pr_head", False)):
+        head: dict = {
+            "kind": "pr",
+            "ref": str(int(iid)),
+            "ttlDays": int(getattr(cfg, "index_pr_ttl_days", 14) or 14),
+        }
+        if head_commit:
+            head["commit"] = str(head_commit)
+        plan["head"] = head
+    return plan
+
+
+def scope_label(scope: dict | None) -> str:
+    """日志/状态用的一句话作用域描述。"""
+    if not scope:
+        return "legacy"
+    return f"{scope.get('kind')}:{scope.get('ref')}"
 
 
 class Worker(threading.Thread):
@@ -109,8 +166,19 @@ class Worker(threading.Thread):
         worktree_base = ""
         graph = None
         namespace = resolve_namespace(cfg, project_id)
+        namespaces: list[str] = []
         state = self.index_state.get(project_id, target_branch) or {}
         degrade_notes: list[str] = []
+        # 档3：按模式推导 scope（repo 模式下 base/head 都是 None → 行为与旧版一致）
+        plan = scope_plan(
+            cfg,
+            iid,
+            target_branch,
+            base_commit=str(refs.get("base_sha") or ""),
+            head_commit=str(refs.get("head_sha") or ""),
+        )
+        if plan.get("mode") != "repo":
+            log(f"#{job_id} 索引作用域模式={plan['mode']} base={scope_label(plan.get('base'))} head={scope_label(plan.get('head'))}")
 
         reviewed_head = ""
         try:
@@ -154,7 +222,23 @@ class Worker(threading.Thread):
 
             # 索引同步（async-ish：同一项目有最小间隔）
             if cfg.index_sync and cfg.index_url and worktree_base:
-                namespace = self._maybe_sync_index(project_id, target_branch, worktree_base, state, degrade_notes) or namespace
+                synced = self._maybe_sync_index(
+                    project_id,
+                    target_branch,
+                    worktree_base,
+                    state,
+                    degrade_notes,
+                    plan=plan,
+                    head_worktree=worktree_head,
+                    iid=iid,
+                )
+                namespaces = synced or ([namespace] if namespace else [])
+            else:
+                namespaces = [namespace] if namespace else []
+                if plan.get("head") and cfg.index_url:
+                    degrade_notes.append("INDEX_PR_HEAD=1 但未走 clone 策略（无 head 工作树），未建 PR 作用域")
+            if namespaces:
+                log(f"#{job_id} 检索作用域：{namespaces}")
 
             llm = LLM(
                 cfg.llm_base_url,
@@ -173,7 +257,7 @@ class Worker(threading.Thread):
                 index=self.index,
                 reader=reader,
                 settings=settings,
-                namespace=namespace,
+                namespaces=namespaces,
                 posted_keys=self.store.posted_keys(project_id, iid),
                 graph=graph,
                 worktree=worktree_base,
@@ -223,6 +307,13 @@ class Worker(threading.Thread):
             }
             payload["strategy"] = "clone" if files and worktree_head else "api"
             payload["degraded"] = degrade_notes
+            if cfg.index_url:
+                # 档3：把本次用到的作用域写进任务产出，便于排查"上下文来自哪个快照"
+                payload["index"] = {
+                    "mode": plan.get("mode"),
+                    "namespaces": namespaces,
+                    "scope": {"base": plan.get("base"), "head": plan.get("head")},
+                }
             if publisher.dry_run:
                 payload["dry_run_payloads"] = pres.payloads
 
@@ -321,41 +412,181 @@ class Worker(threading.Thread):
 
     # ------------------------------------------------------------ 索引同步
 
-    def _maybe_sync_index(self, project_id: str, branch: str, worktree_base: str, state: dict, notes: list[str]) -> str | None:
+    def _maybe_sync_index(
+        self,
+        project_id: str,
+        branch: str,
+        worktree_base: str,
+        state: dict,
+        notes: list[str],
+        *,
+        plan: dict | None = None,
+        head_worktree: str = "",
+        iid: int = 0,
+    ) -> list[str]:
+        """同步 base（以及 pr head）工作树，返回可用于检索的 namespace 列表。
+
+        - namespace 以服务端返回为准：先 `/v1/scopes/resolve` 拿快照 namespace，再 sync；
+        - repo 模式（plan 的 base/head 均为 None）完全保持旧语义：单 namespace、失败沿用上次记录；
+        - 多作用域模式下 base/head 各自记增量游标（project_state.scope_json），互不覆盖。
+        """
         cfg = self.cfg
+        plan = plan or scope_plan(cfg, iid, branch)
+        repo_id = f"{cfg.index_repo_prefix}-{project_id}"
+        namespaces: list[str] = []
+
+        base_ns = self._sync_scope_part(
+            project_id=project_id,
+            branch=branch,
+            state=state,
+            notes=notes,
+            repo_id=repo_id,
+            part="base",
+            worktree=worktree_base,
+            scope=plan.get("base"),
+            state_key=str(project_id),
+        )
+        if base_ns:
+            namespaces.append(base_ns)
+
+        head_scope = plan.get("head")
+        if head_scope and head_worktree:
+            head_ns = self._sync_scope_part(
+                project_id=project_id,
+                branch=branch,
+                state=state,
+                notes=notes,
+                repo_id=repo_id,
+                part="head",
+                worktree=head_worktree,
+                scope=head_scope,
+                state_key=f"{project_id}:head",
+            )
+            if head_ns and head_ns not in namespaces:
+                namespaces.append(head_ns)
+        return namespaces
+
+    def _sync_scope_part(
+        self,
+        *,
+        project_id: str,
+        branch: str,
+        state: dict,
+        notes: list[str],
+        repo_id: str,
+        part: str,
+        worktree: str,
+        scope: dict | None,
+        state_key: str,
+    ) -> str | None:
+        """同步单个作用域（base/head）；失败只记日志与降级说明，不抛异常。"""
+        cfg = self.cfg
+        scoped = bool(scope)
         now = time.monotonic()
-        last = self._sync_last.get(project_id, 0.0)
-        if now - last < cfg.index_sync_min_interval:
-            return state.get("namespace")
-        self._sync_last[project_id] = now
+        if now - self._sync_last.get(state_key, 0.0) < cfg.index_sync_min_interval:
+            return self._stored_namespace(state, part, scoped)
+        self._sync_last[state_key] = now
+
+        namespace = None
+        if scoped:
+            namespace = self._resolve_scope_namespace(scope, repo_id)
+            if not namespace:
+                if part == "head":
+                    notes.append(f"PR head 作用域解析失败，跳过 head 索引：{scope_label(scope)}")
+                    log(f"索引同步：head 作用域解析失败，跳过（{scope_label(scope)}）")
+                    return None
+                # base 解析失败（旧服务端/临时网络故障）→ 退回旧命名空间，评审不中断
+                notes.append(f"作用域解析失败，base 回退旧命名空间：{scope_label(scope)}")
+                scope = None
+
+        sync_state = self._part_sync_state(state, part) if scope else state
         try:
             sync = IndexSync(cfg.index_url, cfg.index_api_key)
             res = sync.sync_worktree(
-                worktree_base,
-                repo_id=f"{cfg.index_repo_prefix}-{project_id}",
+                worktree,
+                repo_id=repo_id,
                 repo_url="",
                 tag=None,
                 chunk_fp=cfg.index_chunk_fp,
-                state=state,
+                state=sync_state,
                 no_embed=False,
+                namespace=namespace,
+                scope=scope,
             )
-            self.index_state.upsert(
-                project_id,
-                branch,
-                namespace=res.namespace,
-                repo_state=res.repo_state,
-                revision=res.revision,
-                tag=state.get("tag"),
-                last_synced_sha=str(state.get("last_synced_sha") or ""),
-                last_error=None,
-            )
-            log(f"索引同步：{res.namespace} revision={res.revision} chunks={res.chunks} missing={res.missing} {res.ms}ms")
-            return res.namespace
         except Exception as e:  # noqa: BLE001
             self.index_state.set_error(project_id, branch, f"{type(e).__name__}: {e}")
             notes.append(f"索引同步失败（降级为无跨文件语义上下文）：{type(e).__name__}: {e}")
-            log(f"索引同步失败：{e}")
-            return state.get("namespace")
+            log(f"索引同步失败（{part}）：{e}")
+            return self._stored_namespace(state, part, bool(scope))
+
+        self._record_sync(project_id, branch, part, state, res, scope=scope)
+        log(
+            f"索引同步（{part}/{scope_label(scope)}）：{res.namespace} revision={res.revision} "
+            f"chunks={res.chunks} missing={res.missing} {res.ms}ms"
+        )
+        return res.namespace
+
+    def _resolve_scope_namespace(self, scope: dict, repo_id: str) -> str | None:
+        """`POST /v1/scopes/resolve` → namespace（服务端 canonical 规则唯一来源）。"""
+        kind = str(scope.get("kind") or "")
+        ref = str(scope.get("ref") or "")
+        commit = str(scope.get("commit") or "")
+        try:
+            data = self.index.resolve_scope(repo_id, self.cfg.index_chunk_fp, kind, ref, commit=commit)
+        except Exception as e:  # noqa: BLE001
+            log(f"作用域解析异常（降级）：{type(e).__name__}: {e}")
+            return None
+        namespace = str((data or {}).get("namespace") or "")
+        if namespace:
+            log(f"作用域解析：{scope_label(scope)} → {namespace}")
+        return namespace or None
+
+    @staticmethod
+    def _stored_namespace(state: dict, part: str, scoped: bool) -> str | None:
+        """被节流/失败时沿用上次记录的 namespace（旧行为：顶层 namespace 列）。"""
+        if scoped:
+            return str(scope_part(state, part).get("namespace") or "") or None
+        return (state or {}).get("namespace")
+
+    @staticmethod
+    def _part_sync_state(state: dict, part: str) -> dict | None:
+        """取某个作用域的增量游标；没有记录返回 None（sync 会走全量）。"""
+        entry = scope_part(state, part)
+        if not entry:
+            return None
+        return {"repo_state": entry.get("repo_state"), "revision": entry.get("revision")}
+
+    def _record_sync(self, project_id: str, branch: str, part: str, state: dict, res, *, scope: dict | None) -> None:
+        """落库：repo 模式写旧列；作用域模式额外写 scope_json（base/head 分开）。"""
+        state = state or {}
+        fields: dict = {"last_error": None}
+        if scope:
+            cur = self.index_state.get(project_id, branch) or {}
+            scopes = parse_scope_json(cur.get("scope_json"))
+            scopes[part] = {
+                "namespace": res.namespace,
+                "scope": dict(scope),
+                "repo_state": res.repo_state,
+                "revision": res.revision,
+            }
+            fields["scope_json"] = dump_scope_json(scopes)
+            fields["last_synced_sha"] = str(scope.get("commit") or state.get("last_synced_sha") or "")
+            if part == "base":
+                # 顶层列保留 base 的旧字段（运维脚本/报表仍可按老方式读）
+                fields.update(
+                    {"namespace": res.namespace, "repo_state": res.repo_state, "revision": res.revision}
+                )
+        else:
+            fields.update(
+                {
+                    "namespace": res.namespace,
+                    "repo_state": res.repo_state,
+                    "revision": res.revision,
+                    "tag": state.get("tag"),
+                    "last_synced_sha": str(state.get("last_synced_sha") or ""),
+                }
+            )
+        self.index_state.upsert(project_id, branch, **fields)
 
 
-__all__ = ["Worker", "resolve_namespace", "Deadline"]
+__all__ = ["Worker", "resolve_namespace", "scope_plan", "scope_label", "Deadline"]

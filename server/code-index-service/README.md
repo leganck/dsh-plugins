@@ -33,7 +33,7 @@ code-index-service/
 ├── governor.py      # 后台嵌入：限流、暂停、优先级、进度
 ├── embedder.py      # ONNX 嵌入会话 + 向量标签（tag）
 ├── reranker.py      # 交叉编码器重排
-├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），43 项
+├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），81 项
 ├── Dockerfile       # 一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
 ├── docker-entrypoint.sh  # 拼 CUDA 路径、查设备、校验模型、/data 权限；能降级就降级
 ├── scripts/fetch-models.mjs  # 拉模型 → models/model、models/model-rerank（也支持 --check）
@@ -50,7 +50,8 @@ code-index-service/
 
 ```sql
 lineages(id, url_norm, created_at, last_seen)
-repos   (namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state)
+repos   (namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,
+         scope_kind, scope_ref, commit_sha, ttl_days, expires_at, pinned, created_at)  -- 档 3
 blobs   (lineage_id, hash, body)                     -- 正文，血统内按内容哈希去重
 chunks  (namespace, lineage_id, path, start, end, hash)
 vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内容哈希去重
@@ -71,19 +72,77 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 
 | 端点 | 说明 |
 |---|---|
-| `POST /v1/repos/{ns}/sync` | 清单差分。`{repoState, revision?, mode:'diff'|'full', tag, url, repoId, chunkFp, lineage?, upsert[], remove[]}` → `{revision, unchanged, missing[], chunks, vectors, coverage}` |
+| `POST /v1/repos/{ns}/sync` | 清单差分。`{repoState, revision?, mode:'diff'|'full', tag, url, repoId, chunkFp, lineage?, scope?{kind,ref,commit?,ttlDays?}, upsert[], remove[]}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace}` |
 | `POST /v1/repos/{ns}/chunks` | 上传缺失正文（gzip、批量、幂等）→ `{accepted, deduped}` |
 | `POST /v1/repos/{ns}/embed` | 触发后台嵌入（可带 `rate`） |
-| `GET /v1/repos/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, limits}` |
-| `POST /v1/search` | `{namespace, query, k, tag?, rerank:{candidates}}` → `{hits[{hash,path,start,end,score,rerankScore?}], ms{embed,knn,rerank}, coverage}` |
-| `POST /v1/admin/pause` `/resume` `/rate` `/gc` | 治理 |
+| `GET /v1/repos/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt,expiresAt,pinned}, limits}` |
+| `POST /v1/search` | `{namespace}` 或 `{namespaces:[{namespace,weight?}]}, query, k, tag?, rerank:{candidates}}` → `{hits[{hash,path,start,end,score,namespace,scope,rrf,rerankScore?}], ms{embed,knn,rerank}, coverage, byScope[]}` |
+| `GET /v1/scopes?repoId=&kind=` | 作用域清单：`{namespace, kind, ref, repoId, chunkFp, revision, commit, chunks, vectors, coverage, createdAt, expiresAt, pinned, ttlRemaining}` |
+| `POST /v1/scopes/resolve` | `{repoId, chunkFp, kind, ref, commit?}` → `{namespace, exists, revision?}`；非法 → `400 {error:'bad-scope', reason}` |
+| `POST /v1/scopes/{ns}/pin` | `{pinned, ttlDays?}` → `{namespace, pinned, expiresAt}`（`ttlDays:null` = 永久） |
+| `DELETE /v1/scopes/{ns}` | 删 scope + 对血统做 retention GC → `{deleted, chunks}`（幂等；未知 ns → `{deleted:false}`） |
+| `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
-| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、命名空间概览） |
+| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、命名空间概览；`spaces[]` 带 `scope`，顶层 `scopes:{total,byKind}`） |
 
 **`sync` 的三个分支**：`repoState` 与库中一致 → 直接 `unchanged`（1 个 RTT、0 字节正文）；
 `mode:'diff'` 且 `revision` 不是服务端当前值 → `409 {needFull:true}`（客户端改发全量自愈）；
 `chunkFp` 不同 → `400`（切块配置不同的客户端不能混写同一命名空间）。
+带 `scope` 时**服务端返回的 `namespace` 为准**（客户端后续 chunks/embed/status 都用它）。
+
+> ⚠️ namespace 里的路径参数要做 percent-encode（canonical namespace 含 `#`、`@`、`:`）：
+> `DELETE /v1/scopes/{encodeURIComponent(ns)}`、`GET /v1/repos/{encodeURIComponent(ns)}/status`。
+
+## 档 3：快照作用域（scope）与多作用域检索
+
+`main / branch / pr / worktree` 各用独立 namespace（快照），**内容层仍全库共享**：
+`blobs`/`vectors` 按 `(lineage, tag, 内容哈希)` 存，跨快照 0 重嵌；只有 `chunks`/`repos` 按 namespace 隔离。
+
+namespace 规范（`index_store.canonical_namespace()`，与 `scope_format.json` 夹具一致）：
+
+```
+"{repoId}@{chunkFp}#{kind}:{refToken}"
+main → default ; branch → safe(ref)-sha1(ref)[:6] ; pr → int(ref) ; worktree → sha1(ref)[:8]
+legacy（不含 #）原样保留，scope_kind='legacy'、pinned=1、expires_at=null
+```
+
+### TTL 与 janitor
+
+| scope kind | 默认 TTL | 环境变量 |
+|---|---|---|
+| `main` / `legacy` | 永久（`expires_at=null`） | — |
+| `branch` | 30 天 | `SCOPE_TTL_BRANCH` |
+| `pr` | 14 天 | `SCOPE_TTL_PR` |
+| `worktree` | 1 天 | `SCOPE_TTL_WORKTREE` |
+
+`build()` 启动 daemon janitor：启动后延迟 30 s 先扫一次（避开 warmup），此后每 `SCOPE_SWEEP_INTERVAL`（默认 3600 s）扫一次；
+`SCOPE_SWEEP=0` 关闭。每次只删 `pinned=0 and expires_at is not null and expires_at <= now` 的 scope，
+删完 `knn.invalidate(ns)` 并对受影响 lineage 跑 `gc(lineage, RETENTION_DAYS)` ——
+**仍被其他 scope 引用的 blob/vector 不会被误删**（gc 按"血统内是否还有 chunks 引用"判定）。
+`pinned=1` 的 scope 永不被 janitor 删（legacy 迁移行默认 pinned）。
+
+### 多作用域检索（`/v1/search`）
+
+1. 查询向量只 embed 一次；
+2. 每个 ns 取 `topk(max(k, rerank_candidates) * 2)`；未知 ns 记进 `byScope[].error` 跳过；
+3. 合并：key=hash，同 hash 只保留一条（`score` 取最高、来源保留首个 ns），
+   `rrf = Σ weight/(20 + rank)`（k=20、rank 从 1 起、weight 默认 1）；
+4. 按 rrf 降序取 k；启用重排时对候选按 hash 取正文重排一次，附 `rerankScore`；
+5. 命中项带 `namespace` / `scope{kind,ref}`；`byScope[]` 给每个作用域自己的 hits/coverage/ms。
+
+只传 `namespace` 的旧请求等价于单元素 `namespaces`（走同一实现，旧字段全部保留）；
+`namespaces` 长度 > `MAX_SEARCH_SCOPES`（默认 4）→ `400 {error:'too-many-namespaces'}`。
+新建 scope 数超过 `MAX_SCOPES`（默认 200）→ `507 {error:'scope-cap', count, limit}`。
+
+### 升级 / 回滚
+
+- **升级零手工步骤**：`IndexStore.__init__` 对旧 `repos` 表做幂等 `alter table` 补 7 列 + 建 `repos_scope` 索引；
+  老行回填 `scope_kind='legacy'`、`pinned=1`、`expires_at=null`、`created_at=updated_at`。
+  二次启动不会再把管理员显式 unpin 的 legacy 行重新钉住。
+- **回滚**：换回旧镜像/旧插件即可 —— 多出的列旧代码不读不写；旧 DB 删列需要手工（SQLite 不支持 drop column 的旧版本，
+  一般没必要回滚数据结构）。
+- 老客户端（0.10.1）继续只传 `namespace`：同步/检索/状态行为不变；janitor 只碰带 `expires_at` 的 scope，不会动 legacy 行。
 
 ## 热路径上别做聚合查询（实测踩坑）
 
@@ -252,7 +311,11 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 | `RERANK_BATCH` / `RERANK_MAX_TOKENS` | `8` / `256` | 重排批与截断 |
 | `KNN_MAX_BYTES` | `2 GiB` | 内存矩阵 LRU 上限 |
 | `MAX_VECTORS_PER_LINEAGE` / `MAX_TOTAL_GB` | `500000` / `20` | 存储上界（超限 507） |
-| `RETENTION_DAYS` | `30` | 无人引用的 blob/vector 保留期 |
+| `RETENTION_DAYS` | `30` | 无人引用的 blob/vector 保留期（scope 删除/过期后的 GC 也用它） |
+| `SCOPE_TTL_BRANCH` / `SCOPE_TTL_PR` / `SCOPE_TTL_WORKTREE` | `30` / `14` / `1` | 快照 TTL（天）；`main`/`legacy` 永久 |
+| `SCOPE_SWEEP` / `SCOPE_SWEEP_INTERVAL` | `1` / `3600` | janitor 开关与周期（秒）；`SCOPE_SWEEP=0` 关闭 |
+| `MAX_SCOPES` | `200` | 全新 scope 配额，超限 507 |
+| `MAX_SEARCH_SCOPES` | `4` | 单次检索最多作用域数，超限 400 |
 | `WARMUP` | `1` | 启动后台预热（嵌入会话、重排内核、最大命名空间的 kNN 矩阵与计数）：把"重启后第一个查询"从 2.4 s 降到 **25 ms**；`0` 关闭 |
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
 | `API_KEY` | 空 | 设了则所有 `POST` 要求 `Authorization: Bearer` |
@@ -265,11 +328,17 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 ## 自测
 
 ```bash
-python selftest.py     # 43 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+python selftest.py     # 81 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+                       # + 档 3：namespace 夹具、scope 注册/resolve/列表、legacy pinned 不被 sweep、
+                       #   TTL 过期删除、DELETE 后 GC 不误删共享内容、多 scope 去重/来源/权重/等价、配额 507、旧 DB 迁移
 
 # 容器里跑（不需要模型，发布门禁就是这条）
 docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app/selftest.py
 ```
+
+> 发布门禁注意：`selftest.py` 会读同目录的 `scope_format.json`（namespace 规范夹具）。
+> **Dockerfile 的 `COPY server.py index_store.py …` 那行必须把它一起拷进 /app**，否则自测 [15] 会显式失败
+> （这是刻意的：夹具没进镜像 = 两端规范可能漂移）。
 
 ## 安全
 

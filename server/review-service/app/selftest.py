@@ -10,10 +10,17 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PASS = 0
 FAILS: list[str] = []
@@ -491,6 +498,457 @@ def test_worker() -> None:
     check("任一侧为空 → 不拦（宁发不漏）", is_superseded("", "def") is False and is_superseded("abc", "") is False)
 
 
+# ---------------------------------------------------------------- 10) 档3：作用域
+
+
+def _make_worktree(files: dict[str, str]) -> str:
+    root = tempfile.mkdtemp(prefix="review-scope-wt-")
+    for name, body in files.items():
+        path = os.path.join(root, name.replace("/", os.sep))
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+    return root
+
+
+class FakeIndexServer:
+    """最小 code-index-service 桩（档3 契约 §4）：scopes resolve/delete、repos sync、search。
+
+    与 tests/test_sync.py 的假服务端同风格：真起一个 ThreadingHTTPServer，记录全部请求。
+    """
+
+    def __init__(self, *, fail_multi: bool = False, resolve_ok: bool = True, delete_ok: bool = True):
+        self.calls: list[tuple[str, str, dict]] = []
+        self.fail_multi = fail_multi
+        self.resolve_ok = resolve_ok
+        self.delete_ok = delete_ok
+        self.sync_namespace = ""  # 非空时覆盖 sync 响应里的 namespace（验证"以服务端为准"）
+        self.scope_namespaces: dict[tuple[str, str], str] = {}
+        self.hits: list[dict] = [
+            {
+                "hash": "h1",
+                "path": "src/user.py",
+                "start": 1,
+                "end": 3,
+                "score": 0.9,
+                "namespace": "r7@fp#branch:main-abc123",
+                "scope": {"kind": "branch", "ref": "main"},
+            }
+        ]
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):  # noqa: A003
+                pass
+
+            def _send(self, code: int, payload: dict) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _read(self) -> dict:
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n) if n else b""
+                try:
+                    payload = json.loads(raw or b"{}")
+                except ValueError:
+                    return {}
+                return payload if isinstance(payload, dict) else {}
+
+            def do_POST(self):  # noqa: N802
+                payload = self._read()
+                path = self.path
+                outer.calls.append(("POST", path, payload))
+                if path == "/v1/scopes/resolve":
+                    if not outer.resolve_ok:
+                        return self._send(404, {"error": "not found"})
+                    namespace = outer.namespace_for(payload)
+                    if not namespace:
+                        return self._send(400, {"error": "bad-scope", "reason": "unknown-kind"})
+                    return self._send(200, {"namespace": namespace, "exists": True})
+                if path == "/v1/search":
+                    if outer.fail_multi and payload.get("namespaces"):
+                        return self._send(400, {"error": "unsupported-field", "field": "namespaces"})
+                    return self._send(
+                        200,
+                        {
+                            "hits": outer.hits,
+                            "ms": {"embed": 1.0, "knn": 0.5, "rerank": 0},
+                            "coverage": 0.9,
+                            "byScope": [{"namespace": outer.hits[0].get("namespace"), "hits": len(outer.hits)}],
+                        },
+                    )
+                if path.startswith("/v1/repos/"):
+                    parts = path.strip("/").split("/")
+                    action = parts[-1]
+                    if action == "sync":
+                        namespace = urllib.parse.unquote(parts[2]) if len(parts) >= 3 else ""
+                        return self._send(
+                            200,
+                            {
+                                "revision": 1,
+                                "unchanged": False,
+                                "missing": [],
+                                "chunks": 0,
+                                "vectors": 0,
+                                "namespace": outer.sync_namespace or namespace,
+                            },
+                        )
+                    if action == "chunks":
+                        return self._send(200, {"accepted": 0})
+                    if action == "embed":
+                        return self._send(200, {"ok": True})
+                return self._send(404, {"error": "not found"})
+
+            def do_DELETE(self):  # noqa: N802
+                outer.calls.append(("DELETE", self.path, {}))
+                if not outer.delete_ok:
+                    return self._send(500, {"error": "boom"})
+                return self._send(200, {"deleted": True, "chunks": 3})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def namespace_for(self, payload: dict) -> str:
+        kind = str(payload.get("kind") or "")
+        ref = str(payload.get("ref") or "")
+        if (kind, ref) in self.scope_namespaces:
+            return self.scope_namespaces[(kind, ref)]
+        if kind == "branch":
+            return f"r7@fp#branch:{ref.replace('/', '-')}-abc123"
+        if kind == "pr":
+            return f"r7@fp#pr:{ref}"
+        return ""
+
+    def calls_matching(self, suffix: str) -> list[tuple[str, str, dict]]:
+        return [c for c in self.calls if c[1].endswith(suffix)]
+
+    def last_call(self, suffix: str) -> tuple[str, str, dict] | None:
+        got = self.calls_matching(suffix)
+        return got[-1] if got else None
+
+    def deletes(self) -> list[tuple[str, str, dict]]:
+        return [c for c in self.calls if c[0] == "DELETE"]
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class RecordingIndex:
+    """记录检索参数并返回固定命中的假索引客户端。"""
+
+    def __init__(self, hits: list[dict]):
+        self.hits = hits
+        self.seen: list = []
+
+    def search(self, namespaces, query, k=6, embed_text=None):
+        self.seen.append(namespaces)
+        return list(self.hits)
+
+
+def test_scope_config() -> None:
+    section("档3：scope 配置与推导")
+    from .clients import normalize_namespaces
+    from .config import load_config
+    from .worker import scope_label, scope_plan
+
+    def load(env: dict):
+        return load_config({**env, "DATA_DIR": tempfile.mkdtemp(prefix="review-scope-cfg-")})
+
+    cfg_repo = load({"INDEX_SCOPE_MODE": "", "INDEX_PR_HEAD": "0", "INDEX_PR_TTL_DAYS": "14"})
+    check("默认 INDEX_SCOPE_MODE=repo、INDEX_PR_HEAD=0", cfg_repo.index_scope_mode == "repo" and cfg_repo.index_pr_head is False, f"{cfg_repo.index_scope_mode}/{cfg_repo.index_pr_head}")
+    cfg_branch = load({"INDEX_SCOPE_MODE": "branch"})
+    check("INDEX_SCOPE_MODE=branch 解析", cfg_branch.index_scope_mode == "branch")
+    cfg_pr = load({"INDEX_SCOPE_MODE": "pr", "INDEX_PR_HEAD": "1", "INDEX_PR_TTL_DAYS": "7"})
+    check("INDEX_SCOPE_MODE=pr + INDEX_PR_HEAD + TTL", cfg_pr.index_scope_mode == "pr" and cfg_pr.index_pr_head is True and cfg_pr.index_pr_ttl_days == 7, f"{cfg_pr.index_scope_mode}/{cfg_pr.index_pr_head}/{cfg_pr.index_pr_ttl_days}")
+    cfg_bad = load({"INDEX_SCOPE_MODE": "wat"})
+    check("非法 INDEX_SCOPE_MODE 退回 repo", cfg_bad.index_scope_mode == "repo")
+
+    plan_repo = scope_plan(cfg_repo, 123, "main")
+    check("repo 模式不产生任何 scope（行为不变）", plan_repo["mode"] == "repo" and plan_repo["base"] is None and plan_repo["head"] is None, str(plan_repo))
+    plan_branch = scope_plan(cfg_branch, 123, "release/5.0")
+    check("branch 模式：base → branch:<target_branch>", plan_branch["base"] == {"kind": "branch", "ref": "release/5.0"} and plan_branch["head"] is None, str(plan_branch))
+    plan_pr_off = scope_plan(load({"INDEX_SCOPE_MODE": "pr", "INDEX_PR_HEAD": "0"}), 123, "main")
+    check("pr 模式默认只有 base 作用域", plan_pr_off["base"]["kind"] == "branch" and plan_pr_off["head"] is None, str(plan_pr_off))
+    plan_pr = scope_plan(cfg_pr, 123, "main", base_commit="b" * 40, head_commit="h" * 40)
+    check("pr+INDEX_PR_HEAD=1：head → pr:<iid>（带 TTL/commit）", plan_pr["head"] == {"kind": "pr", "ref": "123", "ttlDays": 7, "commit": "h" * 40}, str(plan_pr["head"]))
+    check("pr 模式 base 作用域带 base commit", plan_pr["base"] == {"kind": "branch", "ref": "main", "commit": "b" * 40}, str(plan_pr["base"]))
+    check("scope_label：legacy 与 kind:ref", scope_label(None) == "legacy" and scope_label(plan_pr["head"]) == "pr:123")
+
+    check("normalize_namespaces 单值兼容", normalize_namespaces("a@fp") == ["a@fp"])
+    check("normalize_namespaces 去重保序", normalize_namespaces(["a", "a", "b"]) == ["a", "b"])
+    check("normalize_namespaces 兼容 [{namespace}] 并忽略空值", normalize_namespaces([{"namespace": "x"}, {"namespace": "x"}, None, ""]) == ["x"])
+
+
+def test_scope_state() -> None:
+    section("档3：project_state scope_json（幂等迁移）")
+    from .index_state import IndexState, parse_scope_json, scope_part
+
+    tmp = tempfile.mkdtemp(prefix="review-scope-state-")
+    db = os.path.join(tmp, "review.db")
+    old_schema = """
+    CREATE TABLE project_state(
+      project_id TEXT NOT NULL, branch TEXT NOT NULL, mirror_path TEXT, namespace TEXT,
+      tag TEXT, repo_state TEXT, revision INT, last_synced_sha TEXT, graph_sha TEXT,
+      updated_at REAL, last_error TEXT, PRIMARY KEY(project_id, branch)
+    );"""
+    with sqlite3.connect(db) as conn:
+        conn.executescript(old_schema)
+        conn.execute(
+            "INSERT INTO project_state(project_id,branch,namespace,repo_state,revision,updated_at) VALUES('7','main','repo-7@fp','st',3,1.0)"
+        )
+
+    st = IndexState(db)
+    row = st.get("7", "main")
+    check("旧库启动时自动补 scope_json 列", row is not None and "scope_json" in row, str(row))
+    check("旧行数据保留（legacy 不受影响）", row["namespace"] == "repo-7@fp" and row["revision"] == 3)
+    IndexState(db)  # 再开一次：迁移幂等
+    check("重复打开 DB 迁移幂等（不报错）", True)
+
+    st.set_scope("7", "main", "base", {"namespace": "repo-7@fp#branch:main-abc123", "scope": {"kind": "branch", "ref": "main"}, "repo_state": "s1", "revision": 1})
+    st.set_scope("7", "main", "head", {"namespace": "repo-7@fp#pr:123", "scope": {"kind": "pr", "ref": "123"}, "repo_state": "s2", "revision": 2})
+    row2 = st.get("7", "main")
+    check("base 作用域记录", scope_part(row2, "base").get("namespace") == "repo-7@fp#branch:main-abc123", str(scope_part(row2, "base")))
+    check("head 作用域记录且不覆盖 base", scope_part(row2, "head").get("namespace") == "repo-7@fp#pr:123" and scope_part(row2, "base").get("revision") == 1, str(row2.get("scope_json")))
+    check("scope_part 无记录返回 {}", scope_part(row2, "nope") == {} and scope_part(None, "base") == {})
+    check("坏 scope_json 安静返回 {}", parse_scope_json("{bad") == {} and parse_scope_json(None) == {})
+
+
+def test_scope_sync() -> None:
+    section("档3：sync payload 带 scope / 多作用域检索")
+    from .clients import DictReader, IndexClient
+    from .config import AppConfig
+    from .context import ContextSettings, build_context
+    from .pipeline import ReviewSettings, _hit_brief, build_context as pipeline_build_context
+    from .store import Store
+    from .sync import IndexSync
+    from .worker import Worker, scope_plan
+
+    srv = FakeIndexServer()
+    try:
+        wt = _make_worktree({"a.py": "def a():\n    return 1\n"})
+        sync = IndexSync(srv.url, timeout=5)
+
+        srv.sync_namespace = "r7@fp#branch:server-side-xyz"
+        res = sync.sync_worktree(
+            wt,
+            repo_id="r7",
+            chunk_fp="fp",
+            namespace="r7@fp#branch:local-abc",
+            scope={"kind": "branch", "ref": "main"},
+        )
+        call = srv.last_call("/sync")
+        check("sync payload 带 scope:{kind,ref}", call is not None and call[2].get("scope") == {"kind": "branch", "ref": "main"}, str(call and call[2].get("scope")))
+        check("sync 路径使用服务端 resolve 的 namespace", urllib.parse.unquote(call[1].split("/")[3]) == "r7@fp#branch:local-abc", call[1])
+        check("sync 以响应 namespace 为准（覆盖请求路径）", res.namespace == "r7@fp#branch:server-side-xyz", res.namespace)
+
+        srv.sync_namespace = ""
+        legacy = sync.sync_worktree(wt, repo_id="r7", chunk_fp="fp")
+        legacy_call = srv.last_call("/sync")
+        check("repo 模式 payload 不带 scope（旧服务端零感知）", "scope" not in legacy_call[2] and legacy.namespace == "r7@fp", str(legacy_call[2].keys()))
+
+        # 多作用域检索：请求体 / 新字段 / 单值兼容 / 旧服务端回退
+        cli = IndexClient(srv.url, timeout=5)
+        hits = cli.search(["a@fp#main:default", "b@fp#branch:x"], "q", k=3)
+        search_call = srv.last_call("/v1/search")
+        check("多作用域检索发 namespaces 数组（≤MAX_SEARCH_SCOPES）", search_call[2].get("namespaces") == [{"namespace": "a@fp#main:default"}, {"namespace": "b@fp#branch:x"}] and "namespace" not in search_call[2], str(search_call[2]))
+        check("hits 带回 namespace 与 scope", hits and hits[0]["namespace"] == "r7@fp#branch:main-abc123" and hits[0]["scope"]["kind"] == "branch", str(hits[:1]))
+        cli.search("a@fp#main:default", "q")
+        single_call = srv.last_call("/v1/search")
+        check("单作用域仍发旧 payload（旧服务端兼容）", single_call[2].get("namespace") == "a@fp#main:default" and "namespaces" not in single_call[2], str(single_call[2]))
+
+        resolve = cli.resolve_scope("r7", "fp", "pr", "123")
+        check("resolve_scope 拿服务端 namespace", resolve is not None and resolve.get("namespace") == "r7@fp#pr:123", str(resolve))
+        deleted = cli.delete_scope("r7@fp#pr:123")
+        deletes = srv.deletes()
+        check("delete_scope 走 DELETE 且 namespace 正确编码", deleted is not None and deleted.get("deleted") is True and bool(deletes) and urllib.parse.unquote(deletes[-1][1]) == "/v1/scopes/r7@fp#pr:123", str(deletes[-1:]))
+
+        srv_bad = FakeIndexServer(fail_multi=True)
+        try:
+            cli_bad = IndexClient(srv_bad.url, timeout=5)
+            fallback_hits = cli_bad.search(["a@fp", "b@fp"], "q")
+            calls = srv_bad.calls_matching("/v1/search")
+            check("旧服务端 400 → 回退单作用域重试一次", len(calls) == 2 and calls[1][2].get("namespace") == "a@fp" and bool(fallback_hits), f"{len(calls)} calls, hits={len(fallback_hits)}")
+        finally:
+            srv_bad.close()
+
+        # 上下文/证据：命中项带 namespace/scope，检索传列表
+        reader = DictReader(FILES_FOR_REVIEW)
+        hit = srv.hits[0]
+        rindex = RecordingIndex([hit])
+        ctx = build_context(
+            index=rindex,
+            reader=reader,
+            namespaces=["a@fp#main:default", "b@fp#branch:x"],
+            query="user",
+            changed_paths=set(),
+            settings=ContextSettings(max_chunks=2, max_semantic=2, max_graph=0, max_grep=0),
+        )
+        check("三路上下文：语义检索收到多作用域列表", rindex.seen and rindex.seen[0] == ["a@fp#main:default", "b@fp#branch:x"], str(rindex.seen[:1]))
+        check("上下文命中项带 namespace/scope（进 evidence）", bool(ctx) and ctx[0].get("namespace") == hit["namespace"] and ctx[0].get("scope") == hit["scope"], str(ctx[:1]))
+        pctx = pipeline_build_context(rindex, reader, ["a@fp#main:default", "b@fp#branch:x"], "user", ReviewSettings(max_context_chunks=2))
+        check("pipeline 上下文命中项带 namespace/scope", bool(pctx) and pctx[0].get("scope") == hit["scope"], str(pctx[:1]))
+        check("单值调用兼容（str 也能检）", bool(pipeline_build_context(rindex, reader, "a@fp", "user", ReviewSettings(max_context_chunks=1))))
+        check("命中渲染带 namespace/scope", _hit_brief({"path": "a.py", "start": 1, "end": 2, "score": 0.5, "namespace": "ns", "scope": {"kind": "branch", "ref": "main"}}) == "a.py:1-2 (score 0.5, ns=ns, scope=branch:main)")
+        check("旧命中渲染格式不变", _hit_brief({"path": "a.py", "start": 1, "end": 2, "score": 0.5}) == "a.py:1-2 (score 0.5)")
+
+        # worker：base/head 双作用域同步 + 落库 + 节流回退
+        srv2 = FakeIndexServer()
+        try:
+            srv2.scope_namespaces = {("branch", "release/1.0"): "ns-base", ("pr", "123"): "ns-head"}
+            tmp = tempfile.mkdtemp(prefix="review-scope-worker-")
+            cfg = AppConfig(
+                data_dir=tmp,
+                git_strategy="api",
+                index_url=srv2.url,
+                index_api_key="",
+                index_scope_mode="pr",
+                index_pr_head=True,
+                index_pr_ttl_days=7,
+                index_repo_prefix="r",
+                index_chunk_fp="fp",
+                index_sync_min_interval=600,
+            )
+            wt_base = _make_worktree({"base.py": "def base():\n    return 1\n"})
+            wt_head = _make_worktree({"head.py": "def head():\n    return 2\n"})
+            worker = Worker("t", cfg, Store(os.path.join(tmp, "review.db")), threading.Event(), IndexClient(srv2.url, timeout=5))
+            plan = scope_plan(cfg, 123, "release/1.0")
+            notes: list[str] = []
+            got = worker._maybe_sync_index("7", "release/1.0", wt_base, {}, notes, plan=plan, head_worktree=wt_head, iid=123)
+            check("worker 返回 base+head 两个作用域 namespace", got == ["ns-base", "ns-head"], str(got))
+            resolve_calls = srv2.calls_matching("/v1/scopes/resolve")
+            check("worker 用服务端 resolve 的 namespace 做 sync 路径", [urllib.parse.unquote(c[1].split("/")[3]) for c in srv2.calls_matching("/sync")] == ["ns-base", "ns-head"], str([c[1] for c in srv2.calls_matching("/sync")]))
+            sync_payloads = [c[2] for c in srv2.calls_matching("/sync")]
+            check("base sync 带 branch scope", sync_payloads[0].get("scope") == {"kind": "branch", "ref": "release/1.0"}, str(sync_payloads[0].get("scope")))
+            check("head sync 带 pr scope + ttlDays", sync_payloads[1].get("scope") == {"kind": "pr", "ref": "123", "ttlDays": 7}, str(sync_payloads[1].get("scope")))
+            check("resolve 请求体符合契约（repoId/chunkFp/kind/ref）", resolve_calls[0][2] == {"repoId": "r-7", "chunkFp": "fp", "kind": "branch", "ref": "release/1.0"}, str(resolve_calls[0][2]))
+            state = worker.index_state.get("7", "release/1.0") or {}
+            from .index_state import scope_part
+
+            check("scope_json 记录 base/head namespace", scope_part(state, "base").get("namespace") == "ns-base" and scope_part(state, "head").get("namespace") == "ns-head", str(state.get("scope_json")))
+            check("顶层 namespace 列保留 base（运维可读）", state.get("namespace") == "ns-base", str(state.get("namespace")))
+            check("无降级说明（作用域解析成功）", notes == [], str(notes))
+            again = worker._maybe_sync_index("7", "release/1.0", wt_base, state, [], plan=plan, head_worktree=wt_head, iid=123)
+            check("节流窗口内沿用已记录的作用域 namespace", again == ["ns-base", "ns-head"] and len(srv2.calls_matching("/sync")) == 2, str(again))
+        finally:
+            srv2.close()
+    finally:
+        srv.close()
+
+
+def test_scope_webhook() -> None:
+    section("档3：webhook merge/close 清理 PR 作用域")
+    from .config import AppConfig
+    from .server import cleanup_pr_scope, process_webhook, serve
+    from .store import Store
+
+    srv = FakeIndexServer()
+    try:
+        cfg_pr = AppConfig(index_url=srv.url, index_scope_mode="pr", index_repo_prefix="r", index_chunk_fp="fp")
+        out = cleanup_pr_scope(cfg_pr, 7, 123)
+        resolve_call = srv.last_call("/v1/scopes/resolve")
+        check("清理：resolve 按 pr:<iid> 请求", resolve_call is not None and resolve_call[2] == {"repoId": "r-7", "chunkFp": "fp", "kind": "pr", "ref": "123"}, str(resolve_call and resolve_call[2]))
+        del_calls = srv.deletes()
+        check("清理：DELETE 服务端返回的 namespace", bool(del_calls) and urllib.parse.unquote(del_calls[-1][1]) == "/v1/scopes/r7@fp#pr:123", str(del_calls[-1:]))
+        check("清理结果带 deleted/namespace", out["attempted"] is True and out["deleted"] is True and out["namespace"] == "r7@fp#pr:123", str(out))
+
+        out_repo = cleanup_pr_scope(AppConfig(index_url=srv.url, index_scope_mode="repo"), 7, 123)
+        check("repo 模式不触发清理（零请求）", out_repo["attempted"] is False and out_repo["skipped"].startswith("scope-mode="), str(out_repo))
+
+        srv_nores = FakeIndexServer(resolve_ok=False)
+        try:
+            out_fail = cleanup_pr_scope(AppConfig(index_url=srv_nores.url, index_scope_mode="pr"), 7, 123)
+            check("resolve 失败 → 只记日志仍返回 200（skipped）", out_fail["attempted"] is True and out_fail["deleted"] is False and out_fail["skipped"] == "resolve-failed", str(out_fail))
+        finally:
+            srv_nores.close()
+        srv_del = FakeIndexServer(delete_ok=True)
+        try:
+            out_del = cleanup_pr_scope(AppConfig(index_url=srv_del.url, index_scope_mode="pr"), 7, 123)
+            check("清理幂等（deleted=true 正常路径）", out_del["deleted"] is True)
+        finally:
+            srv_del.close()
+
+        # process_webhook 路由（与 HTTP 解耦）：merge/close 200 不入队；未知 action 仍 200
+        store = Store(os.path.join(tempfile.mkdtemp(prefix="review-scope-hook-"), "review.db"))
+        cfg = AppConfig(index_url=srv.url, index_scope_mode="pr", index_repo_prefix="r", index_chunk_fp="fp")
+        seen: list[tuple[str, int]] = []
+
+        def fake_cleanup(cfg2, project_id, iid):
+            seen.append((str(project_id), int(iid)))
+            return {"attempted": True, "deleted": True}
+
+        merge_body = {"object_kind": "merge_request", "project": {"id": 7}, "object_attributes": {"action": "merge", "iid": 123}}
+        close_body = {"object_kind": "merge_request", "project": {"id": 9}, "object_attributes": {"action": "close", "iid": 5}}
+        code, payload = process_webhook(cfg, store, merge_body, cleanup=fake_cleanup)
+        check("merge 事件返回 200 且触发清理（不入队）", code == 200 and payload.get("ok") and seen == [("7", 123)] and store.queue_stats().get("queued", 0) == 0, f"{code} {payload} {seen}")
+        code2, payload2 = process_webhook(cfg, store, close_body, cleanup=fake_cleanup)
+        check("close 事件同样触发清理", code2 == 200 and payload2.get("ok") and seen[-1] == ("9", 5), f"{code2} {seen}")
+        code3, payload3 = process_webhook(cfg, store, {"object_kind": "merge_request", "project": {"id": 7}, "object_attributes": {"action": "labeled", "iid": 1}})
+        check("未识别 action 仍返回 200 ignored", code3 == 200 and payload3.get("ignored") is True, f"{code3} {payload3}")
+        code4, _payload4 = process_webhook(cfg, store, {"object_kind": "note"})
+        check("非 MR 事件仍返回 200 ignored", code4 == 200)
+        code5, _payload5 = process_webhook(cfg, store, {"object_kind": "merge_request", "object_attributes": {"action": "merge"}})
+        check("merge 缺 project/iid 时 200 ignored（不让 GitLab 重投）", code5 == 200)
+        open_body = {"object_kind": "merge_request", "project": {"id": 7}, "object_attributes": {"action": "open", "iid": 3, "last_commit": {"id": "abc"}}}
+        code6, payload6 = process_webhook(cfg, store, open_body)
+        check("open 事件照旧入队（202）", code6 == 202 and payload6.get("job_id") and store.queue_stats().get("queued", 0) == 1, f"{code6} {payload6}")
+
+        code7, payload7 = process_webhook(cfg, store, merge_body)
+        check("webhook merge 真实清理（HTTP 桩）", code7 == 200 and payload7["scope_cleanup"]["deleted"] is True, str(payload7))
+
+        # HTTP 端到端：/webhook 鉴权 + merge 清理
+        cfg_http = AppConfig(
+            data_dir=tempfile.mkdtemp(prefix="review-scope-http-"),
+            webhook_secret="s3cret",
+            index_url=srv.url,
+            index_scope_mode="pr",
+            index_repo_prefix="r",
+            index_chunk_fp="fp",
+        )
+        httpd = serve(cfg_http, Store(os.path.join(cfg_http.data_dir, "review.db")), "127.0.0.1", 0)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/webhook",
+                data=json.dumps(merge_body).encode(),
+                headers={"Content-Type": "application/json", "X-Gitlab-Token": "s3cret"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            check("HTTP /webhook merge → 200 并返回清理结果", data.get("ok") is True and data["scope_cleanup"]["deleted"] is True, str(data))
+            bad = urllib.request.Request(
+                f"http://127.0.0.1:{port}/webhook",
+                data=json.dumps(open_body).encode(),
+                headers={"Content-Type": "application/json", "X-Gitlab-Token": "wrong"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(bad, timeout=5)
+                check("webhook 鉴权失败返回 401", False)
+            except urllib.error.HTTPError as e:
+                check("webhook 鉴权失败返回 401", e.code == 401, str(e.code))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+    finally:
+        srv.close()
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -500,7 +958,21 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
     print("== review-service 离线自测 ==")
-    for fn in (test_diff, test_validate, test_llm, test_pipeline, test_store, test_publish, test_config, test_chunker, test_worker):
+    for fn in (
+        test_diff,
+        test_validate,
+        test_llm,
+        test_pipeline,
+        test_store,
+        test_publish,
+        test_config,
+        test_chunker,
+        test_worker,
+        test_scope_config,
+        test_scope_state,
+        test_scope_sync,
+        test_scope_webhook,
+    ):
         try:
             fn()
         except Exception:  # noqa: BLE001
