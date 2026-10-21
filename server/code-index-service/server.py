@@ -122,39 +122,85 @@ ADMIN_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>code-index-service · 后台</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --text:#1f2328; --muted:#6b7280; --ok:#1a7f37; --warn:#b45309; --bad:#b42318; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#171a21; --line:#2a2f3a; --text:#e6e6e6; --muted:#9aa4b2; } }
-  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
-  header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; flex-wrap:wrap; }
-  h1 { font-size:15px; margin:0; font-weight:600; } .spacer { flex:1; }
-  .badge { padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); }
-  .badge.ok { color:var(--ok); border-color:var(--ok); } .badge.bad { color:var(--bad); border-color:var(--bad); }
-  button { padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; }
-  button:hover { border-color:var(--muted); } button:disabled { opacity:.5; cursor:default; }
-  main { padding:16px 18px; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
-  .card h2 { font-size:13px; margin:0 0 8px; font-weight:600; color:var(--muted); }
-  .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; } .kv div:nth-child(odd) { color:var(--muted); }
-  .wide { grid-column:1/-1; } table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-weight:600; }
-  td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; } .ns { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
-  .bar { height:7px; width:80px; background:var(--line); border-radius:4px; overflow:hidden; display:inline-block; vertical-align:middle; }
-  .bar > i { display:block; height:100%; background:var(--ok); }
-  .muted { color:var(--muted); } #msg { color:var(--muted); font-size:12px; } pre { margin:0; white-space:pre-wrap; word-break:break-all; }
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --faint:#98a2b3;
+          --ok:#067647; --ok-bg:#e7f6ec; --warn:#b54708; --warn-bg:#fef4e6; --bad:#b42318; --bad-bg:#fdecea;
+          --blue:#175cd3; --blue-bg:#eff4ff; --purple:#5925dc; --purple-bg:#f4f0ff; --mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1016; --card:#161a22; --line:#262c37; --text:#e7e9ee; --muted:#98a2b3; --faint:#667085;
+            --ok:#75e0a7; --ok-bg:#0f2e1d; --warn:#fdb022; --warn-bg:#33240d; --bad:#fda29b; --bad-bg:#3a1512;
+            --blue:#84adff; --blue-bg:#12203f; --purple:#c3b5fd; --purple-bg:#241a4d; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  .mono { font-family:var(--mono); }
+  header { display:flex; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:10; flex-wrap:wrap; }
+  .brand { display:flex; align-items:baseline; gap:8px; }
+  .logo { display:inline-flex; width:22px; height:22px; border-radius:6px; background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; font:600 11px/22px var(--mono); justify-content:center; }
+  h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  button { padding:6px 11px; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; font-size:12.5px; transition:.15s; }
+  button:hover { border-color:var(--muted); }
+  button.primary { border-color:var(--blue); color:var(--blue); }
+  button:disabled { opacity:.45; cursor:default; }
+  .chip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); background:var(--card); white-space:nowrap; }
+  .chip.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
+  .chip.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
+  .chip.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
+  .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+  #err { display:none; margin:12px 20px 0; padding:9px 12px; border-radius:8px; border:1px solid var(--bad); background:var(--bad-bg); color:var(--bad); font-size:12.5px; }
+  main { padding:16px 20px 28px; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .card h2 { font-size:12px; margin:0 0 10px; font-weight:600; color:var(--muted); letter-spacing:.4px; text-transform:uppercase; }
+  .kv { display:grid; grid-template-columns:96px 1fr; gap:6px 12px; font-size:12.5px; align-items:baseline; }
+  .kv .k { color:var(--muted); }
+  .kv .v { min-width:0; overflow-wrap:anywhere; }
+  .wide { grid-column:1/-1; }
+  .toolbar { display:flex; align-items:center; gap:10px; margin:0 0 10px; flex-wrap:wrap; }
+  .toolbar input[type=search] { flex:1; min-width:180px; max-width:320px; padding:6px 10px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-size:12.5px; }
+  .toolbar label { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12px; }
+  .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:10px; }
+  table { width:100%; border-collapse:separate; border-spacing:0; font-size:12.5px; min-width:980px; }
+  thead th { position:sticky; top:0; background:var(--card); color:var(--muted); font-weight:600; text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); white-space:nowrap; z-index:2; }
+  tbody td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle; white-space:nowrap; }
+  tbody tr:last-child td { border-bottom:0; }
+  tbody tr:hover td { background:color-mix(in srgb, var(--bg) 60%, transparent); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .kind { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11.5px; font-family:var(--mono); background:var(--bg); border:1px solid var(--line); }
+  .kind.main { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
+  .kind.branch { color:var(--blue); background:var(--blue-bg); border-color:transparent; }
+  .kind.pr { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
+  .kind.worktree { color:var(--purple); background:var(--purple-bg); border-color:transparent; }
+  .cov { display:flex; align-items:center; gap:7px; min-width:110px; }
+  .bar { height:6px; width:88px; background:var(--line); border-radius:99px; overflow:hidden; flex:none; }
+  .bar > i { display:block; height:100%; border-radius:99px; background:var(--ok); }
+  .bar.warn > i { background:var(--warn); } .bar.bad > i { background:var(--bad); }
+  .muted { color:var(--muted); } .faint { color:var(--faint); }
+  .ns { font-family:var(--mono); font-size:11.5px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; display:inline-block; vertical-align:middle; }
+  .copy { border:0; background:transparent; color:var(--faint); cursor:pointer; padding:0 2px; font-size:12px; }
+  .copy:hover { color:var(--blue); }
+  .empty { padding:22px 10px; text-align:center; color:var(--muted); }
+  details.help { margin-top:12px; color:var(--muted); font-size:12.5px; }
+  details.help summary { cursor:pointer; user-select:none; }
+  details.help .grid { display:grid; gap:6px 18px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); margin-top:10px; }
+  details.help b { color:var(--text); font-weight:600; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(10px); background:var(--text); color:var(--bg); padding:7px 14px; border-radius:8px; font-size:12.5px; opacity:0; pointer-events:none; transition:.2s; }
+  #toast.show { opacity:.95; transform:translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
 <header>
-  <h1>code-index-service · 后台</h1>
-  <span id="ready" class="badge">…</span>
-  <span id="model" class="badge" title="向量模型 tag">—</span>
+  <div class="brand"><span class="logo">CI</span><h1>code-index-service</h1><span class="sub">后台</span></div>
+  <span id="ready" class="chip"><span class="dot"></span>…</span>
+  <span id="model" class="chip mono" title="向量模型 tag">—</span>
+  <span id="err" style="display:none"></span>
   <span class="spacer"></span>
-  <span id="msg"></span>
+  <span id="refreshed" class="faint" style="font-size:12px"></span>
   <button id="btn-refresh">刷新</button>
   <button id="btn-pause">暂停嵌入</button>
   <button id="btn-resume">恢复嵌入</button>
   <button id="btn-sweep">立即清扫</button>
 </header>
+<div id="errbar" style="display:none;margin:12px 20px 0;padding:9px 12px;border-radius:8px;border:1px solid var(--bad);background:var(--bad-bg);color:var(--bad);font-size:12.5px"></div>
 <main>
   <section class="card">
     <h2>运行时</h2>
@@ -169,87 +215,174 @@ ADMIN_HTML = """<!doctype html>
     <div class="kv" id="limits"></div>
   </section>
   <section class="card wide">
-    <h2>作用域（快照） <span class="muted" id="scope-count"></span></h2>
-    <table>
-      <thead><tr><th>kind</th><th>ref</th><th>repoId</th><th class="num">chunks</th><th class="num">vectors</th><th>coverage</th><th class="num">占用</th><th>创建</th><th>过期</th><th>pinned</th><th>namespace</th></tr></thead>
-      <tbody id="scopes"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
-    </table>
+    <h2>作用域（快照）<span class="muted" id="scope-count" style="font-weight:400"> </span></h2>
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="筛选 kind / ref / repoId / namespace…">
+      <label><input id="auto" type="checkbox" checked> 每 15 秒自动刷新</label>
+      <span class="faint" id="filtered"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>类型</th><th>引用</th><th>仓库</th><th class="num">块</th><th class="num">向量</th><th>覆盖率</th>
+          <th class="num">占用</th><th>创建</th><th>过期</th><th>保护</th><th>命名空间</th>
+        </tr></thead>
+        <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <details class="help">
+      <summary>字段说明</summary>
+      <div class="grid">
+        <div><b>类型</b>：快照作用域。legacy = 接入作用域前的老命名空间（自动永久保护）；main/branch/pr/worktree = 新规范快照。</div>
+        <div><b>引用</b>：scope 的来源标识——分支名、PR 号、worktree 指纹；main/legacy 为空。</div>
+        <div><b>块 / 向量</b>：chunks 是落库的代码块数；vectors 是这些块在服务端已算好的向量数。</div>
+        <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入是限速异步的，刚同步完会从 0% 慢慢涨到 100%。</div>
+        <div><b>占用</b>：该作用域归属血统（同一仓库）的正文 + 向量总字节，按内容哈希共享，不是每个快照单独一份。</div>
+        <div><b>创建 / 过期</b>：快照创建时间与 TTL。main/legacy 永不过期，branch/pr/worktree 到期后被 janitor 自动删除。</div>
+        <div><b>保护（pinned）</b>：钉住的作用域不会被 janitor 回收；legacy 迁移时自动钉住。</div>
+        <div><b>命名空间</b>：检索与同步的唯一键（<span class="mono">repoId@chunkFp#kind:ref</span>），点右侧图标可复制。</div>
+        <div><b>kNN 缓存</b>：服务端把某作用域的向量读进内存矩阵做精确检索；LRU 上限由 KNN_MAX_BYTES 控制。</div>
+        <div><b>限速 / batch</b>：后台嵌入每秒最多处理多少块、每次推理批大小（保护 CPU/GPU 不被打满）。</div>
+        <div><b>保留期</b>：作用域删除后，无人引用的正文/向量保留多少天才被 GC（不动仍被别的作用域引用的内容）。</div>
+        <div><b>每血统向量上限 / 作用域上限</b>：防爆配额；超限写入返回 507，单次检索最多同时查 4 个作用域。</div>
+      </div>
+    </details>
   </section>
 </main>
+<div id="toast"></div>
 <script>
 const $ = (s) => document.querySelector(s);
 // 后台鉴权走 HTTP Basic：浏览器会弹一次登录框（ADMIN_USER / ADMIN_PASSWORD），之后同源请求自动带 Authorization。
-const fmt = (n) => n === null || n === undefined ? '—' : (typeof n === 'number' ? n.toLocaleString() : String(n));
-const ts = (s) => !s ? '—' : new Date((typeof s === 'number' ? s * 1000 : s)).toLocaleString('zh-CN', { hour12: false });
-const iso = (n) => !n ? '永不' : ts(n);
-const bytes = (n) => !n ? '0 B' : (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
-function setMsg(t) { $('#msg').textContent = t || ''; }
+const fmtNum = (n) => (n === null || n === undefined) ? '—' : Number(n).toLocaleString();
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(v >= 100 ? 0 : 1)) + ' ' + u[i];
+}
+function rel(tsSec) {
+  if (!tsSec) return '—';
+  const t = new Date(tsSec * 1000), diff = Math.max(0, (Date.now() - t.getTime()) / 1000);
+  const abs = t.toLocaleString('zh-CN', { hour12: false });
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  return Math.floor(diff / 86400) + ' 天前';
+}
+const absTime = (tsSec) => tsSec ? new Date(tsSec * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+function ttl(expiresAt) {
+  if (!expiresAt) return '永不';
+  const days = (expiresAt * 1000 - Date.now()) / 86400000;
+  if (days <= 0) return '已过期';
+  if (days < 1) return Math.max(1, Math.round(days * 24)) + ' 小时内';
+  return Math.round(days) + ' 天';
+}
+function chip(kind) {
+  const k = String(kind || 'legacy');
+  return '<span class="kind ' + k + '">' + k + '</span>';
+}
+function setErr(msg) {
+  const el = $('#errbar');
+  if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.style.display = 'block'; el.textContent = msg;
+}
 async function api(path, opts = {}) {
   const headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   let body = null; try { body = await r.json(); } catch (e) {}
-  if (r.status === 401) {
-    $('#ready').className = 'badge bad'; $('#ready').textContent = '需要登录';
-    setMsg('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
-  }
+  if (r.status === 401) setErr('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
   return { status: r.status, body };
 }
-const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div>' + k + '</div><div' + (title ? ' title="' + title + '"' : '') + '>' + v + '</div>').join(''); };
+const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div class="k">' + k + '</div><div class="v"' + (title ? ' title="' + title + '"' : '') + '>' + v + '</div>').join(''); };
+let ROWS = [];
+function renderScopes() {
+  const q = $('#filter').value.trim().toLowerCase();
+  const rows = ROWS.filter((x) => !q || [x.kind, x.ref, x.repoId, x.namespace].some((v) => String(v || '').toLowerCase().includes(q)));
+  $('#filtered').textContent = q ? '匹配 ' + rows.length + ' / ' + ROWS.length : '';
+  $('#scope-count').textContent = '(' + ROWS.length + ')';
+  if (!rows.length) { $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">' + (ROWS.length ? '没有匹配的作用域' : '还没有作用域') + '</td></tr>'; return; }
+  $('#scopes').innerHTML = rows.map((x) => {
+    const pct = Math.round((x.coverage || 0) * 100);
+    const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
+    return '<tr>'
+      + '<td>' + chip(x.kind) + '</td>'
+      + '<td>' + (x.ref ? x.ref : '<span class="faint">—</span>') + '</td>'
+      + '<td class="mono">' + (x.repoId || '—') + '</td>'
+      + '<td class="num">' + fmtNum(x.chunks) + '</td>'
+      + '<td class="num">' + fmtNum(x.vectors) + '</td>'
+      + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
+      + '<td class="num" title="' + (x.totalBytes ? fmtBytes(x.totalBytes) + '（含共享正文/向量）' : '') + '">' + fmtBytes(x.totalBytes) + '</td>'
+      + '<td title="' + absTime(x.createdAt) + '">' + rel(x.createdAt) + '</td>'
+      + '<td' + (x.expiresAt ? ' title="' + absTime(x.expiresAt) + '"' : '') + '>' + ttl(x.expiresAt) + '</td>'
+      + '<td>' + (x.pinned ? '<span class="chip ok">已钉住</span>' : '<span class="faint">—</span>') + '</td>'
+      + '<td><span class="ns" title="' + x.namespace + '">' + x.namespace + '</span> '
+      + '<button class="copy" data-ns="' + x.namespace + '" title="复制命名空间">⧉</button></td>'
+      + '</tr>';
+  }).join('');
+  document.querySelectorAll('button.copy').forEach((b) => {
+    b.onclick = async () => {
+      try { await navigator.clipboard.writeText(b.dataset.ns); toast('已复制命名空间'); }
+      catch (e) { toast('复制失败（浏览器限制）'); }
+    };
+  });
+}
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1400);
+}
 async function refresh() {
-  setMsg('');
-  // 先拉作用域（无 key 时在这里触发 401 弹窗），再拉 health：带 key 的 health 才是完整版
+  setErr('');
   const s = await api('/v1/scopes');
   const h = await api('/health');
-  if (h.status !== 200 || !h.body) { $('#ready').className = 'badge bad'; $('#ready').textContent = '不可达'; return; }
-  const d = h.body;
-  $('#ready').className = 'badge ' + (d.ready ? 'ok' : 'bad');
-  $('#ready').textContent = d.ready ? 'ready' : 'not ready';
+  if (h.status !== 200 || !h.body) { $('#ready').className = 'chip bad'; $('#ready').innerHTML = '<span class="dot"></span>不可达'; return; }
+  const d = h.body, g = d.governor || {}, k = d.knn || {}, L = d.limits || {}, sc = d.scopes || {};
+  $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  $('#ready').className = 'chip ' + (d.ready ? 'ok' : 'bad');
+  $('#ready').innerHTML = '<span class="dot"></span>' + (d.ready ? 'ready' : 'not ready');
   $('#model').textContent = d.tag || '—';
   $('#model').title = (d.providers || []).join(', ') + ' · ORT ' + (d.ort || '?') + ' · threads ' + (d.threads || '?');
   kv($('#runtime'), [
-    ['模型', (d.model || '—') + ' <span class="muted">(' + bytes(d.model_bytes) + ')</span>'],
-    ['tag', d.tag || '—'], ['providers', (d.providers || []).join(', ') || '—'],
-    ['ORT / threads', (d.ort || '?') + ' / ' + (d.threads || '?')],
-    ['重排', d.rerank_ready ? (d.rerank_tag || 'ready') : '<span class="muted">off（' + (d.rerank_err || '无模型') + '）</span>'],
-    ['pid / db', fmt(d.pid) + ' / <span class="ns">' + (d.db || '—') + '</span>'],
+    ['模型', '<span class="mono">' + (d.model || '—') + '</span> <span class="faint">' + fmtBytes(d.model_bytes) + '</span>'],
+    ['向量 tag', '<span class="mono">' + (d.tag || '—') + '</span>'],
+    ['执行提供者', (d.providers || []).join(', ') || '—', 'onnxruntime 实际使用的 EP'],
+    ['ORT / 线程', (d.ort || '?') + ' / ' + (d.threads || '?'), '推理运行时版本与线程数'],
+    ['重排', d.rerank_ready ? (d.rerank_tag || 'ready') : '<span class="muted">off（未装重排模型，客户端回退 RRF 顺序）</span>'],
+    ['进程 / 数据库', '<span class="mono">' + fmtNum(d.pid) + '</span> · <span class="mono">' + (d.db || '—') + '</span>'],
   ]);
-  const g = d.governor || {}, k = d.knn || {};
+  const hits = k.hits || 0, miss = k.misses || 0;
+  const rate = (hits + miss) ? Math.round(hits * 100 / (hits + miss)) + '%' : '—';
   kv($('#governor'), [
-    ['状态', g.paused ? '<span class="badge bad">已暂停</span>' : '<span class="badge ok">运行中</span>'],
-    ['限速', fmt(g.rate) + ' 块 / 秒'], ['batch', fmt(g.batch)],
-    ['kNN 缓存', fmt(k.entries) + ' 个作用域 / ' + bytes(k.bytes) + ' <span class="muted">上限 ' + bytes(k.maxBytes) + '</span>'],
-    ['kNN 命中/未命中', fmt(k.hits) + ' / ' + fmt(k.misses) + ' <span class="muted">淘汰 ' + fmt(k.evictions) + '</span>'],
+    ['状态', g.paused ? '<span class="chip warn"><span class="dot"></span>已暂停</span>' : '<span class="chip ok"><span class="dot"></span>运行中</span>', '后台嵌入线程状态'],
+    ['限速', fmtNum(g.rate) + ' 块 / 秒', 'EMBED_RATE'],
+    ['批大小', fmtNum(g.batch), 'EMBED_BATCH'],
+    ['kNN 缓存', fmtNum(k.entries) + ' 个作用域 · ' + fmtBytes(k.bytes) + ' / ' + fmtBytes(k.maxBytes), '内存向量矩阵（用于精确检索）'],
+    ['kNN 命中率', rate + ' <span class="faint">(' + fmtNum(hits) + ' 命中 / ' + fmtNum(miss) + ' 未命中 · 淘汰 ' + fmtNum(k.evictions) + ')</span>'],
   ]);
-  const L = d.limits || {}, sc = d.scopes || {};
+  const used = (d.spaces || []).reduce((a, x) => a + (x.totalBytes || 0), 0);
   kv($('#limits'), [
-    ['总存储上限', fmt(L.maxTotalGb) + ' GB'], ['保留期', fmt(L.retentionDays) + ' 天'],
-    ['每血统向量上限', fmt(L.maxVectorsPerLineage)], ['作用域上限', fmt(L.maxScopes) + '（单次检索 ≤ ' + fmt(L.maxSearchScopes) + '）'],
-    ['当前作用域', fmt(sc.total) + ' <span class="muted">' + JSON.stringify(sc.byKind || {}) + '</span>'],
+    ['已用 / 上限', fmtBytes(used) + ' / ' + (L.maxTotalGb ? L.maxTotalGb + ' GB' : '—'), '正文 + 向量总占用 / MAX_TOTAL_GB'],
+    ['保留期', fmtNum(L.retentionDays) + ' 天', 'RETENTION_DAYS：GC 前保留期'],
+    ['每血统向量上限', fmtNum(L.maxVectorsPerLineage), 'MAX_VECTORS_PER_LINEAGE'],
+    ['作用域数 / 上限', fmtNum(sc.total) + ' / ' + fmtNum(L.maxScopes), JSON.stringify(sc.byKind || {})],
+    ['单次检索作用域', '≤ ' + fmtNum(L.maxSearchScopes), 'MAX_SEARCH_SCOPES'],
   ]);
-  const rows = (s.body && s.body.scopes) || [];
-  $('#scope-count').textContent = '(' + rows.length + ')';
-  const bytesOf = {}; (d.spaces || []).forEach((x) => { bytesOf[x.namespace] = x.totalBytes; });
-  $('#scopes').innerHTML = rows.length ? rows.map((x) => {
-    const cov = Math.round((x.coverage || 0) * 100);
-    return '<tr><td>' + x.kind + '</td><td>' + (x.ref || '—') + '</td><td>' + x.repoId + '</td>'
-      + '<td class="num">' + fmt(x.chunks) + '</td><td class="num">' + fmt(x.vectors) + '</td>'
-      + '<td><span class="bar" title="' + cov + '%"><i style="width:' + cov + '%"></i></span> ' + cov + '%</td>'
-      + '<td class="num">' + bytes(bytesOf[x.namespace]) + '</td>'
-      + '<td>' + ts(x.createdAt) + '</td><td>' + iso(x.expiresAt) + '</td>'
-      + '<td>' + (x.pinned ? '是' : '否') + '</td>'
-      + '<td class="ns" title="' + x.namespace + '">' + x.namespace.slice(0, 46) + (x.namespace.length > 46 ? '…' : '') + '</td></tr>';
-  }).join('') : '<tr><td colspan="11" class="muted">还没有作用域</td></tr>';
+  const byNs = {}; (d.spaces || []).forEach((x) => { byNs[x.namespace] = x.totalBytes; });
+  ROWS = ((s.body && s.body.scopes) || []).map((x) => Object.assign({}, x, { totalBytes: byNs[x.namespace] }));
+  if (s.status === 401) setErr('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
+  renderScopes();
 }
 async function action(name) {
   const r = await api('/v1/admin/' + name, { method: 'POST', body: '{}' });
-  setMsg(r.status === 200 ? name + ' ok' : name + ' 失败（' + r.status + '）');
+  toast(r.status === 200 ? name + ' 执行成功' : name + ' 失败（' + r.status + '）');
   setTimeout(refresh, 300);
 }
 $('#btn-refresh').onclick = refresh;
 $('#btn-pause').onclick = () => action('pause');
 $('#btn-resume').onclick = () => action('resume');
 $('#btn-sweep').onclick = () => action('sweep');
-refresh(); setInterval(refresh, 15000);
+$('#filter').oninput = renderScopes;
+let timer = setInterval(() => { if ($('#auto').checked) refresh(); }, 15000);
+refresh();
 </script>
 </body>
 </html>
