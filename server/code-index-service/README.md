@@ -84,7 +84,22 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
-| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、命名空间概览；`spaces[]` 带 `scope`，顶层 `scopes:{total,byKind}`） |
+| `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**未带 key 时只返回最小探活字段**；`/`、`/log` 需鉴权（若设了 `API_KEY`） |
+| `GET /admin` | **后台查看页**（单文件 HTML，免鉴权；数据经上述 API 拉取，页面里填 API Key 即可）。支持查看运行时/治理/限额/作用域表，以及暂停/恢复嵌入、立即清扫 |
+
+### 鉴权（`API_KEY`）与后台页面
+
+设了 `API_KEY` 后：**所有 `POST`/`DELETE` 与数据类 `GET`（`/`、`/log`、`/v1/scopes`、`/v1/repos/*/status` 等）都要求**：
+
+```
+Authorization: Bearer <API_KEY>
+```
+
+免鉴权白名单只有两个：`GET /health`（未带 key 时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）和 `GET /admin`（页面壳，不含数据）。
+
+- 客户端：插件 `remote.apiKey`、review-service `INDEX_API_KEY`；
+- 管理页：浏览器打开 `http://<host>:18000/admin`，首次拉数据会弹窗要求输入 key，存在该浏览器的 `localStorage`（`dshAdminKey`），不会回传服务端之外的地方；
+- 页面只做「查看 + 暂停/恢复/清扫」，删除作用域等破坏性操作仍走 curl/API。
 
 **`sync` 的三个分支**：`repoState` 与库中一致 → 直接 `unchanged`（1 个 RTT、0 字节正文）；
 `mode:'diff'` 且 `revision` 不是服务端当前值 → `409 {needFull:true}`（客户端改发全量自愈）；
@@ -318,7 +333,7 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 | `MAX_SEARCH_SCOPES` | `4` | 单次检索最多作用域数，超限 400 |
 | `WARMUP` | `1` | 启动后台预热（嵌入会话、重排内核、最大命名空间的 kNN 矩阵与计数）：把"重启后第一个查询"从 2.4 s 降到 **25 ms**；`0` 关闭 |
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
-| `API_KEY` | 空 | 设了则所有 `POST` 要求 `Authorization: Bearer` |
+| `API_KEY` | 空 | 设了则所有写操作与数据类 GET 要求 `Authorization: Bearer`；`/health`（最小字段）与 `/admin`（页面壳）免鉴权 |
 | `FAKE_EMBED` | 空 | `1` = 不加载模型（自测用） |
 | `HOST_PORT` | `18000` | **compose 专用**：宿主机端口（只绑 127.0.0.1） |
 | `FLAVOR` | `cpu` | **构建参数**：`cpu` / `gpu`（gpu 装 CUDA 12 的 cublas/cudnn/curand/cufft） |
