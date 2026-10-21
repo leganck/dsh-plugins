@@ -483,7 +483,11 @@ class Worker(threading.Thread):
         cfg = self.cfg
         scoped = bool(scope)
         now = time.monotonic()
-        if now - self._sync_last.get(state_key, 0.0) < cfg.index_sync_min_interval:
+        # 注意：不能用 "now - 0.0 < interval" 判断。刚启动的机器（CI runner / 新容器）
+        # time.monotonic() 只有几秒，会把**首次**同步误判成"刚同步过"而直接跳过
+        # （实测：GitHub Actions 上 base/head 双作用域同步全被节流，sync 调用为 0）。
+        last = self._sync_last.get(state_key)
+        if last is not None and now - last < cfg.index_sync_min_interval:
             return self._stored_namespace(state, part, scoped)
         self._sync_last[state_key] = now
 
