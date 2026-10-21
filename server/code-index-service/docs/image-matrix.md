@@ -47,6 +47,28 @@ gh api /users/leganck/packages/container/dsh-embed/versions --paginate \
   | xargs -I{} gh api -X DELETE /users/leganck/packages/container/dsh-embed/versions/{}
 ```
 
+## 已执行清理（2026-10-21）
+
+用 `.github/workflows/cleanup-image-tags.yml`（默认 dry-run，只删"所有标签都命中删除规则"的版本）执行：
+
+| 指标 | 清理前 | 清理后 |
+|---|---|---|
+| `dsh-embed` tag 数 | 26 | **16** |
+| 删除的版本 | — | 4 个（jina 相关，共 10 个 tag：`sha-*-jina-*`、`jina-cpu/gpu`、`latest-jina-*`、`dsh-embed-jina-v*`） |
+
+剩余 16 个 tag 的构成：
+
+```
+latest-cpu / latest-gpu / latest-cpu-rerank / latest-gpu-rerank   # 通道（rerank 待下线）
+base-cpu / base-gpu                                                # 运行时底座
+server-v0.1.0-{cpu,gpu,cpu-rerank,gpu-rerank}                       # 应用版本 pin
+server-v0.1.0-base-{cpu,gpu}                                        # 底座版本 pin
+sha-1c212a5-{cpu,gpu,cpu-rerank,gpu-rerank}                         # 与 server-v0.1.0-* 同一版本，无法单独删
+```
+
+> `sha-1c212a5-*` 与 `server-v0.1.0-*` 指向同一个 image version（GHCR 只能按 version 删，不能单删 tag）。
+> 要彻底去掉它们只能连同 `server-v0.1.0-*` 一起删；当前保留作为该版本的追溯点。
+
 ## 部署示例
 
 ```bash
