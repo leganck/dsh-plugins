@@ -176,6 +176,8 @@ ADMIN_HTML = """<!doctype html>
 <script>
 const $ = (s) => document.querySelector(s);
 let KEY = localStorage.getItem('dshAdminKey') || '';
+// 支持用 #key=xxx 打开（书签/一次性入口）：只存 localStorage 并清掉 hash，key 不会发给服务端
+(() => { const m = location.hash.match(/[#&]key=([^&]+)/); if (m) { KEY = decodeURIComponent(m[1]); localStorage.setItem('dshAdminKey', KEY); history.replaceState(null, '', location.pathname); } })();
 const fmt = (n) => n === null || n === undefined ? '—' : (typeof n === 'number' ? n.toLocaleString() : String(n));
 const ts = (s) => !s ? '—' : new Date((typeof s === 'number' ? s * 1000 : s)).toLocaleString('zh-CN', { hour12: false });
 const iso = (n) => !n ? '永不' : ts(n);
