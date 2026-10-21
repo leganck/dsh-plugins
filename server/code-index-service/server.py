@@ -240,7 +240,8 @@ ADMIN_HTML = """<!doctype html>
         <div><b>占用</b>：该作用域归属血统（同一仓库）的正文 + 向量总字节，按内容哈希共享，不是每个快照单独一份。</div>
         <div><b>创建 / 过期</b>：快照创建时间与 TTL。main/legacy 永不过期，branch/pr/worktree 到期后被 janitor 自动删除。</div>
         <div><b>保护（pinned）</b>：钉住的作用域不会被 janitor 回收；legacy 迁移时自动钉住。</div>
-        <div><b>命名空间</b>：检索与同步的唯一键（<span class="mono">repoId@chunkFp#kind:ref</span>），点右侧图标可复制。</div>
+        <div><b>仓库（名称 / ID）</b>：名称来自客户端同步时上报的仓库名；ID 是 <span class="mono">sha1(归一化 git origin URL)</span> 前 12 位——同一仓库的所有克隆/分支共享同一个 ID，换机器也不变；仓库没有 origin 时退回“本地路径哈希”，所以看起来是一串 key。</div>
+        <div><b>命名空间</b>：检索与同步的唯一键，结构是 <span class="mono">repoId@chunkFp#kind:ref</span>。其中 <span class="mono">chunkFp</span> 是切块配置的 sha256 前 8 位——切块策略变了就得换命名空间，避免新旧块混写；页面上只显示这 8 位，点 ⧉ 可复制完整值。</div>
         <div><b>kNN 缓存</b>：服务端把某作用域的向量读进内存矩阵做精确检索；LRU 上限由 KNN_MAX_BYTES 控制。</div>
         <div><b>限速 / batch</b>：后台嵌入每秒最多处理多少块、每次推理批大小（保护 CPU/GPU 不被打满）。</div>
         <div><b>保留期</b>：作用域删除后，无人引用的正文/向量保留多少天才被 GC（不动仍被别的作用域引用的内容）。</div>
@@ -277,6 +278,11 @@ function ttl(expiresAt) {
   if (days < 1) return Math.max(1, Math.round(days * 24)) + ' 小时内';
   return Math.round(days) + ' 天';
 }
+function friendlyNs(x) {
+  const fp = String(x.chunkFp || '').slice(0, 8);
+  const scope = x.kind === 'legacy' ? 'legacy' : ('#' + x.kind + (x.ref ? ':' + x.ref : ''));
+  return scope + ' <span class="faint" style="font-size:11px">· fp ' + fp + '</span>';
+}
 function chip(kind) {
   const k = String(kind || 'legacy');
   return '<span class="kind ' + k + '">' + k + '</span>';
@@ -307,7 +313,9 @@ function renderScopes() {
     return '<tr>'
       + '<td>' + chip(x.kind) + '</td>'
       + '<td>' + (x.ref ? x.ref : '<span class="faint">—</span>') + '</td>'
-      + '<td class="mono">' + (x.repoId || '—') + '</td>'
+      + '<td>' + (x.repoName
+        ? '<span class="repo">' + x.repoName + '</span> <span class="faint mono" style="font-size:11px">' + (x.repoId || '') + '</span>'
+        : '<span class="mono">' + (x.repoId || '—') + '</span>') + '</td>'
       + '<td class="num">' + fmtNum(x.chunks) + '</td>'
       + '<td class="num">' + fmtNum(x.vectors) + '</td>'
       + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
@@ -315,7 +323,7 @@ function renderScopes() {
       + '<td title="' + absTime(x.createdAt) + '">' + rel(x.createdAt) + '</td>'
       + '<td' + (x.expiresAt ? ' title="' + absTime(x.expiresAt) + '"' : '') + '>' + ttl(x.expiresAt) + '</td>'
       + '<td>' + (x.pinned ? '<span class="chip ok">已钉住</span>' : '<span class="faint">—</span>') + '</td>'
-      + '<td><span class="ns" title="' + x.namespace + '">' + x.namespace + '</span> '
+      + '<td><span class="ns" title="' + x.namespace + '">' + friendlyNs(x) + '</span> '
       + '<button class="copy" data-ns="' + x.namespace + '" title="复制命名空间">⧉</button></td>'
       + '</tr>';
   }).join('');
@@ -733,6 +741,7 @@ def repo_status(namespace):
         "namespace": namespace,
         "lineage": repo["lineage_id"],
         "repoId": repo["repo_id"],
+        "repoName": repo.get("repo_name"),
         "chunkFp": repo["chunk_fp"],
         "revision": repo["revision"],
         "tag": repo["tag"],
@@ -770,6 +779,7 @@ def scope_list(repo_id=None, kind=None):
             "kind": scope.get("kind") or "legacy",
             "ref": scope.get("ref"),
             "repoId": it["repo_id"],
+            "repoName": it.get("repo_name"),
             "chunkFp": it["chunk_fp"],
             "revision": it["revision"],
             "commit": scope.get("commit"),
