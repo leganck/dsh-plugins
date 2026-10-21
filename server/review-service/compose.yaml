@@ -1,0 +1,35 @@
+# 默认部署：拉 GHCR 镜像 + 用 .env 配置。
+# 只绑 127.0.0.1：GitLab 在内网直连，或由反代（Traefik/Nginx）转发 webhook。
+services:
+  dsh-review:
+    image: ${IMAGE:-ghcr.io/leganck/dsh-review:latest}
+    container_name: dsh-review
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HOST_PORT:-18001}:8000"
+    env_file:
+      - .env
+    environment:
+      # 下面这些可以在 .env 里覆盖；这里列出来是让 `docker compose config` 一眼看清关键项
+      DATA_DIR: /data
+      WORKERS: ${WORKERS:-2}
+      DRY_RUN: ${DRY_RUN:-0}
+      GIT_STRATEGY: ${GIT_STRATEGY:-clone}
+      GRAPH_ENABLED: ${GRAPH_ENABLED:-1}
+      INDEX_SYNC: ${INDEX_SYNC:-1}
+    volumes:
+      - review-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  review-data:
