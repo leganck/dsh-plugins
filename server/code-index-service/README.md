@@ -82,6 +82,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/scopes/{ns}/pin` | `{pinned, ttlDays?}` → `{namespace, pinned, expiresAt}`（`ttlDays:null` = 永久） |
 | `DELETE /v1/scopes/{ns}` | 删 scope + 对血统做 retention GC → `{deleted, chunks}`（幂等；未知 ns → `{deleted:false}`） |
 | `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
+| `GET /v1/admin/models`、`POST /v1/admin/models/{name}/download` `/cancel` | **模型下载**（后台页面「模型下载」卡片）：进度/速度、取消、失败重试、强制重传、断点续传、sha256 校验 |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
 | `GET /` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/`、`/log` 需 Bearer 或后台 Basic |
@@ -103,6 +104,10 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - 页面只做「查看 + 暂停/恢复/清扫 + 检索测试」，删除作用域等破坏性操作仍走 curl/API。
 - **检索测试**：选一个作用域、输入 query、点「检索」，直接调 `/v1/search` 展示命中 `path:start-end`、score、embed/kNN 耗时与覆盖率；后台 Basic 即可调用（`/v1/search` 对 Basic 与 Bearer 都开放）。
 - **模型与向量标签**：页面显示当前模型 tag 以及所有 tag 的条数/占用，并提供「清理非当前 tag 的向量」。
+- **模型下载**：页面「模型下载」卡片可下载预置模型（如 `jina-v2-base-code`）到 `/data/models/`，实时显示进度/速度，
+  支持取消、失败重试、**强制重传**、断点续传与 sha256 校验；文件在 `/data` 卷里，容器重启不丢。
+  **启用需要重启容器**（`MODEL_DIR` 指向下载目录 + 对应环境变量，jina 见 `docs/jina-v2.md`）。
+  落盘根目录用 `MODELS_DIR` 改；扩展预置模型用 `MODEL_CATALOG`（JSON，字段见 `model_downloader.DEFAULT_CATALOG`）。
 
 ### 换模型后还是同一个数据库吗？
 
@@ -356,6 +361,8 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MODEL_DIR` / `MODEL_NAME` | `/app/model` / 目录名推断 | 嵌入模型；`MODEL_NAME` 参与 tag 计算 |
+| `MODELS_DIR` | `/data/models` | 后台「模型下载」的落盘根目录（在 `/data` 卷内，重启不丢） |
+| `MODEL_CATALOG` | 空 | 可选 JSON：扩展/覆盖预置模型目录（字段见 `model_downloader.DEFAULT_CATALOG`） |
 | `RERANK_MODEL_DIR` | `/app/model-rerank` | 重排模型；缺文件 → `rerank_ready=false`（客户端直接回退本机） |
 | `SERVER_DB` | `<app>/out/index.db` | 索引库 |
 | `EMBED_RATE` / `EMBED_BATCH` | `10` / `8` | 后台嵌入限流与批大小 |
