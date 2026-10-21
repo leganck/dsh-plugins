@@ -551,7 +551,7 @@ function renderOverview() {
   $('#btn-purge-tags').disabled = !tags.some((t) => t.tag !== d.tag && t.vectors > 0);
   kv($('#auth-kv'), [
     ['API 鉴权', auth.authRequired ? '<span class="chip ok"><span class="dot"></span>已强制 Bearer Key</span>' : '<span class="chip warn"><span class="dot"></span>未开启（任何人可检索）</span>'],
-    ['Key 数量', fmtNum(auth.keys) + ' <span class="faint">（含 legacy）</span>'],
+    ['Key 数量', fmtNum((auth.keys || 0) + (auth.legacyKey ? 1 : 0)) + ' <span class="faint">（含 env legacy）</span>'],
     ['管理员密码', auth.adminPasswordSet ? '<span class="chip ok"><span class="dot"></span>已设置</span>' : '<span class="chip warn"><span class="dot"></span>未设置</span>'],
     ['登录方式', '<span class="faint">登录页 → HttpOnly Cookie（12h）；也支持 HTTP Basic 与 admin 角色 Key</span>'],
   ]);
@@ -1642,8 +1642,12 @@ class Handler(BaseHTTPRequestHandler):
     def _redirect(self, location):
         return self._send(302, {"ok": True}, headers={"Location": location})
 
+    def _client_ip(self):
+        xff = (self.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        return xff or self.client_address[0]
+
     def _login(self):
-        ip = self.client_address[0]
+        ip = self._client_ip()
         if self._login_limited(ip):
             return self._send(429, {"error": "too-many-attempts", "hint": "5 分钟内失败 5 次，请稍后再试"})
         try:
@@ -1727,7 +1731,7 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
-        if path in ("/admin", "/admin/"):
+        if path in ("/admin", "/admin/", "/admin/login"):
             # 未登录 → 登录页（不再弹浏览器 Basic 框）；登录后 → 控制台
             if not self._admin_ok():
                 return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
@@ -1839,7 +1843,8 @@ class Handler(BaseHTTPRequestHandler):
             rerank_ready=state["rerank_ready"],
             rerank_err=state["rerank_err"],
             rerank_model_dir=ACTIVE["rerank_dir"],
-            admin={"keys": adm.count_keys(), "authRequired": self.auth_required(),
+            admin={"keys": adm.count_keys(), "legacyKey": bool(API_KEY),
+                   "authRequired": self.auth_required(),
                    "adminPasswordSet": bool(ADMIN_PASSWORD) or adm.has_admin_password()},
         )
         info.update(state["rerank_info"])
