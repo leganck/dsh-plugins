@@ -214,6 +214,24 @@ ADMIN_HTML = """<!doctype html>
     <h2>存储与限额</h2>
     <div class="kv" id="limits"></div>
   </section>
+  <section class="card">
+    <h2>模型与向量标签</h2>
+    <div class="kv" id="tags"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id="btn-purge-tags">清理非当前 tag 的向量</button>
+      <span class="faint" style="font-size:12px">同一 SQLite 库；换模型只新增 tag，旧 tag 占空间需手动清</span>
+    </div>
+  </section>
+  <section class="card wide">
+    <h2>检索测试</h2>
+    <div class="toolbar">
+      <select id="test-ns" style="max-width:380px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:12.5px"></select>
+      <input id="test-q" placeholder="输入查询，例如：订单支付后的库存扣减" style="flex:1;min-width:240px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:12.5px">
+      <input id="test-k" type="number" value="5" min="1" max="20" title="返回条数" style="width:64px;padding:6px 8px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
+      <button class="primary" id="btn-test">检索</button>
+    </div>
+    <div id="test-out" class="faint" style="font-size:12.5px">选择作用域、输入查询后点「检索」；结果来自服务端 kNN（附覆盖率与耗时）。</div>
+  </section>
   <section class="card wide">
     <h2>作用域（快照）<span class="muted" id="scope-count" style="font-weight:400"> </span></h2>
     <div class="toolbar">
@@ -255,6 +273,7 @@ ADMIN_HTML = """<!doctype html>
 const $ = (s) => document.querySelector(s);
 // 后台鉴权走 HTTP Basic：浏览器会弹一次登录框（ADMIN_USER / ADMIN_PASSWORD），之后同源请求自动带 Authorization。
 const fmtNum = (n) => (n === null || n === undefined) ? '—' : Number(n).toLocaleString();
+const escapeHtml = (v) => String(v).replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[c]));
 function fmtBytes(n) {
   if (n === null || n === undefined) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = Number(n);
@@ -306,6 +325,12 @@ function renderScopes() {
   const rows = ROWS.filter((x) => !q || [x.kind, x.ref, x.repoId, x.namespace].some((v) => String(v || '').toLowerCase().includes(q)));
   $('#filtered').textContent = q ? '匹配 ' + rows.length + ' / ' + ROWS.length : '';
   $('#scope-count').textContent = '(' + ROWS.length + ')';
+  const sel = $('#test-ns');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = ROWS.map((x) => '<option value="' + x.namespace + '">' + escapeHtml(x.kind + (x.ref ? ':' + x.ref : '') + ' · ' + (x.repoName || x.repoId)) + '</option>').join('');
+    if (cur && ROWS.some((x) => x.namespace === cur)) sel.value = cur;
+  }
   if (!rows.length) { $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">' + (ROWS.length ? '没有匹配的作用域' : '还没有作用域') + '</td></tr>'; return; }
   $('#scopes').innerHTML = rows.map((x) => {
     const pct = Math.round((x.coverage || 0) * 100);
@@ -374,6 +399,12 @@ async function refresh() {
     ['作用域数 / 上限', fmtNum(sc.total) + ' / ' + fmtNum(L.maxScopes), JSON.stringify(sc.byKind || {})],
     ['单次检索作用域', '≤ ' + fmtNum(L.maxSearchScopes), 'MAX_SEARCH_SCOPES'],
   ]);
+  const tags = d.tags || [];
+  kv($('#tags'), tags.length ? tags.map((t) => [
+    t.tag === d.tag ? '当前模型' : '旧 tag',
+    '<span class="mono">' + t.tag + '</span> <span class="faint">' + fmtNum(t.vectors) + ' 条 · ' + fmtBytes(t.bytes) + '</span>',
+  ]) : [['—', '<span class="faint">还没有向量</span>']]);
+  $('#btn-purge-tags').disabled = !tags.some((t) => t.tag !== d.tag && t.vectors > 0);
   const byNs = {}; (d.spaces || []).forEach((x) => { byNs[x.namespace] = x.totalBytes; });
   ROWS = ((s.body && s.body.scopes) || []).map((x) => Object.assign({}, x, { totalBytes: byNs[x.namespace] }));
   if (s.status === 401) setErr('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
@@ -384,7 +415,33 @@ async function action(name) {
   toast(r.status === 200 ? name + ' 执行成功' : name + ' 失败（' + r.status + '）');
   setTimeout(refresh, 300);
 }
+async function searchTest() {
+  const ns = $('#test-ns').value;
+  const q = $('#test-q').value.trim();
+  const k = Math.max(1, Math.min(20, Number($('#test-k').value) || 5));
+  const out = $('#test-out');
+  if (!ns || !q) { out.innerHTML = '<span style="color:var(--warn)">请选择作用域并输入查询</span>'; return; }
+  out.textContent = '检索中…';
+  const r = await api('/v1/search', { method: 'POST', body: JSON.stringify({ namespace: ns, query: q, k }) });
+  if (r.status !== 200) { out.innerHTML = '检索失败：' + escapeHtml(r.body?.error || r.status); return; }
+  const d = r.body, ms = d.ms || {};
+  const head = '命中 ' + (d.hits || []).length + ' 条 · embed ' + ms.embed + ' ms · kNN ' + ms.knn + ' ms · 覆盖率 ' + Math.round((d.coverage || 0) * 100) + '%';
+  out.innerHTML = '<div class="faint" style="margin-bottom:6px">' + head + '</div>'
+    + ((d.hits || []).map((h) => '<div style="padding:4px 0;border-bottom:1px solid var(--line)">'
+      + '<span class="mono">' + escapeHtml(h.path) + ':' + h.start + '-' + h.end + '</span> '
+      + '<span class="faint">score ' + h.score + '</span></div>').join('')
+      || '<span class="faint">没有命中（可能该作用域还没嵌入完）</span>');
+}
+async function purgeTags() {
+  if (!confirm('删除所有「非当前模型 tag」的向量？正文不受影响；删除后旧模型无法再检索。')) return;
+  const r = await api('/v1/admin/purge-tags', { method: 'POST', body: '{}' });
+  toast(r.status === 200 ? '已清理旧 tag 向量：' + (r.body?.deleted ?? 0) : '清理失败（' + r.status + '）');
+  setTimeout(refresh, 300);
+}
 $('#btn-refresh').onclick = refresh;
+$('#btn-test').onclick = searchTest;
+$('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
+$('#btn-purge-tags').onclick = purgeTags;
 $('#btn-pause').onclick = () => action('pause');
 $('#btn-resume').onclick = () => action('resume');
 $('#btn-sweep').onclick = () => action('sweep');
@@ -998,6 +1055,7 @@ class Handler(BaseHTTPRequestHandler):
             info["knn"] = knn.stats()
         if store:
             info["spaces"] = store.scope_overview()
+            info["tags"] = store.tag_stats()
             info["scopes"] = store.scope_stats()
             info["db"] = DB_PATH
         info["limits"] = {
@@ -1014,7 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
         # /v1/admin/* 是后台治理接口：Basic（页面）或 Bearer（脚本）都行；其余索引/检索接口只认 Bearer
-        is_admin = path.startswith("/v1/admin/")
+        # /v1/search 也允许后台 Basic（admin 页面的「检索测试」用），索引客户端仍可用 Bearer
+        is_admin = path.startswith("/v1/admin/") or path == "/v1/search"
         if not (self._admin_ok() if is_admin else self._api_ok()):
             return self._unauthorized(basic=bool(ADMIN_PASSWORD) and is_admin)
         if not state["ready"]:
@@ -1218,6 +1277,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, store.gc(lineage, req.get("retentionDays", RETENTION_DAYS)))
                 elif action == "sweep":
                     return self._send(200, run_sweep())
+                elif action == "purge-tags":
+                    # 换模型后旧 tag 的向量仍占空间：删掉"非当前 tag"的向量（正文/其他 tag 不动）
+                    drop = req.get("tag")
+                    if drop:
+                        result = store.purge_tag_vectors(drop_tag=str(drop))
+                    else:
+                        result = store.purge_tag_vectors(keep_tag=state["info"].get("tag"))
+                    knn.invalidate()
+                    result["tags"] = store.tag_stats()
+                    return self._send(200, result)
                 else:
                     return self._send(404, {"error": "unknown admin action"})
                 return self._send(200, governor.status())
