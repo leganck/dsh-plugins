@@ -12,6 +12,12 @@ name: publish-image
 #               latest-cpu / latest-gpu / latest-cpu-rerank / latest-gpu-rerank
 #
 # 发布门禁：推之前必须先在容器里跑 `FAKE_EMBED=1 python selftest.py` 通过。
+#
+# 标签策略（2026-10 起，见 docs/image-matrix.md）：
+#   - 通道：latest-{cpu,gpu}（模型内置）、base-{cpu,gpu}（运行时）
+#   - 版本 pin：server-vX.Y.Z-<变体>
+#   - **不再推 sha-***（每次构建都涨、价值低）；精确版本请用 server-v* 或 digest
+#   - latest-*-rerank 变体 **deprecated**：重排模型改为挂载（见 compose.models.yaml），保留 1 个版本周期
 
 on:
   push:
@@ -167,7 +173,6 @@ jobs:
           if [ "${{ needs.meta.outputs.version }}" != "edge" ]; then
             refs="$refs server-v${{ needs.meta.outputs.version }}-$suffix"
           fi
-          refs="$refs sha-${GITHUB_SHA::7}-$suffix"
           for r in $refs; do
             docker tag dsh-embed:smoke "$IMAGE:$r"
             docker push "$IMAGE:$r"

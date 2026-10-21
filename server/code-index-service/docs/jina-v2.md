@@ -78,22 +78,36 @@ python scripts/export-jina-onnx.py \
   --src jinaai/jina-embeddings-v2-base-code --out models/model-jina
 ```
 
-## 构建镜像
+## 部署（挂载到通用镜像，推荐）
+
+> **jina 不再单独发布镜像**（见 [`docs/image-matrix.md`](image-matrix.md)）。
+> 现有 `latest-jina-*` 标签只作冻结兼容；新部署请用 `base-*`/`latest-*` + 挂载。
 
 ```bash
-node scripts/fetch-jina-model.mjs
+node scripts/fetch-jina-model.mjs          # → models/model-jina/（Release 资产 + sha256 校验）
+
+# docker
+docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
+  -v dsh-embed-data:/data \
+  -v "$PWD/models/model-jina:/models/model:ro" \
+  -e MODEL_NAME=jina-embeddings-v2-base-code \
+  -e POOLING=auto -e QUERY_PREFIX= -e PAD_TOKEN='<pad>' -e PAD_ID=1 -e SEP_ID=0 \
+  ghcr.io/leganck/dsh-embed:base-gpu
+
+# compose
+docker compose -f compose.yaml -f compose.gpu.yaml -f compose.jina.yaml up -d
+```
+
+离线/内网需要"模型内置"时，可本地构建（不推 GHCR）：
+
+```bash
 docker buildx build --build-context models=./models \
   --build-arg FLAVOR=gpu --target embed-jina -t dsh-embed:jina-gpu .
 ```
 
-CPU 版把 `FLAVOR=gpu` 换成 `cpu`。产物标签：`ghcr.io/leganck/dsh-embed:jina-gpu` / `jina-cpu`。
+## 与 bge 的差异（全部由环境变量表达）
 
-发布流水线：`.github/workflows/publish-jina-image.yml`
-（tag `dsh-embed-jina-v*` 或手动 dispatch；构建前从同名 Release 拉模型并校验 sha256）。
-
-## 运行（与 bge 的差异全部由镜像 ENV 表达）
-
-| 环境变量 | bge 镜像 | jina 镜像 | 原因 |
+| 环境变量 | bge 默认 | jina（挂载时注入） | 原因 |
 |---|---|---|---|
 | `MODEL_NAME` | 空（推导为 bge-base-zh-v1.5） | `jina-embeddings-v2-base-code` | 向量 tag 可读 |
 | `POOLING` | `cls` | `auto` | jina 输出已是 2D pooled |
@@ -102,9 +116,6 @@ CPU 版把 `FLAVOR=gpu` 换成 `cpu`。产物标签：`ghcr.io/leganck/dsh-embed
 | `SEP_ID` | 102（BERT `[SEP]`） | 0（禁用） | jina 是 Llama 词表，没有 102 这个特殊 token |
 
 ```bash
-docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
-  -v dsh-embed-data:/data --gpus all \
-  ghcr.io/leganck/dsh-embed:jina-gpu
 curl -s localhost:18000/health | python -m json.tool
 ```
 
@@ -112,7 +123,7 @@ curl -s localhost:18000/health | python -m json.tool
 
 ## 切回 bge
 
-镜像/`MODEL_DIR` 换回 `latest-gpu` 即可。注意 **tag 变化会触发客户端全量重嵌**（这是预期行为）：
+换回 `latest-gpu`（bge 内置）或改挂 bge 模型目录即可。注意 **tag 变化会触发客户端全量重嵌**（这是预期行为）：
 两套模型不能共用同一份索引。
 
 ## 工具链与导出校验
