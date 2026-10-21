@@ -10,17 +10,29 @@
   ⑪ 暂停/恢复/限速                              ⑫ gzip 请求体
   ⑬ 未知命名空间 → 404                           ⑭ /health 自述
 
+档 3（快照作用域）：
+  ⑮ namespace 规范夹具（scope_format.json 三组 cases）
+  ⑯ scope 注册 / resolve / 列表 / status / health 汇总
+  ⑰ legacy 命名空间 pinned，不被 sweep
+  ⑱ TTL 过期 → sweep 删除 + /health.spaces 消失
+  ⑲ DELETE scope 后 GC 不误删仍被其他 scope 引用的内容
+  ⑳ 多作用域：按 hash 去重、来源、加权 RRF、byScope、旧单 ns 等价
+  ㉑ MAX_SCOPES 配额 → 507
+  ㉒ 旧 DB 启动即幂等迁移（legacy → pinned=1，created_at 回填）
+
 跑法：python selftest.py
 """
 import gzip
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # Windows 控制台默认 GBK，打不出 ✅/❌ → 强制 UTF-8（否则测试自己在打印时崩掉）
@@ -38,10 +50,18 @@ os.environ.update(
     EMBED_RATE="50",          # 自测要快；限流本身另有用例覆盖
     EMBED_BATCH="4",
     RETENTION_DAYS="0",
+    # 档 3 的默认值钉死，避免外部环境变量让自测结果漂移
+    SCOPE_TTL_BRANCH="30",
+    SCOPE_TTL_PR="14",
+    SCOPE_TTL_WORKTREE="1",
+    SCOPE_SWEEP="1",
+    MAX_SCOPES="200",
+    MAX_SEARCH_SCOPES="4",
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
+import index_store as istore  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -85,14 +105,19 @@ def sync(ns, payload, gz=False):
     return req("POST", f"/v1/repos/{ns}/sync", payload, gz=gz)
 
 
+def nsq(ns):
+    """namespace 进 URL path 必须先 percent-encode（canonical ns 含 '#'，否则会被当 fragment 截断）。"""
+    return urllib.parse.quote(str(ns), safe="")
+
+
 def wait_vectors(ns, want, timeout=20):
     t0 = time.time()
     while time.time() - t0 < timeout:
-        st, body = req("GET", f"/v1/repos/{ns}/status")
+        st, body = req("GET", f"/v1/repos/{nsq(ns)}/status")
         if body.get("vectors", 0) >= want:
             return body
         time.sleep(0.1)
-    return req("GET", f"/v1/repos/{ns}/status")[1]
+    return req("GET", f"/v1/repos/{nsq(ns)}/status")[1]
 
 
 def main():
@@ -246,6 +271,269 @@ def main():
     check("health 报 governor", h.get("governor", {}).get("rate") is not None, h.get("governor"))
     check("health 报存储上界", h.get("limits", {}).get("maxVectorsPerLineage") == 500000, h.get("limits"))
     check("health 列命名空间", any(s["namespace"] == NS for s in h.get("spaces", [])), len(h.get("spaces", [])))
+
+    # ================================================================ 档 3：作用域（快照）
+    def scope_sync(ns, files_map, state, scope=None, repo_id="scopedemo", url=None, chunk_fp="fp1"):
+        payload = {
+            "repoId": repo_id,
+            "chunkFp": chunk_fp,
+            "url": url or URL,
+            "repoState": state,
+            "mode": "full",
+            "upsert": [
+                {"path": p, "hash": "file-" + p,
+                 "chunks": [{"hash": h, "start": s, "end": e} for h, _b, s, e in cs]}
+                for p, cs in files_map.items()
+            ],
+            "remove": [],
+        }
+        if scope:
+            payload["scope"] = scope
+        return req("POST", f"/v1/repos/{nsq(ns)}/sync", payload)
+
+    def upload(ns, files_map):
+        bodies = [{"hash": h, "body": b} for cs in files_map.values() for h, b, _s, _e in cs]
+        return req("POST", f"/v1/repos/{nsq(ns)}/chunks", {"bodies": bodies})[1]
+
+    print("\n[15] namespace 规范夹具（scope_format.json）")
+    fixture_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scope_format.json")
+    if not os.path.exists(fixture_path):
+        # 显式失败而不是静默跳过：容器发布门禁也要能发现"夹具没被打包进镜像"
+        check("scope_format.json 可用", False, f"文件不存在：{fixture_path}（Dockerfile COPY 需包含它）")
+    else:
+        with open(fixture_path, encoding="utf-8") as f:
+            fixture = json.load(f)
+        bad = []
+        for c in fixture["cases"]:
+            got = istore.canonical_namespace(c["repoId"], c["chunkFp"], c["kind"], c["ref"])
+            if got != c["expect"]:
+                bad.append((c["expect"], got))
+        check("cases：7 条 canonical namespace 全一致", not bad, bad[:2])
+        bad = []
+        for c in fixture["invalid_cases"]:
+            try:
+                istore.canonical_namespace(c["repoId"], c["chunkFp"], c["kind"], c["ref"])
+                bad.append((c["reason"], "没有报错"))
+            except istore.ScopeFormatError as e:
+                if e.reason != c["reason"]:
+                    bad.append((c["reason"], e.reason))
+        check("invalid_cases：6 条 reason 全对", not bad, bad[:2])
+        bad = [c for c in fixture["legacy_cases"] if istore.legacy_namespace(c["namespace"]) != c["expect"]]
+        check("legacy_cases：原样保留不规范化", not bad, bad[:1])
+
+    print("\n[16] scope 注册 / resolve / 列表 / status / health")
+    REPO = "scopedemo"
+    URL2 = "https://git.example.com/team/scopedemo.git"
+    NS_BR = istore.canonical_namespace(REPO, "fp1", "branch", "feat/x")
+    st, sb = scope_sync(NS_BR, {"d.java": [("hb1", "class D { }", 1, 3)]}, "sb-1",
+                        {"kind": "branch", "ref": "feat/x", "commit": "c0ffee"}, repo_id=REPO, url=URL2)
+    check("带 scope 的 sync 成功", st == 200, (st, sb))
+    check("响应回服务端 canonical namespace", sb.get("namespace") == NS_BR, sb.get("namespace"))
+    st, res = req("POST", "/v1/scopes/resolve",
+                  {"repoId": REPO, "chunkFp": "fp1", "kind": "branch", "ref": "feat/x"})
+    check("resolve 命中已存在 scope", st == 200 and res.get("exists") is True and res.get("namespace") == NS_BR, res)
+    st, res_bad = req("POST", "/v1/scopes/resolve",
+                      {"repoId": REPO, "chunkFp": "fp1", "kind": "pr", "ref": "abc"})
+    check("resolve 非法 ref → 400 bad-scope", st == 400 and res_bad.get("reason") == "pr-ref-not-numeric", res_bad)
+    st, lst = req("GET", f"/v1/scopes?repoId={REPO}&kind=branch")
+    item = next((x for x in lst.get("scopes", []) if x["namespace"] == NS_BR), None)
+    check("列表字段完整（kind/ref/TTL/coverage）",
+          item is not None and item.get("kind") == "branch" and item.get("ref") == "feat/x"
+          and item.get("expiresAt") and (item.get("ttlRemaining") or 0) > 0 and item.get("pinned") is False,
+          item)
+    st, sst = req("GET", f"/v1/repos/{nsq(NS_BR)}/status")
+    check("status 带 scope 元数据",
+          sst.get("scope", {}).get("kind") == "branch" and sst["scope"].get("ref") == "feat/x"
+          and sst["scope"].get("commit") == "c0ffee", sst.get("scope"))
+    st, hh = req("GET", "/health")
+    check("health 顶层 scopes 汇总", hh.get("scopes", {}).get("byKind", {}).get("branch", 0) >= 1
+          and hh["scopes"].get("total", 0) >= 1, hh.get("scopes"))
+
+    print("\n[17] legacy 命名空间 pinned，janitor 不删")
+    LEG = "legacy-demo@fp1"
+    st, lg = req("POST", f"/v1/repos/{nsq(LEG)}/sync", {
+        "repoId": REPO, "chunkFp": "fp1", "url": URL2, "repoState": "lg-1", "mode": "full",
+        "upsert": [{"path": "l.java", "hash": "file-l.java", "chunks": [{"hash": "hl1", "start": 1, "end": 2}]}],
+        "remove": [],
+    })
+    check("legacy 同步成功", st == 200, (st, lg))
+    st, sw = req("POST", "/v1/admin/sweep", {})
+    check("sweep 不删 legacy", LEG not in sw.get("deleted", []), sw)
+    st, lstt = req("GET", f"/v1/repos/{nsq(LEG)}/status")
+    check("legacy = pinned + 无过期时间", lstt.get("scope", {}).get("kind") == "legacy"
+          and lstt["scope"].get("pinned") is True and lstt["scope"].get("expiresAt") is None, lstt.get("scope"))
+
+    print("\n[18] TTL 过期 → sweep 删除")
+    check("build() 已启动 janitor 线程", any(t.name == "scope-janitor" for t in threading.enumerate()))
+    NS_PR = istore.canonical_namespace(REPO, "fp1", "pr", "42")
+    st, sp = scope_sync(NS_PR, {"p.java": [("hp1", "class P { }", 1, 3)]}, "pr-1",
+                        {"kind": "pr", "ref": "42"}, repo_id=REPO, url=URL2)
+    check("PR scope 创建（默认 TTL）", st == 200 and sp.get("namespace") == NS_PR, (st, sp))
+    st, pinr = req("POST", f"/v1/scopes/{nsq(NS_PR)}/pin", {"pinned": False, "ttlDays": 0})
+    check("pin 可把 TTL 改成 0（立即过期）", st == 200 and pinr.get("expiresAt") is not None, pinr)
+    st, sw2 = req("POST", "/v1/admin/sweep", {})
+    check("过期 scope 被删除", NS_PR in sw2.get("deleted", []), sw2)
+    st, lst2 = req("GET", "/v1/scopes")
+    check("/v1/scopes 里已消失", all(x["namespace"] != NS_PR for x in lst2.get("scopes", [])))
+    st, hs2 = req("GET", "/health")
+    check("/health.spaces 里已消失", all(s["namespace"] != NS_PR for s in hs2.get("spaces", [])))
+
+    print("\n[19] DELETE scope 后 GC 不误删被其他 scope 引用的内容")
+    REPO3 = "wt"
+    URL3 = "https://git.example.com/team/wt.git"
+    NS_WA = istore.canonical_namespace(REPO3, "fp1", "worktree", "wt-a")
+    NS_WB = istore.canonical_namespace(REPO3, "fp1", "worktree", "wt-b")
+    shared = [("hshared", "shared body text", 1, 2)]
+    fa = {"a.java": [("ha1", "alpha body", 1, 2)], "s.java": shared}
+    fb = {"b.java": [("hb1", "beta body", 1, 2)], "s.java": shared}
+    scope_sync(NS_WA, fa, "wa-1", {"kind": "worktree", "ref": "wt-a"}, repo_id=REPO3, url=URL3)
+    scope_sync(NS_WB, fb, "wb-1", {"kind": "worktree", "ref": "wt-b"}, repo_id=REPO3, url=URL3)
+    upload(NS_WA, fa)
+    upload(NS_WB, fb)
+    wait_vectors(NS_WA, 2)
+    wait_vectors(NS_WB, 2)
+    lid3 = req("GET", f"/v1/repos/{nsq(NS_WB)}/status")[1]["lineage"]
+
+    def blob_exists(h):
+        return server.store.db.execute(
+            "select 1 from blobs where lineage_id = ? and hash = ?", (lid3, h)).fetchone() is not None
+
+    def vector_exists(h):
+        return server.store.db.execute(
+            "select 1 from vectors where lineage_id = ? and hash = ?", (lid3, h)).fetchone() is not None
+
+    check("共享内容已入库", blob_exists("hshared") and vector_exists("hshared"))
+    st, dl = req("DELETE", f"/v1/scopes/{nsq(NS_WA)}")
+    check("DELETE 返回 deleted/chunks", st == 200 and dl.get("deleted") is True and dl.get("chunks") == 2, dl)
+    check("被 NS_WB 引用的共享 blob/vector 仍在", blob_exists("hshared") and vector_exists("hshared"))
+    st, sh = req("POST", "/v1/search", {"namespace": NS_WB, "query": "shared body text", "k": 5})
+    check("NS_WB 仍能检索到共享内容", any(h.get("hash") == "hshared" for h in sh.get("hits", [])), sh.get("hits"))
+    st, dl2 = req("DELETE", f"/v1/scopes/{nsq(NS_WB)}")
+    check("删掉最后引用后 GC 清掉孤儿内容",
+          st == 200 and dl2.get("deleted") is True and not blob_exists("hshared") and not vector_exists("hshared"),
+          (dl2, blob_exists("hshared"), vector_exists("hshared")))
+
+    print("\n[20] 多作用域检索：去重 / 来源 / 权重 / byScope / 旧单 ns 等价")
+    REPO4 = "multi"
+    URL4 = "https://git.example.com/team/multi.git"
+    NS_X = istore.canonical_namespace(REPO4, "fp1", "branch", "x")
+    NS_Y = istore.canonical_namespace(REPO4, "fp1", "branch", "y")
+    NS_S1 = istore.canonical_namespace(REPO4, "fp1", "branch", "s1")
+    NS_S2 = istore.canonical_namespace(REPO4, "fp1", "branch", "s2")
+    fx = {"x.java": [("hx1", "alpha one", 1, 2), ("hx2", "alpha two", 3, 4)]}
+    fy = {"y.java": [("hy1", "beta one", 1, 2), ("hy2", "beta two", 3, 4)]}
+    fs1 = {"s1.java": [("hdup", "shared chunk body", 1, 2), ("hs1", "s1 unique", 3, 4)]}
+    fs2 = {"s2.java": [("hdup", "shared chunk body", 1, 2), ("hs2", "s2 unique", 3, 4)]}
+    for ns, fm, ref in ((NS_X, fx, "x"), (NS_Y, fy, "y"), (NS_S1, fs1, "s1"), (NS_S2, fs2, "s2")):
+        scope_sync(ns, fm, f"ms-{ref}", {"kind": "branch", "ref": ref}, repo_id=REPO4, url=URL4)
+        upload(ns, fm)
+    for ns in (NS_X, NS_Y, NS_S1, NS_S2):
+        wait_vectors(ns, 2)
+    st, both = req("POST", "/v1/search", {
+        "namespaces": [{"namespace": NS_S1}, {"namespace": NS_S2}],
+        "query": "shared chunk body", "k": 5,
+    })
+    dup_hits = [h for h in both.get("hits", []) if h.get("hash") == "hdup"]
+    check("跨 scope 同 hash 只出现一次", len(dup_hits) == 1, [h.get("hash") for h in both.get("hits", [])])
+    check("命中项带来源 namespace（首个 scope）", bool(dup_hits) and dup_hits[0].get("namespace") == NS_S1, dup_hits[:1])
+    check("命中项带 scope {kind,ref}", bool(dup_hits)
+          and dup_hits[0].get("scope", {}).get("kind") == "branch"
+          and dup_hits[0]["scope"].get("ref") == "s1", dup_hits[:1])
+    check("byScope 每项带 hits/coverage/ms", len(both.get("byScope", [])) == 2
+          and all("hits" in b and "coverage" in b and "ms" in b for b in both["byScope"]), both.get("byScope"))
+    st, wy = req("POST", "/v1/search", {
+        "namespaces": [{"namespace": NS_X, "weight": 1}, {"namespace": NS_Y, "weight": 100}],
+        "query": "anything", "k": 5,
+    })
+    check("加权 RRF：高权重 scope 的命中排第一",
+          bool(wy.get("hits")) and wy["hits"][0].get("namespace") == NS_Y,
+          [h.get("namespace") for h in wy.get("hits", [])])
+    st, too = req("POST", "/v1/search", {"namespaces": [{"namespace": NS_X}] * 5, "query": "x", "k": 3})
+    check("namespaces 超 MAX_SEARCH_SCOPES → 400", st == 400 and too.get("error") == "too-many-namespaces", (st, too))
+    st, one_old = req("POST", "/v1/search", {"namespace": NS_X, "query": "alpha one", "k": 3})
+    st, one_new = req("POST", "/v1/search", {"namespaces": [{"namespace": NS_X}], "query": "alpha one", "k": 3})
+    check("旧单 namespace 与单元素数组结果等价", one_old.get("hits") == one_new.get("hits"),
+          (one_old.get("hits"), one_new.get("hits")))
+    check("旧字段保留（score/ms/coverage）",
+          all(k in one_old for k in ("hits", "ms", "coverage"))
+          and all(k in one_old.get("ms", {}) for k in ("embed", "knn"))
+          and all("score" in h for h in one_old.get("hits", [])))
+
+    print("\n[21] MAX_SCOPES 配额 → 507")
+    old_max = server.MAX_SCOPES
+    server.MAX_SCOPES = server.store.count_scopes()
+    NS_QUOTA = istore.canonical_namespace("quota", "fp1", "branch", "new")
+    st, q = scope_sync(NS_QUOTA, {"q.java": [("hq1", "quota probe", 1, 2)]}, "q-1",
+                       {"kind": "branch", "ref": "new"}, repo_id="quota",
+                       url="https://git.example.com/team/quota.git")
+    check("新建 scope 超限 → 507 scope-cap", st == 507 and q.get("error") == "scope-cap", (st, q))
+    check("配额响应带 count/limit", q.get("count") == server.MAX_SCOPES and q.get("limit") == server.MAX_SCOPES, q)
+    server.MAX_SCOPES = old_max
+
+    print("\n[22] 旧 DB 启动即幂等迁移")
+    old_db = os.path.join(TMP, "legacy-db", "index.db")
+    os.makedirs(os.path.dirname(old_db), exist_ok=True)
+    conn = sqlite3.connect(old_db)
+    conn.executescript("""
+    create table lineages (id text primary key, url_norm text, created_at integer not null, last_seen integer not null);
+    create table repos (
+      namespace text primary key,
+      lineage_id text not null,
+      repo_id text not null,
+      chunk_fp text not null,
+      revision integer not null default 0,
+      tag text,
+      repo_state text,
+      repo_state_chunks integer,
+      updated_at integer not null
+    );
+    """)
+    conn.execute("insert into lineages values ('L1', 'u', 1000, 1000)")
+    conn.execute("insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
+                 " repo_state_chunks, updated_at) values ('old@fp', 'L1', 'old', 'fp', 3, null, null, 0, 1000)")
+    conn.commit()
+    conn.close()
+    m1 = istore.IndexStore(old_db)
+    row = m1.repo("old@fp")
+    check("老库补列后 legacy/pinned/no-expiry",
+          row["scope_kind"] == "legacy" and row["pinned"] == 1 and row["expires_at"] is None, row)
+    check("created_at 回填 updated_at", row["created_at"] == 1000, row.get("created_at"))
+    m1.close()
+    m2 = istore.IndexStore(old_db)
+    check("二次启动迁移幂等", m2.repo("old@fp")["pinned"] == 1)
+    m2.pin_scope("old@fp", False)
+    m2.close()
+    m3 = istore.IndexStore(old_db)
+    check("显式 unpin 不会被二次迁移重新钉住", m3.repo("old@fp")["pinned"] == 0)
+    m3.close()
+
+    print("\n[23] sync 显式 tag=null → 服务端补默认 tag（review-service 旧 payload 回归）")
+    NS_NULL = istore.canonical_namespace("nulltag", "fp1", "branch", "feat/n")
+    null_payload = {
+        "repoId": "nulltag",
+        "chunkFp": "fp1",
+        "url": "https://git.example.com/team/nulltag.git",
+        "tag": None,  # review-service 的 IndexSync 固定发 null；不能让它把 repos.tag 写成 NULL
+        "repoState": "n-1",
+        "mode": "full",
+        "upsert": [{"path": "n.java", "hash": "file-n.java",
+                    "chunks": [{"hash": "hn1", "start": 1, "end": 2}]}],
+        "remove": [],
+        "scope": {"kind": "branch", "ref": "feat/n"},
+    }
+    st, nt = req("POST", f"/v1/repos/{nsq(NS_NULL)}/sync", null_payload)
+    check("显式 tag=null 的 sync → 200", st == 200, nt)
+    stt = req("GET", f"/v1/repos/{nsq(NS_NULL)}/status")[1]
+    check("repos.tag 被补成服务端当前 tag", stt.get("tag") == server.state["info"].get("tag"), stt.get("tag"))
+    req("POST", f"/v1/repos/{nsq(NS_NULL)}/chunks",
+        {"bodies": [{"hash": "hn1", "body": "null tag probe"}]})
+    server.governor.kick(NS_NULL)
+    stv = wait_vectors(NS_NULL, 1)
+    check("显式 null tag 的命名空间能正常嵌入（coverage=1）",
+          stv.get("vectors") == 1 and stv.get("coverage") == 1.0, stv)
+    stq, sq = req("POST", "/v1/search", {"namespace": NS_NULL, "query": "null tag probe", "k": 3})
+    check("显式 null tag 的命名空间可检索（不再 no-tag）",
+          stq == 200 and bool(sq.get("hits")), sq)
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")

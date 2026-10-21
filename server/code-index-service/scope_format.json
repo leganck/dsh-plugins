@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "description": "namespace / scope 规范化夹具：服务端 selftest.py 与插件 test-remote.mjs 都读它，防止 JS 与 Python 规则漂移。规则见 docs/scope-tier3.md §2。",
+  "cases": [
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "main", "ref": "default", "expect": "r1234@fp1#main:default" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "feat/x", "expect": "r1234@fp1#branch:feat-x-d6e256" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "release/5.0", "expect": "r1234@fp1#branch:release-5.0-e48478" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "中文分支", "expect": "r1234@fp1#branch:x-4465f2" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "Feature_A", "expect": "r1234@fp1#branch:Feature_A-21868d" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "pr", "ref": "1234", "expect": "r1234@fp1#pr:1234" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "worktree", "ref": "abcdef1234567890", "expect": "r1234@fp1#wt:e4f91dd3" }
+  ],
+  "legacy_cases": [
+    { "namespace": "repo@fp", "expect": "repo@fp" },
+    { "namespace": "bdfd9b2d1adc@dff7d38556cd7153316964649602fd14cedc8939f435f6b680c631a025268a37", "expect": "bdfd9b2d1adc@dff7d38556cd7153316964649602fd14cedc8939f435f6b680c631a025268a37" }
+  ],
+  "invalid_cases": [
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "nope", "ref": "x", "reason": "unknown-kind" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "", "reason": "empty-ref" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "pr", "ref": "abc", "reason": "pr-ref-not-numeric" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "worktree", "ref": "", "reason": "empty-ref" },
+    { "repoId": "has space", "chunkFp": "fp1", "kind": "main", "ref": "default", "reason": "invalid-repo-id" },
+    { "repoId": "r1234", "chunkFp": "a@b", "kind": "main", "ref": "default", "reason": "invalid-chunk-fp" }
+  ]
+}

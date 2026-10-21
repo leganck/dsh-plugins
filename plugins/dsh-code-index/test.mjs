@@ -93,6 +93,63 @@ console.log(`临时索引: ${dbPath}`)
 
 const store = Store.open(dbPath)
 
+// ---------- 0. 作用域规范（档 3 夹具）+ 配置校验 ----------
+// 夹具是 JS 与 Python 两端共同的唯一真相（server/code-index-service/scope_format.json）。
+console.log('[0] 作用域规范')
+{
+  const { canonicalNamespace, normalizeNamespace, safeRef, refToken, validateScope } = await import('./lib/scope.js')
+  const fixture = JSON.parse(fs.readFileSync(new URL('../../server/code-index-service/scope_format.json', import.meta.url), 'utf8'))
+  for (const c of fixture.cases) {
+    const got = canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref)
+    check(`夹具 ${c.kind} ${JSON.stringify(c.ref)} → ${c.expect}`, got === c.expect, `实际 ${got}`)
+  }
+  for (const c of fixture.legacy_cases) {
+    check('legacy 命名空间原样保留（不重新规范化）', normalizeNamespace(c.namespace) === c.expect)
+  }
+  for (const c of fixture.invalid_cases) {
+    let err = null
+    try {
+      canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref)
+    } catch (e) {
+      err = e
+    }
+    check(`非法输入按 reason 拒绝：${c.reason}`, err?.reason === c.reason, String(err?.reason ?? err))
+  }
+  check('safeRef 把非法字符压成 -、空结果用 x', safeRef('feat/x') === 'feat-x' && safeRef('中文分支') === 'x')
+  check('main 的 ref 被忽略（固定 default）', refToken('main', 'dev') === 'default')
+  check('validateScope 保留原始分支名（token 只用于命名空间）', validateScope({ kind: 'branch', ref: 'feat/x', ttlDays: 7 }).ref === 'feat/x')
+
+  // 配置校验：DSH_HOME 必须先隔离 —— apply() 会写加载标记，不能碰真实 ~/.dsh
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-test-home-'))
+  const plugin = await import('./index.js')
+  const fakeCtx = () => ({
+    tools: { register: () => () => {} },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    effect: (cb) => {
+      const d = cb()
+      return typeof d === 'function' ? d : () => {}
+    },
+  })
+  const tryApply = (cfg) => {
+    try {
+      plugin.apply(fakeCtx(), cfg)
+      return null
+    } catch (e) {
+      return e
+    }
+  }
+  const ok = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'pr', ref: '01234', ttlDays: 7 }, readScopes: ['main-ns'] } })
+  check('合法 remote.scope / readScopes → 通过', ok === null, ok?.message)
+  check(
+    '兼容写法：remote.namespace 与 scope 同时给（namespace 优先）→ 通过',
+    tryApply({ vectors: 'remote', remote: { url: 'https://h.example', namespace: 'explicit-ns', scope: { kind: 'main' } } }) === null,
+  )
+  const e1 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'nope', ref: 'x' } } })
+  check('未知 scope.kind → ConfigError 且点名作用域', e1 instanceof plugin.ConfigError && /作用域/.test(e1.message), e1?.message)
+  const e2 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', readScopes: [42] } })
+  check('readScopes 元素非字符串 → ConfigError', e2 instanceof plugin.ConfigError && /readScopes/.test(e2.message), e2?.message)
+}
+
 // ---------- 1. 建库（纯关键词）----------
 console.log('[1] 建库（不启用向量）')
 const r1 = await buildIndex({ store, repoRoot: repo, embedder: { ok: false, reason: 'test: 故意不启用' } })
@@ -403,6 +460,59 @@ console.log('\n[10] 扫描排除')
   } catch {
     /* Windows 句柄 */
   }
+}
+
+// ---------- 11a. 远端作用域同步（syncRemote） ----------
+// 这里不连网络：用一个记录调用的假 client 验证 namespace / payload.scope / 服务端返回值三件事。
+console.log('\n[11a] 远端作用域同步（syncRemote）')
+{
+  const { syncRemote } = await import('./lib/indexer.js')
+  const tmpSc = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-syncscope-'))
+  const scStore = Store.open(path.join(tmpSc, 'index.db'))
+  const mkClient = (resp = {}) => ({
+    calls: [],
+    async sync(ns, payload) {
+      this.calls.push({ ns, payload })
+      return { revision: 7, chunks: 1, missing: [], unchanged: false, coverage: 1, ...resp }
+    },
+    async uploadChunks() {
+      return { accepted: 0 }
+    },
+    async kickEmbed() {
+      return { ok: true }
+    },
+  })
+
+  const client = mkClient()
+  const r = await syncRemote({
+    store: scStore,
+    client,
+    repoId: 'r1',
+    url: '',
+    tag: null,
+    fingerprint: 'fp-test',
+    namespace: 'r1@fp-test#branch:feat-x-d6e256',
+    scope: { kind: 'branch', ref: 'feat/x', ttlDays: 14 },
+    changedFiles: [],
+    removed: [],
+  })
+  check('使用传入的写作用域命名空间', client.calls[0]?.ns === 'r1@fp-test#branch:feat-x-d6e256', client.calls[0]?.ns)
+  check(
+    'sync payload 带 scope（kind/ref/ttlDays）',
+    client.calls[0]?.payload?.scope?.kind === 'branch' && client.calls[0]?.payload?.scope?.ttlDays === 14,
+    JSON.stringify(client.calls[0]?.payload?.scope),
+  )
+  check('服务端没回 namespace 时用本地推导值', r.namespace === 'r1@fp-test#branch:feat-x-d6e256', r.namespace)
+
+  const client2 = mkClient({ namespace: 'server-side-ns' })
+  const r2 = await syncRemote({ store: scStore, client: client2, repoId: 'r1', url: '', tag: null, fingerprint: 'fp-test', namespace: 'local-ns', changedFiles: [], removed: [] })
+  check('以服务端返回的 namespace 为准（并落库 remote_namespace）', r2.namespace === 'server-side-ns' && scStore.getMeta('remote_namespace') === 'server-side-ns', r2.namespace)
+
+  const client3 = mkClient()
+  const r3 = await syncRemote({ store: scStore, client: client3, repoId: 'r1', url: '', tag: null, fingerprint: 'fp-test', changedFiles: [], removed: [] })
+  check('旧默认命名空间 = repoId@fingerprint', client3.calls[0]?.ns === 'r1@fp-test', client3.calls[0]?.ns)
+  check('无 scope 配置时 payload 不带 scope 字段', !('scope' in (client3.calls[0]?.payload ?? {})), JSON.stringify(Object.keys(client3.calls[0]?.payload ?? {})))
+  check('无 namespace 返回时退回本地推导值', r3.namespace === 'r1@fp-test', r3.namespace)
 }
 
 // ---------- 11b. 语言扩展开装提示（parser hints） ----------
