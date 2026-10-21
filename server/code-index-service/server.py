@@ -20,8 +20,9 @@
 
 端点
 ----
-    GET  /                         自述：模型/tag/providers/重排状态/治理状态/命名空间概览
-    GET  /health                   同上（spaces[] 带 scope，顶层 scopes:{total,byKind}）
+    GET  /                         自述（设置 API_KEY 后需 Bearer）：模型/tag/治理/作用域概览
+    GET  /health                   同上（**免鉴权**，供探活；spaces[] 带 scope，顶层 scopes:{total,byKind}）
+    GET  /admin                    后台查看页（单文件 HTML，免鉴权；数据经下方 API 拉取，需填 key）
     GET  /log?n=200                日志尾巴
     POST /embed                    {texts, is_query} -> {vectors_b64, dim, count, ms}   （兼容 0.7.0）
     POST /rerank                   {query, texts, max_tokens} -> {scores, ms}          （兼容 0.7.0）
@@ -106,6 +107,153 @@ def log(msg):
             f.write(line + "\n")
     except Exception:
         pass
+
+
+# ---------------- 管理页面（GET /admin）----------------
+# 单文件、无依赖：页面壳不需要鉴权，数据一律走后端 API（API_KEY 开启时需在页面里填 key）。
+# 只做"查看 + 治理"（暂停/恢复/清扫），删除作用域等破坏性操作留给 curl。
+ADMIN_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>code-index-service · 后台</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --text:#1f2328; --muted:#6b7280; --ok:#1a7f37; --warn:#b45309; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#171a21; --line:#2a2f3a; --text:#e6e6e6; --muted:#9aa4b2; } }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; } .spacer { flex:1; }
+  .badge { padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); }
+  .badge.ok { color:var(--ok); border-color:var(--ok); } .badge.bad { color:var(--bad); border-color:var(--bad); }
+  button { padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; }
+  button:hover { border-color:var(--muted); } button:disabled { opacity:.5; cursor:default; }
+  main { padding:16px 18px; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card h2 { font-size:13px; margin:0 0 8px; font-weight:600; color:var(--muted); }
+  .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; } .kv div:nth-child(odd) { color:var(--muted); }
+  .wide { grid-column:1/-1; } table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-weight:600; }
+  td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; } .ns { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
+  .bar { height:7px; width:80px; background:var(--line); border-radius:4px; overflow:hidden; display:inline-block; vertical-align:middle; }
+  .bar > i { display:block; height:100%; background:var(--ok); }
+  .muted { color:var(--muted); } #msg { color:var(--muted); font-size:12px; } pre { margin:0; white-space:pre-wrap; word-break:break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>code-index-service · 后台</h1>
+  <span id="ready" class="badge">…</span>
+  <span id="model" class="badge" title="向量模型 tag">—</span>
+  <span class="spacer"></span>
+  <span id="msg"></span>
+  <button id="btn-refresh">刷新</button>
+  <button id="btn-pause">暂停嵌入</button>
+  <button id="btn-resume">恢复嵌入</button>
+  <button id="btn-sweep">立即清扫</button>
+</header>
+<main>
+  <section class="card">
+    <h2>运行时</h2>
+    <div class="kv" id="runtime"></div>
+  </section>
+  <section class="card">
+    <h2>嵌入治理</h2>
+    <div class="kv" id="governor"></div>
+  </section>
+  <section class="card">
+    <h2>存储与限额</h2>
+    <div class="kv" id="limits"></div>
+  </section>
+  <section class="card wide">
+    <h2>作用域（快照） <span class="muted" id="scope-count"></span></h2>
+    <table>
+      <thead><tr><th>kind</th><th>ref</th><th>repoId</th><th class="num">chunks</th><th class="num">vectors</th><th>coverage</th><th class="num">占用</th><th>创建</th><th>过期</th><th>pinned</th><th>namespace</th></tr></thead>
+      <tbody id="scopes"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+let KEY = localStorage.getItem('dshAdminKey') || '';
+const fmt = (n) => n === null || n === undefined ? '—' : (typeof n === 'number' ? n.toLocaleString() : String(n));
+const ts = (s) => !s ? '—' : new Date((typeof s === 'number' ? s * 1000 : s)).toLocaleString('zh-CN', { hour12: false });
+const iso = (n) => !n ? '永不' : ts(n);
+const bytes = (n) => !n ? '0 B' : (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
+function setMsg(t) { $('#msg').textContent = t || ''; }
+async function api(path, opts = {}, retried = false) {
+  const headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
+  if (KEY) headers.authorization = 'Bearer ' + KEY;
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 && !retried) {
+    const k = prompt('需要 API Key（服务端已启用 API_KEY）：');
+    if (k) { KEY = k.trim(); localStorage.setItem('dshAdminKey', KEY); return api(path, opts, true); }
+  }
+  let body = null; try { body = await r.json(); } catch (e) {}
+  return { status: r.status, body };
+}
+const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div>' + k + '</div><div' + (title ? ' title="' + title + '"' : '') + '>' + v + '</div>').join(''); };
+async function refresh() {
+  setMsg('');
+  // 先拉作用域（无 key 时在这里触发 401 弹窗），再拉 health：带 key 的 health 才是完整版
+  const s = await api('/v1/scopes');
+  const h = await api('/health');
+  if (h.status !== 200 || !h.body) { $('#ready').className = 'badge bad'; $('#ready').textContent = '不可达'; return; }
+  const d = h.body;
+  $('#ready').className = 'badge ' + (d.ready ? 'ok' : 'bad');
+  $('#ready').textContent = d.ready ? 'ready' : 'not ready';
+  $('#model').textContent = d.tag || '—';
+  $('#model').title = (d.providers || []).join(', ') + ' · ORT ' + (d.ort || '?') + ' · threads ' + (d.threads || '?');
+  kv($('#runtime'), [
+    ['模型', (d.model || '—') + ' <span class="muted">(' + bytes(d.model_bytes) + ')</span>'],
+    ['tag', d.tag || '—'], ['providers', (d.providers || []).join(', ') || '—'],
+    ['ORT / threads', (d.ort || '?') + ' / ' + (d.threads || '?')],
+    ['重排', d.rerank_ready ? (d.rerank_tag || 'ready') : '<span class="muted">off（' + (d.rerank_err || '无模型') + '）</span>'],
+    ['pid / db', fmt(d.pid) + ' / <span class="ns">' + (d.db || '—') + '</span>'],
+  ]);
+  const g = d.governor || {}, k = d.knn || {};
+  kv($('#governor'), [
+    ['状态', g.paused ? '<span class="badge bad">已暂停</span>' : '<span class="badge ok">运行中</span>'],
+    ['限速', fmt(g.rate) + ' 块 / 秒'], ['batch', fmt(g.batch)],
+    ['kNN 缓存', fmt(k.entries) + ' 个作用域 / ' + bytes(k.bytes) + ' <span class="muted">上限 ' + bytes(k.maxBytes) + '</span>'],
+    ['kNN 命中/未命中', fmt(k.hits) + ' / ' + fmt(k.misses) + ' <span class="muted">淘汰 ' + fmt(k.evictions) + '</span>'],
+  ]);
+  const L = d.limits || {}, sc = d.scopes || {};
+  kv($('#limits'), [
+    ['总存储上限', fmt(L.maxTotalGb) + ' GB'], ['保留期', fmt(L.retentionDays) + ' 天'],
+    ['每血统向量上限', fmt(L.maxVectorsPerLineage)], ['作用域上限', fmt(L.maxScopes) + '（单次检索 ≤ ' + fmt(L.maxSearchScopes) + '）'],
+    ['当前作用域', fmt(sc.total) + ' <span class="muted">' + JSON.stringify(sc.byKind || {}) + '</span>'],
+  ]);
+  const rows = (s.body && s.body.scopes) || [];
+  $('#scope-count').textContent = '(' + rows.length + ')';
+  const bytesOf = {}; (d.spaces || []).forEach((x) => { bytesOf[x.namespace] = x.totalBytes; });
+  $('#scopes').innerHTML = rows.length ? rows.map((x) => {
+    const cov = Math.round((x.coverage || 0) * 100);
+    return '<tr><td>' + x.kind + '</td><td>' + (x.ref || '—') + '</td><td>' + x.repoId + '</td>'
+      + '<td class="num">' + fmt(x.chunks) + '</td><td class="num">' + fmt(x.vectors) + '</td>'
+      + '<td><span class="bar" title="' + cov + '%"><i style="width:' + cov + '%"></i></span> ' + cov + '%</td>'
+      + '<td class="num">' + bytes(bytesOf[x.namespace]) + '</td>'
+      + '<td>' + ts(x.createdAt) + '</td><td>' + iso(x.expiresAt) + '</td>'
+      + '<td>' + (x.pinned ? '是' : '否') + '</td>'
+      + '<td class="ns" title="' + x.namespace + '">' + x.namespace.slice(0, 46) + (x.namespace.length > 46 ? '…' : '') + '</td></tr>';
+  }).join('') : '<tr><td colspan="11" class="muted">还没有作用域</td></tr>';
+  if (s.status === 401) setMsg('API Key 无效或未填写');
+}
+async function action(name) {
+  const r = await api('/v1/admin/' + name, { method: 'POST', body: '{}' });
+  setMsg(r.status === 200 ? name + ' ok' : name + ' 失败（' + r.status + '）');
+  setTimeout(refresh, 300);
+}
+$('#btn-refresh').onclick = refresh;
+$('#btn-pause').onclick = () => action('pause');
+$('#btn-resume').onclick = () => action('resume');
+$('#btn-sweep').onclick = () => action('sweep');
+refresh(); setInterval(refresh, 15000);
+</script>
+</body>
+</html>
+"""
+
 
 
 class FakeEmbedder:
@@ -597,9 +745,21 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self.headers.get("authorization", "") == f"Bearer {API_KEY}"
 
+    def _unauthorized(self):
+        # 401 统一提示；管理页会据此弹窗要求输入 API Key（存 localStorage，仅本地浏览器）
+        return self._send(401, {"error": "unauthorized", "hint": "Authorization: Bearer <API_KEY>"})
+
     def do_GET(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
+        # 页面壳与健康检查免鉴权（探活用）；其余 GET 在设置 API_KEY 后都要 Bearer
+        if path in ("/admin", "/admin/"):
+            return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
+        if path == "/health":
+            # 免鉴权，但未带 key 时只返回最小探活字段（不泄露作用域/存储/治理信息）
+            return self._send(200, self._status_payload(public=not self._auth_ok()))
+        if not self._auth_ok():
+            return self._unauthorized()
         if path == "/log":
             n = 200
             if "n=" in (u.query or ""):
@@ -613,7 +773,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 lines = [f"log read failed: {e}"]
             return self._send(200, {"lines": [x.rstrip() for x in lines]})
-        if path in ("/", "/health"):
+        if path == "/":
             return self._send(200, self._status_payload())
         if path.startswith("/v1/repos/") and path.endswith("/status"):
             ns = unquote(path[len("/v1/repos/") : -len("/status")])
@@ -642,7 +802,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, delete_scope(ns))
         return self._send(404, {"error": "not found"})
 
-    def _status_payload(self):
+    def _status_payload(self, public=False):
+        """public=True 只给探活所需的最小字段（API_KEY 开启时无人认领的 /health 走这条）。"""
         info = dict(state["info"])
         info.update(
             ready=state["ready"],
@@ -654,6 +815,10 @@ class Handler(BaseHTTPRequestHandler):
             rerank_model_dir=RERANK_DIR,
         )
         info.update(state["rerank_info"])
+        if public:
+            keep = ("ready", "err", "tag", "model", "providers", "ort", "threads",
+                    "rerank_ready", "pid", "model_bytes", "available_providers")
+            return {k: info[k] for k in keep if k in info}
         if governor:
             info["governor"] = {"paused": governor.paused, "rate": governor.rate, "batch": governor.batch}
         if knn:
