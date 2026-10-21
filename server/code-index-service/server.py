@@ -1093,6 +1093,7 @@ def build():
         info["available_providers"] = ["Fake"]
         info["threads"] = THREADS
         state.update(ready=True, info=info, providers=["Fake"], available_providers=["Fake"], ort_version="0")
+        ACTIVE["embed_name"] = "fake-model"
         log(f"embed ready (fake): tag={info['tag']}")
     else:
         import onnxruntime as ort
@@ -1105,6 +1106,8 @@ def build():
         info["available_providers"] = avail
         info["threads"] = THREADS
         state.update(ready=True, info=info, providers=providers, available_providers=avail, ort_version=ort.__version__)
+        # 控制台展示用：优先环境变量 MODEL_NAME，否则按目录名映射内置 profile 的模型名
+        ACTIVE["embed_name"] = MODEL_NAME or models_admin.name_for_dir(MODEL_DIR)
         log(f"embed ready: tag={info['tag']} providers={info['providers']}")
 
         try:
