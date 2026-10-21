@@ -47,6 +47,24 @@ export function gitOriginUrl(repoRoot) {
  * 血统标识：默认 = sha1(归一化 origin URL) 前 12 位（同一仓库的不同克隆/机器算出同一个值）；
  * 无 git 时用绝对路径哈希（仅本机血统）。
  */
+/** 当前分支：{name, detached}；不是 git 仓库时 {name: '', detached: false}。 */
+export function gitBranch(repoRoot) {
+  const git = (args) =>
+    execFileSync('git', ['-C', repoRoot, ...args], {
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  try {
+    const name = git(['rev-parse', '--abbrev-ref', 'HEAD'])
+    if (name && name !== 'HEAD') return { name, detached: false }
+    const sha = git(['rev-parse', '--short', 'HEAD'])
+    return { name: sha, detached: true }
+  } catch {
+    return { name: '', detached: false }
+  }
+}
+
 export function repoIdOf(repoRoot, override = null) {
   if (override) return override
   const url = normalizeRemoteUrl(gitOriginUrl(repoRoot))

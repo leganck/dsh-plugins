@@ -29,7 +29,7 @@ import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strate
 import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 import { normalizeRelPrefix } from './lib/scan.js'
-import { normalizeRemoteUrl, gitOriginUrl, repoIdOf } from './lib/repo.js'
+import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch } from './lib/repo.js'
 import { canonicalNamespace, normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
 
@@ -508,9 +508,12 @@ function normalizeConfig(userRaw = {}) {
     }
     cfg.remote.namespace = cfg.remote.namespace.trim()
   }
-  if (cfg.remote.scope !== null) {
+  if (cfg.remote.scope === 'auto') {
+    // 自动作用域：按当前 git 分支推导（main/master → #main:default，其余 → #branch:<name>）。
+    // 这样不同分支各自一个快照，不需要每个 checkout 手写 scope.ref。
+  } else if (cfg.remote.scope !== null) {
     if (typeof cfg.remote.scope !== 'object' || Array.isArray(cfg.remote.scope)) {
-      throw new ConfigError(`config.remote.scope 必须是对象（{kind, ref, ttlDays}）或 null，收到 ${Array.isArray(cfg.remote.scope) ? 'array' : typeof cfg.remote.scope}`)
+      throw new ConfigError(`config.remote.scope 必须是对象（{kind, ref, ttlDays}）、字符串 "auto" 或 null，收到 ${Array.isArray(cfg.remote.scope) ? 'array' : typeof cfg.remote.scope}`)
     }
     const unknownScope = Object.keys(cfg.remote.scope).filter((k) => !SCOPE_CONFIG_KEYS.includes(k))
     if (unknownScope.length) {
@@ -786,10 +789,19 @@ function applyInner(ctx, rawConfig = {}) {
    * （它是切块配置 + 本仓库实际可用语法的哈希），所以建库路径必须把「按 fp 算」的回调传进去，
    * 不能提前用 default 算一个值 —— 否则首次建库会写进 `repo@default#...`，下次又换一个空间。
    */
+  /** `remote.scope: "auto"`：按当前 git 分支推导；无 git 时返回 null（退回 legacy 命名空间） */
+  const autoScopeFor = (repoRoot) => {
+    const b = gitBranch(repoRoot)
+    if (!b.name) return null
+    if (!b.detached && (b.name === 'main' || b.name === 'master')) return { kind: 'main', ref: 'default' }
+    return { kind: 'branch', ref: b.name }
+  }
+  const effectiveScopeFor = (repoRoot) =>
+    config.remote.scope === 'auto' ? autoScopeFor(repoRoot) : config.remote.scope
   const resolveNamespace = (repoRoot, chunkFp) => {
     if (config.remote.namespace) return config.remote.namespace
     const repoId = repoIdOf(repoRoot, config.remote.repoId)
-    const scope = config.remote.scope
+    const scope = effectiveScopeFor(repoRoot)
     if (scope) return canonicalNamespace(repoId, chunkFp, scope.kind, scope.ref)
     return `${repoId}@${chunkFp}`
   }
@@ -802,12 +814,19 @@ function applyInner(ctx, rawConfig = {}) {
    */
   const scopeInfoFor = (repoRoot, store) => {
     const namespace = namespaceFor(repoRoot, store)
+    const scope = effectiveScopeFor(repoRoot)
     return {
       namespace,
       namespaces: namespacesFor(namespace),
-      scope: config.remote.scope ? { ...config.remote.scope } : null,
+      scope: scope ? { ...scope } : null,
       readScopes: [...config.remote.readScopes],
-      source: config.remote.namespace ? 'namespace' : config.remote.scope ? 'scope' : 'legacy',
+      source: config.remote.namespace
+        ? 'namespace'
+        : config.remote.scope === 'auto'
+          ? 'auto'
+          : scope
+            ? 'scope'
+            : 'legacy',
     }
   }
   /** 作用域的一行说明：只有配了新键才输出，旧配置的输出不变（不制造噪音） */
@@ -926,7 +945,7 @@ function applyInner(ctx, rawConfig = {}) {
                 namespaceFor: (chunkFp) => resolveNamespace(repoRoot, chunkFp),
                 // 显式 namespace 优先于 scope：两者同时给时**不发 scope**，否则服务端会按 scope
                 // 重新推导 canonical 命名空间，把用户的显式覆盖顶掉（契约 §6 的优先级）。
-                scope: config.remote.namespace ? null : config.remote.scope,
+                scope: config.remote.namespace ? null : effectiveScopeFor(repoRoot),
                 rateLimit: config.remote.rateLimit,
                 uploadBatch: config.remote.uploadBatch,
               }
@@ -1521,7 +1540,7 @@ function applyInner(ctx, rawConfig = {}) {
 
   /** 加载日志里的作用域摘要（档 3）：没配 scope/readScopes 时保持旧日志形态 */
   const scopeLog =
-    config.vectors === 'remote' && config.remote.scope
+    config.vectors === 'remote' && config.remote.scope && config.remote.scope !== 'auto'
       ? `，scope=${describeScope(config.remote.scope)}${config.remote.scope.ttlDays ? `(TTL ${config.remote.scope.ttlDays}d)` : ''}`
       : config.vectors === 'remote' && config.remote.namespace
         ? `，namespace=${config.remote.namespace}`
