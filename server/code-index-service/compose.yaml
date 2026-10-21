@@ -22,6 +22,8 @@ services:
       ORT_THREADS: ${ORT_THREADS:-6}
       EMBED_RATE: ${EMBED_RATE:-10}
       API_KEY: ${API_KEY:-}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       MAX_TOTAL_GB: ${MAX_TOTAL_GB:-20}
     volumes:
       # 索引库与日志；升级镜像不丢索引

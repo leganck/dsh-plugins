@@ -22,6 +22,7 @@
 
 跑法：python selftest.py
 """
+import base64
 import gzip
 import json
 import os
@@ -108,6 +109,22 @@ def req_raw(path, headers=None):
         r.add_header(k, v)
     with urllib.request.urlopen(r, timeout=30) as resp:
         return resp.status, resp.read().decode("utf-8", "replace"), resp.headers.get("content-type", "")
+
+
+def req_auth(path, auth=None, method="GET", body=None, headers=None):
+    """返回 (status, headers, text)；可带 authorization，用于 Basic/Bearer 鉴权断言。"""
+    data = None if body is None else json.dumps(body).encode()
+    r = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=data, method=method)
+    r.add_header("content-type", "application/json")
+    for k, v in (headers or {}).items():
+        r.add_header(k, v)
+    if auth:
+        r.add_header("authorization", auth)
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
 
 
 def sync(ns, payload, gz=False):
@@ -551,6 +568,8 @@ def main():
           "code-index-service · 后台" in html and "作用域（快照）" in html and "/v1/scopes" in html)
     st, html_slash, _ = req_raw("/admin/")
     check("/admin/ 同样可用", st == 200 and "code-index-service" in html_slash)
+    check("页面不再内嵌 API-Key 输入逻辑（改走 HTTP Basic）",
+          "dshAdminKey" not in html and "localStorage" not in html)
 
     print("\n[25] API_KEY（Bearer）鉴权")
     old_key = server.API_KEY
@@ -581,6 +600,42 @@ def main():
         check("管理员页面本身免鉴权（数据接口才要 key）", st == 200 and "text/html" in ctype, st)
     finally:
         server.API_KEY = old_key
+
+    print("\n[26] 后台 HTTP Basic（ADMIN_USER / ADMIN_PASSWORD）")
+    old_admin_pw = server.ADMIN_PASSWORD
+    old_admin_user = server.ADMIN_USER
+    old_api_key = server.API_KEY
+    server.ADMIN_USER = "admin"
+    server.ADMIN_PASSWORD = "admin-pw"
+    server.API_KEY = "test-key-123"
+    good = "Basic " + base64.b64encode(b"admin:admin-pw").decode()
+    bad = "Basic " + base64.b64encode(b"admin:wrong").decode()
+    bearer = "Bearer test-key-123"
+    try:
+        st, hdrs, _ = req_auth("/admin")
+        check("无凭据访问 /admin → 401 + Basic challenge",
+              st == 401 and "basic" in (hdrs.get("WWW-Authenticate") or "").lower(),
+              (st, hdrs.get("WWW-Authenticate")))
+        st, _, _ = req_auth("/admin", auth=bad)
+        check("错误 Basic 凭据 → 401", st == 401, st)
+        st, _, page = req_auth("/admin", auth=good)
+        check("正确 Basic → /admin 200 html", st == 200 and "code-index-service" in page, st)
+        st, _, body = req_auth("/v1/scopes", auth=good)
+        check("正确 Basic → 后台数据接口放行", st == 200 and "scopes" in body, st)
+        st, _, body = req_auth("/health", auth=good)
+        check("正确 Basic → health 是完整版", st == 200 and "spaces" in json.loads(body), st)
+        st, _, _ = req_auth("/v1/admin/pause", auth=good, method="POST", body={})
+        check("正确 Basic → 后台治理接口放行", st == 200, st)
+        st, _, _ = req_auth("/embed", auth=good, method="POST", body={"texts": ["basic only"]})
+        check("索引接口不接受 Basic（只认 Bearer）", st == 401, st)
+        st, _, _ = req_auth("/embed", auth=bearer, method="POST", body={"texts": ["bearer ok"]})
+        check("索引接口仍接受 Bearer", st == 200, st)
+        st, _, body = req_auth("/health")
+        check("无凭据 health 仍是最小公共字段", st == 200 and "spaces" not in json.loads(body), st)
+    finally:
+        server.ADMIN_USER = old_admin_user
+        server.ADMIN_PASSWORD = old_admin_pw
+        server.API_KEY = old_api_key
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")

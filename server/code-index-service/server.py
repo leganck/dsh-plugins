@@ -42,6 +42,7 @@
 """
 import base64
 import gzip
+import hmac
 import json
 import os
 import threading
@@ -76,7 +77,9 @@ WARMUP = F.get("WARMUP", "1") not in ("0", "false", "no")
 RETENTION_DAYS = int(F.get("RETENTION_DAYS", "30"))
 MAX_VECTORS_PER_LINEAGE = int(F.get("MAX_VECTORS_PER_LINEAGE", "500000"))
 MAX_TOTAL_BYTES = int(float(F.get("MAX_TOTAL_GB", "20")) * 1024**3)
-API_KEY = F.get("API_KEY", "")
+API_KEY = F.get("API_KEY", "")            # 索引/检索客户端用：Authorization: Bearer
+ADMIN_USER = F.get("ADMIN_USER", "admin")   # 后台页面用 HTTP Basic
+ADMIN_PASSWORD = F.get("ADMIN_PASSWORD", "")  # 空 = 后台 Basic 不启用
 FAKE_EMBED = F.get("FAKE_EMBED", "") not in ("", "0", "false")
 MAX_TEXTS = 512
 MAX_TEXT_CHARS = 8000
@@ -175,23 +178,20 @@ ADMIN_HTML = """<!doctype html>
 </main>
 <script>
 const $ = (s) => document.querySelector(s);
-let KEY = localStorage.getItem('dshAdminKey') || '';
-// 支持用 #key=xxx 打开（书签/一次性入口）：只存 localStorage 并清掉 hash，key 不会发给服务端
-(() => { const m = location.hash.match(/[#&]key=([^&]+)/); if (m) { KEY = decodeURIComponent(m[1]); localStorage.setItem('dshAdminKey', KEY); history.replaceState(null, '', location.pathname); } })();
+// 后台鉴权走 HTTP Basic：浏览器会弹一次登录框（ADMIN_USER / ADMIN_PASSWORD），之后同源请求自动带 Authorization。
 const fmt = (n) => n === null || n === undefined ? '—' : (typeof n === 'number' ? n.toLocaleString() : String(n));
 const ts = (s) => !s ? '—' : new Date((typeof s === 'number' ? s * 1000 : s)).toLocaleString('zh-CN', { hour12: false });
 const iso = (n) => !n ? '永不' : ts(n);
 const bytes = (n) => !n ? '0 B' : (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
 function setMsg(t) { $('#msg').textContent = t || ''; }
-async function api(path, opts = {}, retried = false) {
+async function api(path, opts = {}) {
   const headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
-  if (KEY) headers.authorization = 'Bearer ' + KEY;
   const r = await fetch(path, Object.assign({}, opts, { headers }));
-  if (r.status === 401 && !retried) {
-    const k = prompt('需要 API Key（服务端已启用 API_KEY）：');
-    if (k) { KEY = k.trim(); localStorage.setItem('dshAdminKey', KEY); return api(path, opts, true); }
-  }
   let body = null; try { body = await r.json(); } catch (e) {}
+  if (r.status === 401) {
+    $('#ready').className = 'badge bad'; $('#ready').textContent = '需要登录';
+    setMsg('HTTP Basic 认证失败：刷新页面重新输入 ADMIN_USER / ADMIN_PASSWORD');
+  }
   return { status: r.status, body };
 }
 const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div>' + k + '</div><div' + (title ? ' title="' + title + '"' : '') + '>' + v + '</div>').join(''); };
@@ -239,7 +239,6 @@ async function refresh() {
       + '<td>' + (x.pinned ? '是' : '否') + '</td>'
       + '<td class="ns" title="' + x.namespace + '">' + x.namespace.slice(0, 46) + (x.namespace.length > 46 ? '…' : '') + '</td></tr>';
   }).join('') : '<tr><td colspan="11" class="muted">还没有作用域</td></tr>';
-  if (s.status === 401) setMsg('API Key 无效或未填写');
 }
 async function action(name) {
   const r = await api('/v1/admin/' + name, { method: 'POST', body: '{}' });
@@ -722,12 +721,14 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     disable_nagle_algorithm = True  # 见文件头第 3 条
 
-    def _send(self, code, payload, ctype="application/json"):
+    def _send(self, code, payload, ctype="application/json", headers=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode()
+        extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
         head = (
             f"HTTP/1.1 {code} {self.responses.get(code, ('OK',))[0]}\r\n"
             f"Content-Type: {ctype}\r\n"
             f"Content-Length: {len(body)}\r\n"
+            f"{extra}"
             "Connection: keep-alive\r\n\r\n"
         ).encode()
         self.wfile.write(head + body)
@@ -742,26 +743,53 @@ class Handler(BaseHTTPRequestHandler):
             raw = gzip.decompress(raw)
         return json.loads(raw or b"{}")
 
-    def _auth_ok(self):
+    # ---------------- 鉴权：API 用 Bearer，后台用 HTTP Basic ----------------
+    def _api_ok(self):
+        """索引/检索客户端（插件、review-service）：Bearer API_KEY；未配置 API_KEY 时放行。"""
         if not API_KEY:
             return True
-        return self.headers.get("authorization", "") == f"Bearer {API_KEY}"
+        return hmac.compare_digest(self.headers.get("authorization", ""), f"Bearer {API_KEY}")
 
-    def _unauthorized(self):
-        # 401 统一提示；管理页会据此弹窗要求输入 API Key（存 localStorage，仅本地浏览器）
+    def _basic_ok(self):
+        """后台页面/治理：HTTP Basic。ADMIN_PASSWORD 为空时不启用。"""
+        if not ADMIN_PASSWORD:
+            return False
+        auth = self.headers.get("authorization", "")
+        if not auth.lower().startswith("basic "):
+            return False
+        try:
+            raw = base64.b64decode(auth.split(" ", 1)[1].strip()).decode("utf-8", "replace")
+        except Exception:
+            return False
+        user, _, pwd = raw.partition(":")
+        return hmac.compare_digest(user, ADMIN_USER) and hmac.compare_digest(pwd, ADMIN_PASSWORD)
+
+    def _admin_ok(self):
+        """后台数据接口：Basic（浏览器登录后台）或 Bearer（API 客户端）都接受。"""
+        return self._basic_ok() or self._api_ok()
+
+    def _unauthorized(self, basic=False):
+        if basic:
+            return self._send(
+                401,
+                {"error": "unauthorized", "hint": "HTTP Basic（ADMIN_USER / ADMIN_PASSWORD）"},
+                headers={"WWW-Authenticate": 'Basic realm="code-index admin", charset="UTF-8"'},
+            )
         return self._send(401, {"error": "unauthorized", "hint": "Authorization: Bearer <API_KEY>"})
 
     def do_GET(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
-        # 页面壳与健康检查免鉴权（探活用）；其余 GET 在设置 API_KEY 后都要 Bearer
         if path in ("/admin", "/admin/"):
+            # 后台页面：配了 ADMIN_PASSWORD 就要求 Basic；没配则退回"页面开放、数据接口要 key"
+            if ADMIN_PASSWORD and not self._basic_ok():
+                return self._unauthorized(basic=True)
             return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
         if path == "/health":
-            # 免鉴权，但未带 key 时只返回最小探活字段（不泄露作用域/存储/治理信息）
-            return self._send(200, self._status_payload(public=not self._auth_ok()))
-        if not self._auth_ok():
-            return self._unauthorized()
+            # 免鉴权，但无人认领时只返回最小探活字段（不泄露作用域/存储/治理信息）
+            return self._send(200, self._status_payload(public=not self._admin_ok()))
+        if not self._admin_ok():
+            return self._unauthorized(basic=bool(ADMIN_PASSWORD))
         if path == "/log":
             n = 200
             if "n=" in (u.query or ""):
@@ -795,8 +823,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
-        if not self._auth_ok():
-            return self._send(401, {"error": "unauthorized"})
+        if not self._admin_ok():
+            return self._unauthorized(basic=bool(ADMIN_PASSWORD))
         if not state["ready"]:
             return self._send(503, {"error": "not ready", "detail": state["err"]})
         if path.startswith("/v1/scopes/"):
@@ -842,8 +870,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
-        if not self._auth_ok():
-            return self._send(401, {"error": "unauthorized"})
+        # /v1/admin/* 是后台治理接口：Basic（页面）或 Bearer（脚本）都行；其余索引/检索接口只认 Bearer
+        is_admin = path.startswith("/v1/admin/")
+        if not (self._admin_ok() if is_admin else self._api_ok()):
+            return self._unauthorized(basic=bool(ADMIN_PASSWORD) and is_admin)
         if not state["ready"]:
             return self._send(503, {"error": "not ready", "detail": state["err"]})
         try:
