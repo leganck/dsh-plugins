@@ -98,7 +98,7 @@ Authorization: Bearer <API_KEY>
 免鉴权白名单只有两个：`GET /health`（未带 key 时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）和 `GET /admin`（页面壳，不含数据）。
 
 - 客户端：插件 `remote.apiKey`、review-service `INDEX_API_KEY`；
-- 管理页：浏览器打开 `http://<host>:18000/admin`，首次拉数据会弹窗要求输入 key，存在该浏览器的 `localStorage`（`dshAdminKey`），不会回传服务端之外的地方；
+- 管理页：浏览器打开 `http://<host>:18000/admin`，首次拉数据会弹窗要求输入 key，存在该浏览器的 `localStorage`（`dshAdminKey`），不会回传服务端之外的地方；也可以用 `http://<host>:18000/admin#key=<API_KEY>` 一次性打开（hash 只留在本地浏览器，页面会立刻 `history.replaceState` 清掉，不会发给服务端）；
 - 页面只做「查看 + 暂停/恢复/清扫」，删除作用域等破坏性操作仍走 curl/API。
 
 **`sync` 的三个分支**：`repoState` 与库中一致 → 直接 `unchanged`（1 个 RTT、0 字节正文）；
