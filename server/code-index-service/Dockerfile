@@ -18,8 +18,12 @@
 
 ARG PYTHON_IMAGE=python:3.11-slim-bookworm
 
-# ---------------------------------------------------------------- 底座（共享层）
-FROM ${PYTHON_IMAGE} AS base
+# ---------------------------------------------------------------- 依赖底座
+# 只装系统依赖 + Python 依赖，**不 COPY 业务代码**：
+# 改 server.py 不会让这层 1.5 GB 的 pip install 失效。
+# （之前代码 COPY 在 RUN pip 之前，每次改代码都要重装 onnxruntime-gpu/nvidia-*，
+#   单次构建多花 4~6 分钟；2026-10-21 拆开。）
+FROM ${PYTHON_IMAGE} AS deps
 
 ARG FLAVOR=cpu
 ARG VERSION=dev
@@ -44,10 +48,6 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# 只拷服务端代码：模型走 build context，测试脚本也带上（发布前在容器里跑自测）
-COPY server.py index_store.py knn.py governor.py embedder.py reranker.py model_downloader.py selftest.py bench_knn_modes.py scope_format.json /app/
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod 0755 /app/docker-entrypoint.sh
 
 # 版本固定的理由：numpy 2.x 与 ORT 1.19.x 的 ABI 组合没有实测过（1.26.4 是长期验证过的）；
 # tokenizers 固定版本保证 tokenizer.json 解析行为可复现。改这两个版本必须重跑 selftest。
@@ -81,6 +81,14 @@ RUN echo "${FLAVOR}" > /app/.flavor \
  && useradd -u 10001 -m -s /usr/sbin/nologin app \
  && mkdir -p /data /models \
  && chown -R app:app /data /app
+USER 10001:10001
+
+# ---------------------------------------------------------------- 应用层
+# 只有这层随业务代码变化：COPY 几个 .py（<1 MB），依赖层全缓存
+FROM deps AS base
+COPY --chown=10001:10001 server.py index_store.py knn.py governor.py embedder.py reranker.py model_downloader.py selftest.py bench_knn_modes.py scope_format.json /app/
+COPY --chown=10001:10001 docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod 0755 /app/docker-entrypoint.sh
 USER 10001:10001
 
 VOLUME ["/data"]
