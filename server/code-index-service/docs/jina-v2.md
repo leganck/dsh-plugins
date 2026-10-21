@@ -65,6 +65,9 @@
 
 模型不进 git（321 MB），发布在 GitHub Release：
 
+也可以在**后台页面**（`GET /admin` →「模型下载」）直接下载：显示进度/速度，支持取消、重试、强制重传与 sha256 校验，
+文件落在 `/data/models/model-jina/`（容器重启不丢）。
+
 ```bash
 node scripts/fetch-jina-model.mjs                 # 默认 release：dsh-embed-jina-v0.1.0
 node scripts/fetch-jina-model.mjs --check         # 只校验本地
