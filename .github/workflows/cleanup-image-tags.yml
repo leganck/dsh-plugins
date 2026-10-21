@@ -1,0 +1,99 @@
+name: cleanup-image-tags
+
+# 手动清理 GHCR 旧标签（dry-run 默认开启）。
+#
+# 背景：镜像矩阵收敛后（见 server/code-index-service/docs/image-matrix.md），
+# 以下标签不再产生，需要从历史版本里清掉：
+#   - sha-*                    （每次构建 +2~4）
+#   - jina-cpu / jina-gpu      （简写别名，已停用）
+#   - latest-jina-*            （jina 不再单独出镜像）
+#   - dsh-embed-jina-v*        （jina 版本 pin，已停用）
+#
+# 安全规则：**一个版本的所有标签都命中删除规则才会删**；只要还挂着任意保留标签就跳过，
+# 避免把 latest-cpu 这类通道标签误删。
+#
+# 用法：Actions → cleanup-image-tags → Run workflow
+#   dry_run=true  只打印将删除的版本（默认）
+#   dry_run=false 真正删除
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只演练不删除'
+        type: boolean
+        default: true
+      package:
+        description: '包名（ghcr.io/leganck/<package>）'
+        default: 'dsh-embed'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OWNER: ${{ github.repository_owner }}
+      PKG: ${{ inputs.package }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: 预览/删除
+        run: |
+          set -uo pipefail
+          echo "包：ghcr.io/$OWNER/$PKG   dry_run=$DRY_RUN"
+          versions=$(gh api --paginate "/users/$OWNER/packages/container/$PKG/versions?per_page=100")
+          echo "版本总数：$(echo "$versions" | jq 'length')"
+
+          # 所有标签都命中下述模式（且至少有 1 个标签）才进入删除候选
+          candidates=$(echo "$versions" | jq -r '
+            [ .[] | {id: .id, tags: (.metadata.container.tags // [])} ]
+            | map(select(.tags | length > 0))
+            | map(select(.tags | all(test("^(sha-|jina-cpu$|jina-gpu$|latest-jina-|dsh-embed-jina-v)"))))
+          ')
+          echo "删除候选：$(echo "$candidates" | jq 'length')"
+          echo "$candidates" | jq -r '.[] | "  id=\(.id)  tags=\(.tags | join(", "))"'
+
+          retained=$(echo "$versions" | jq -r '
+            [ .[] | {id: .id, tags: (.metadata.container.tags // [])} ]
+            | map(select(.tags | length > 0))
+            | map(select((.tags | all(test("^(sha-|jina-cpu$|jina-gpu$|latest-jina-|dsh-embed-jina-v)"))) | not))
+            | length
+          ')
+          echo "保留（含通道/版本标签）：$retained"
+          echo "$versions" | jq -r '
+            [ .[] | {tags: (.metadata.container.tags // [])} | select(.tags | length > 0)
+              | select((.tags | all(test("^(sha-|jina-cpu$|jina-gpu$|latest-jina-|dsh-embed-jina-v)"))) | not) ]
+            | .[] | "  keep \(.tags | join(", "))"
+          '
+
+          {
+            echo "## cleanup-image-tags ($PKG)"
+            echo ''
+            echo "- dry_run: \`$DRY_RUN\`"
+            echo "- 版本总数: $(echo "$versions" | jq 'length')"
+            echo "- 删除候选: $(echo "$candidates" | jq 'length')"
+            echo "- 保留: $retained"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry-run：未删除任何版本"
+            exit 0
+          fi
+
+          failed=0
+          for id in $(echo "$candidates" | jq -r '.[].id'); do
+            if gh api -X DELETE "/users/$OWNER/packages/container/$PKG/versions/$id" 2>/dev/null; then
+              echo "deleted version $id"
+            else
+              echo "::warning::删除失败 version $id"
+              failed=$((failed+1))
+            fi
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed 个版本删除失败"
+            exit 1
+          fi
+          echo "清理完成"
