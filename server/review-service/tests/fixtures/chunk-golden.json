@@ -1,0 +1,1248 @@
+{
+  "meta": {
+    "generatedAt": "2026-10-21T02:47:05.620Z",
+    "generator": "spikes/make_chunk_golden.mjs",
+    "depsDir": "C:\\Users\\legan\\AppData\\Local\\dsh-code-index\\embed-deps",
+    "node": "v24.17.0",
+    "note": "golden 由插件（JS）chunker 生成；Python 版 chunker 的 parity 目标：块数一致、块边界 ≥95% 相同"
+  },
+  "totals": {
+    "files": 41,
+    "chunks": 130,
+    "byStrategy": {
+      "ast": 41
+    },
+    "byLanguage": {
+      "javascript": 13,
+      "python": 18,
+      "go": 10
+    }
+  },
+  "skipped": [],
+  "files": [
+    {
+      "path": "plugins/dsh-code-index/lib/chunk-ast.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 9623,
+      "lines": 223,
+      "textHash": "3271e2feb1c3780a69aec9b89f162becae23039ad2066f5677d6f47cf57e18e5",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 3,
+      "chunks": [
+        {
+          "start": 16,
+          "end": 58,
+          "hash": "1abd4bad532b0545816c0a463fdd0fa1ff79b0bb4944853cff5e16dca591ff6a"
+        },
+        {
+          "start": 60,
+          "end": 99,
+          "hash": "ad45a94a7818158795598f2d01d7ed1c4e7fedbaebddebc570d4a7a9d988923d"
+        },
+        {
+          "start": 111,
+          "end": 223,
+          "hash": "b590fcafdcef49ab2eb136c2b104c930966929c6133f4e403ba526e15a8407d4"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/chunk-heuristic.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 6093,
+      "lines": 144,
+      "textHash": "ef845508ef9839fad680e3757ef7f6a9f25d6fb2d6d62643068431f4f617e227",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 20,
+          "end": 73,
+          "hash": "2ecd4f5477661d34fef248cabef8d41f16a9096e375514d964bcdcfa53378606"
+        },
+        {
+          "start": 86,
+          "end": 143,
+          "hash": "e3dd20c2a04b9399f979622b04bdfffb045d62969d32f64ee70822e127fcd348"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/chunker.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 4428,
+      "lines": 116,
+      "textHash": "46c07fa98552efe9a8c9f5e6df39b9d12856b8ba120c077529dc1563292c4d2d",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 15,
+          "end": 110,
+          "hash": "de75252c95208790d5d912032166de303bcf8122d95cfc893788d4d6b8b1496c"
+        },
+        {
+          "start": 113,
+          "end": 115,
+          "hash": "66affba15adb79a61224b80ad8f060858afd255f502d95b81ef0116c331e105a"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/deps.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 15903,
+      "lines": 389,
+      "textHash": "55c65372c26efec5037c6e956287d97c7415383f243e6f500f3e81ed05c0403a",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 7,
+      "chunks": [
+        {
+          "start": 19,
+          "end": 58,
+          "hash": "0ac71809f80ad2be6792ae0b364fa30446b4e95d494acfa8e242ff0167833ebc"
+        },
+        {
+          "start": 61,
+          "end": 102,
+          "hash": "2edd32cae7cf13d6096a7a8bdd40209b2f4e6d23e029d76fa1425d1aaada5cc6"
+        },
+        {
+          "start": 105,
+          "end": 148,
+          "hash": "83c8c8dc80b3c91051ec27ad012868ecbbbe60651379612efe0ed14aaf4032f8"
+        },
+        {
+          "start": 151,
+          "end": 229,
+          "hash": "b9b6f2e499c1f3332b089ecf19709f6657964af5a273c6e4601cf4bc21991421"
+        },
+        {
+          "start": 232,
+          "end": 295,
+          "hash": "efd5f1c3fb83f7ce6b06848f6e11c4276f4057845fa08b70f3906a596f0ca466"
+        },
+        {
+          "start": 306,
+          "end": 372,
+          "hash": "c19e52f375e80c91f86b2ea90392d5834fe40bb6d6226b2cbb256f84e73f7881"
+        },
+        {
+          "start": 375,
+          "end": 388,
+          "hash": "1314d462527a70c595aa1011bd1de2bcd59e3e5564199d821dde34ec0bff6597"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/hash.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 437,
+      "lines": 13,
+      "textHash": "8b0c8e7f418f0497ece44ceeb7984da3001c1b9f6db96024d23e54fec5b57a08",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 7,
+          "end": 12,
+          "hash": "7628bb4fe9e4a8f60a3b0e78397087d5cd57c9524ae0e84b900f903b5c7c81cb"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/indexer.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 20623,
+      "lines": 421,
+      "textHash": "06a371fb6c16681f22a128f1cb1c2e72d3ded8f711f99869ad6b058495669dfc",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 5,
+      "chunks": [
+        {
+          "start": 14,
+          "end": 61,
+          "hash": "c9b5b4c168833cf14880f319c78c46acf27713d8aca12a2fef2bcb08b1d897a3"
+        },
+        {
+          "start": 64,
+          "end": 69,
+          "hash": "59999eb48e26e87aece1dda1c4ba234632f2456966b797c1ddcd0227c3b66d9b"
+        },
+        {
+          "start": 83,
+          "end": 202,
+          "hash": "d46655227f102f35ad012018c95275b0909c33eb65e22b183c651721bf6902da"
+        },
+        {
+          "start": 203,
+          "end": 312,
+          "hash": "5c3db6f2cb6a3f58354316ece1a0434499b3efc3ba0c5112c1c18c101ec5fdd5"
+        },
+        {
+          "start": 315,
+          "end": 420,
+          "hash": "59ffc8ef12947e09a32731258fc52121a28e22b941dd06b46ae61c7e3d8a5806"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/parser-hints.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 5456,
+      "lines": 108,
+      "textHash": "cd4bb9c4a564334c72eeb7ac9f9409837ad1b4657d878fdb46dd3aef9390e9ca",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 13,
+          "end": 73,
+          "hash": "3a725cdbf2cd7d9f42aec1018b91e00fdd570bb9a68b94ef970d804edeb6f398"
+        },
+        {
+          "start": 79,
+          "end": 107,
+          "hash": "fb6211c18601dabe16fd7ddd1e33e1c6b1d3ca3d30ef5a67b668005dfbbe3a10"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/query.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 4207,
+      "lines": 97,
+      "textHash": "b1ee57597f7769400bf47f4e74c30ad96fb29e3f3fd2bf30ffd50cb2715f8cee",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 13,
+          "end": 60,
+          "hash": "b5cf7bad0142f4c01809eec9784ad569839f74be99d98c9bf7c3ccdb258c46f7"
+        },
+        {
+          "start": 62,
+          "end": 96,
+          "hash": "b9e4460b03034ea5a951b2c25ddf0201895c62122560736688e01cb6d55b639a"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/remote.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 15212,
+      "lines": 388,
+      "textHash": "4b9ff50ff76a1f311e27c112e6a680515af3be5614c331157fdee2c8e62a0324",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 6,
+      "chunks": [
+        {
+          "start": 24,
+          "end": 74,
+          "hash": "cf66d04a219c62aaa1015a683f4062f65b7932347fbd031177e740725c44c201"
+        },
+        {
+          "start": 76,
+          "end": 144,
+          "hash": "dfad1aef223e5cfe5544250ce27ff8e5605754295b67314d7a396bbbbcffe2a8"
+        },
+        {
+          "start": 147,
+          "end": 247,
+          "hash": "f00169255598f64867ea6e1fc2827729a4e6165a770cec10f079b207d7bde787"
+        },
+        {
+          "start": 258,
+          "end": 258,
+          "hash": "942f407a38a663703d1bb8538a9b044906a8676b979c7a14b6fb5d2d78772653"
+        },
+        {
+          "start": 266,
+          "end": 385,
+          "hash": "0a3ee65c96229d6c1757bb8130c4386b740518d84a08551adb968e4a6cb0fb9e"
+        },
+        {
+          "start": 386,
+          "end": 387,
+          "hash": "6bc5c90f6a43430d3bfee8a62a859c43431236a343dc28bd91c1a507da033dbd"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-code-index/lib/repo.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 2488,
+      "lines": 56,
+      "textHash": "b31b5f5875f60568318d2f087e5fabd6433f5fc95c91e8f7680fb20cdf81b72b",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 55,
+          "hash": "fcb1f6a9f7186f7bec9479126ab06ce79fb70e78ccf1cec6d197cca1efc0989a"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-multiroot/index.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 5291,
+      "lines": 119,
+      "textHash": "3ddfab4998a3367cb10a1bf9dc976a4290cd8a00e623986a9ecbd99d5c4068e8",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 56,
+          "hash": "83f5ada7b4d366eaf0c7ed6b9f8bc0c46ab6812407a543163e7b51ce7a0c9230"
+        },
+        {
+          "start": 58,
+          "end": 118,
+          "hash": "5ff6a54ef17e6e1c6a86c2c87455be0d3092af1356c6a746140ff4aa11b8b717"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-multiroot/lib/registry.js",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 6346,
+      "lines": 159,
+      "textHash": "bc6f060a8a70a2d9fc7e744e89dfebffeae8cfbef27a553ae06c2de2c01cf480",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 3,
+      "chunks": [
+        {
+          "start": 13,
+          "end": 102,
+          "hash": "40846bbb248c3924de20360e84436c9795fb0f59f906ec7e509c703bc40ac867"
+        },
+        {
+          "start": 110,
+          "end": 149,
+          "hash": "df94e9985f48717ef5532f04b8cccd597ba97acc0aeb444a97b6184c0628c7fa"
+        },
+        {
+          "start": 152,
+          "end": 158,
+          "hash": "a068f4d73053022fb87a5e4e12dad16f7ae33315f22005405efd5b9eda0783bc"
+        }
+      ]
+    },
+    {
+      "path": "plugins/dsh-multiroot/test.mjs",
+      "repo": "dsh-plugins",
+      "language": "javascript",
+      "bytes": 5854,
+      "lines": 103,
+      "textHash": "ec200e6380b71b91272ab125b2dcbefdff99d52f81b3af77a2a4a1ab3d5b72d8",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 3,
+      "chunks": [
+        {
+          "start": 7,
+          "end": 46,
+          "hash": "86e68817189489f1f648b8845370dae20081e3207fae4efaf74a59da60d152d6"
+        },
+        {
+          "start": 47,
+          "end": 86,
+          "hash": "240d58e4703981d9f56e1f7e72d606d8b940836ad8bf32092fe57553d289e289"
+        },
+        {
+          "start": 87,
+          "end": 102,
+          "hash": "1176a6efc94a06054ad2939d11f1f6ce0c56aacd8a82e760da90569e41f029a1"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/__init__.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 549,
+      "lines": 12,
+      "textHash": "b53203893782853373e6de1ff59d4b942cc8f87ca362bc931d89c7da2f188b78",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 11,
+          "hash": "0561e4661996af8cf87c7d2f7612d96409ece4b9dc184a40a386b0d3c941c977"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/chunker.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 15063,
+      "lines": 437,
+      "textHash": "ac2bafd35fb392117f85e2c27160d55dd6bd74091437f22e0f355bed0cbc6e63",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 8,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 53,
+          "hash": "1fd531a7aa87a2d251e4c573b35cdc7b5e21f7c59412d1a0489981bc862dc5c5"
+        },
+        {
+          "start": 55,
+          "end": 105,
+          "hash": "16e1310946d973fab3182f70310a42df77f730f4706ae3f5e3a9540899c22436"
+        },
+        {
+          "start": 111,
+          "end": 178,
+          "hash": "12da6268298a994253e65116519ae5794f98fe99c6c52c0b4b3873b2b15cf9b0"
+        },
+        {
+          "start": 181,
+          "end": 232,
+          "hash": "6b48ede8fa7cb36fdad6c448bb78500445fbce06f50400dd43ddf6ad7f794ecc"
+        },
+        {
+          "start": 238,
+          "end": 283,
+          "hash": "870e66773b2f3ccaca49291aec0909969168d354409a4c67f23647e735e21358"
+        },
+        {
+          "start": 286,
+          "end": 356,
+          "hash": "b43ee6fdc296005ee2c346c5bc8a4fbf3bcaa35b7f802613c0fdaa82ecb3845d"
+        },
+        {
+          "start": 359,
+          "end": 415,
+          "hash": "5193c8ce67589eab074a84ceaa3af1a4d582a81bffc7da46f44638f8d1d97fa4"
+        },
+        {
+          "start": 418,
+          "end": 436,
+          "hash": "e908772dc3cc01e251c12cb9a55de29e7e759f87645d79e50e7b513c2d67e2c9"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/clients.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 12883,
+      "lines": 346,
+      "textHash": "835c0a08c14f94c8586332b4a140e91abb8be453b327af99b6d259192d46d937",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 7,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 40,
+          "hash": "e0abfeb4b5c2574fef9506a06f10dbdf6b27a2e70b8550abb3655a63f5dc6e94"
+        },
+        {
+          "start": 46,
+          "end": 103,
+          "hash": "fb0cb737481d07b1da981171bceb55ddbde8fcdb368511690e67722539071bc7"
+        },
+        {
+          "start": 109,
+          "end": 228,
+          "hash": "cc7b82434729316cdc01371372ef236d78d608bef35953e3c6a4f01dbd5ddb4d"
+        },
+        {
+          "start": 229,
+          "end": 239,
+          "hash": "a0df2c510f5d6f3b47481394f5de0930645c68ed5fd2d065ed902b2849197f1e"
+        },
+        {
+          "start": 245,
+          "end": 286,
+          "hash": "f29a1f422ae8bbde4394318f4aecf45738035d10c2a1ef03e3a73880d266a140"
+        },
+        {
+          "start": 289,
+          "end": 332,
+          "hash": "c84fb63ab9871fed721922e52345a5abbe1de2cc1e2dbe957a5cd228eff67c8b"
+        },
+        {
+          "start": 335,
+          "end": 345,
+          "hash": "5e5447f2bc23b93098e7085d0ea53750ff6c1ce451ee96ed1db5d452c8d7d18a"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/config.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 6516,
+      "lines": 171,
+      "textHash": "d5f5eaf6fbcd8855f9f2f7086141dc2c8238fb43d3b4ca2f846ffe3c8e42ea6a",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 87,
+          "hash": "4da7c84165db135c2e1b3f71d82d6d24a4f50bcb40db989193fe4ea0b01552db"
+        },
+        {
+          "start": 90,
+          "end": 170,
+          "hash": "8305ec39cb419a294dfec97c6b5d5e9c114caeb81f2763b4c0b1e508b6e41495"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/context.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 6793,
+      "lines": 192,
+      "textHash": "7da941bfd4bb30f5390bc874563c6c9c58f8d1b40500398fe9895fc28cd5a83a",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 4,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 48,
+          "hash": "a98cc6372c1ed6c40a646a873bc8fb9408873d0ca6dee9af7278882f74b77a92"
+        },
+        {
+          "start": 51,
+          "end": 91,
+          "hash": "9a0eec29c81b5ec43633c8a7c09c75b7637ef37f7dd85815cf02b35f2c45d8bb"
+        },
+        {
+          "start": 94,
+          "end": 188,
+          "hash": "aac00eee843599f3ea8e3a8a76435bab43c6c6f7775bc817d6f3f85a7e1dbd4c"
+        },
+        {
+          "start": 191,
+          "end": 191,
+          "hash": "e4ff5352a38d4dcb08f8368db2a403857ef1ef5b7d78a691b158ba76ec47d999"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/diff.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 9011,
+      "lines": 257,
+      "textHash": "49dbd240bb53a3813ca52010b77b860392517d33647db5802be59cc50f2f30ac",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 4,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 119,
+          "hash": "bac4c3240a600e25acddc345c0afca4731773730ab5a9323a9eb5ced645e7c94"
+        },
+        {
+          "start": 122,
+          "end": 177,
+          "hash": "b265b7165552ca48bd9371638e5c750c460c5190f68020013f34b0a090db96ad"
+        },
+        {
+          "start": 180,
+          "end": 234,
+          "hash": "38eca907998c217950190ced5e0564a0174af6bc8e90907e76b042d109f2cc9a"
+        },
+        {
+          "start": 237,
+          "end": 256,
+          "hash": "8ea23f312bfaa537b9223f7ff9b62378f280b60a393ae6179f40c3bc6ae13e1b"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/gitdiff.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 4032,
+      "lines": 111,
+      "textHash": "da3be2ac78af115849efbe163854c8d1bfea7051029c23421ac9d1bbe5a4f651",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 77,
+          "hash": "a258860738b00d4e8d6a74ac471d831a0199a5eebcc3619a1520593938e690b6"
+        },
+        {
+          "start": 80,
+          "end": 110,
+          "hash": "6e28e8c02de0bdc69be5b34298fc3329e908c3e7ecce39dfea4fc232efcd75a5"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/graph.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 36189,
+      "lines": 903,
+      "textHash": "8283de8ac3ec53ab5d4e50c2c316ea93bef4ccd13fc2deda08d9c0791ddfbebd",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 15,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 42,
+          "hash": "d13b4f8f7aaa0b491fbadda636d6b6fdb425f66d5f882d0034f2575787351f52"
+        },
+        {
+          "start": 44,
+          "end": 85,
+          "hash": "a327f1fef60c79f50bfea6614903a5381a38f435ec030c9590a77ba189fdeaaf"
+        },
+        {
+          "start": 89,
+          "end": 129,
+          "hash": "25cb236830476ae8330f43822e7758d016ea2fa068bcb20f4a6ebf09e34b6f18"
+        },
+        {
+          "start": 131,
+          "end": 172,
+          "hash": "e83a98fb6f1ca80b95ff519303af94fd7994a90a3e50d38b619b4a8f7aa1287c"
+        },
+        {
+          "start": 174,
+          "end": 213,
+          "hash": "e98016ab467a5e301493c9655173d282e8de3819078433aae80a5336d4092230"
+        },
+        {
+          "start": 216,
+          "end": 256,
+          "hash": "0f7dca231a74f90909bb5d3ccfda39c0fc0ca10954a4e56161bb8073deef31d3"
+        },
+        {
+          "start": 259,
+          "end": 271,
+          "hash": "4d405b0eb1c3e7bf1b8da9cdf455ae03abad2b03b2e6e75534815983d75c10bd"
+        },
+        {
+          "start": 277,
+          "end": 396,
+          "hash": "44b5bb8afac721ab79da5de0b6358da1c2f0109a6209f62cba67d7445a6c4f76"
+        },
+        {
+          "start": 397,
+          "end": 516,
+          "hash": "9a179de79c881496d6421dcb0d39371fef9f3794d544d625e08730895107701c"
+        },
+        {
+          "start": 517,
+          "end": 636,
+          "hash": "45218d21f2c9f98485754fdcebeba5cb19acfdb29d0b9e76205493e1b147bf6e"
+        },
+        {
+          "start": 637,
+          "end": 705,
+          "hash": "de829e979804bc3111d20c3883a518f26cee6d021c1693aaf6dd6e16905d7578"
+        },
+        {
+          "start": 711,
+          "end": 780,
+          "hash": "4f3fc60583b493fcc7e3932170c9df45297b7054caf7044a48e66011ac9d15b0"
+        },
+        {
+          "start": 783,
+          "end": 824,
+          "hash": "ab8db34a1d07ddd176c890c449fa85c8401d89d3a7b6d74523a03e171df0be8c"
+        },
+        {
+          "start": 827,
+          "end": 899,
+          "hash": "132cc2813440d0d9be13dce96ea1e285bc9754a53f4c006078de901e77567bba"
+        },
+        {
+          "start": 902,
+          "end": 902,
+          "hash": "3756ac1b33f0b55537456199b38a842115f74f4e4109ce78e4400d736bbe2f02"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/index_state.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 2353,
+      "lines": 67,
+      "textHash": "540dea6fc9919d9c3c0ab8a1e03d37f27ffdee1467ac5c9761e0dd284c34bb32",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 66,
+          "hash": "96ab4d65c975547742d8869af09bf66dd434af996df6259259b8b28f630faf7f"
+        }
+      ]
+    },
+    {
+      "path": "server/review-service/app/llm.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 6719,
+      "lines": 176,
+      "textHash": "91d8bc2296ebd77c07dc84a8eb2c822e58433cb7caf405c9287dcc3f976ee1f8",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 3,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 60,
+          "hash": "af2d337f0d281e741808daaee7782dcdb8b7ef1012f73e438eb442a1a2988790"
+        },
+        {
+          "start": 63,
+          "end": 160,
+          "hash": "b066683911a0ab17e9ef61264841cc9bfdd0a82449e678fe20c024a16ab8eacb"
+        },
+        {
+          "start": 166,
+          "end": 175,
+          "hash": "0b32aa94b1361c955aa2f43a748bfc345f5ed70360f49c1883ceab97c0b88556"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/bench_knn_modes.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 9925,
+      "lines": 227,
+      "textHash": "e70d7c65d7c147380dd20e360ce7d6adc54077f8b8294a7420cd48e8212dcc54",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 4,
+      "chunks": [
+        {
+          "start": 2,
+          "end": 71,
+          "hash": "b704bb4adac61c6513ff125e6c70919cf29ddddade647fe0f5cbd69c3cbb28ab"
+        },
+        {
+          "start": 74,
+          "end": 114,
+          "hash": "b392c409520e3cf840b5e10bdcd9f0d2d7eb520bdc8f14ac45645454a9347f17"
+        },
+        {
+          "start": 117,
+          "end": 222,
+          "hash": "63133555c9f051a60d3a9511c52f1d8c802319c111d8e3e22fad7f4f00202403"
+        },
+        {
+          "start": 225,
+          "end": 226,
+          "hash": "12c5c4b0d7c69fa3b629575ac993b6e531614689f8359dae03394dcab8fbde8c"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/embedder.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 4483,
+      "lines": 114,
+      "textHash": "3318b9a77a8e3189f95f11106726c357162572cf52662374fec37e91a8baf99f",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 2,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 42,
+          "hash": "e1821f995cc954494d91d8f9fa0fc44c8b74d4639c79a699fbae199d962377b0"
+        },
+        {
+          "start": 45,
+          "end": 113,
+          "hash": "e7f97af932dde02e1e3615a06aab2ddbee26cdf5141de5ebb05b0a86ea341106"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/governor.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 5616,
+      "lines": 140,
+      "textHash": "1886748f5523a1b3898eae005fff7a034f1a2222bb7d6b09f56e4da32592757b",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 3,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 13,
+          "hash": "ba7769c54e253f7cd8f463b620329261fa9fbebe1cfc31918fd5b75e34675f09"
+        },
+        {
+          "start": 16,
+          "end": 135,
+          "hash": "275c7671bf228233913916370953b39f197e1a3872175d6c2277d8205902b19a"
+        },
+        {
+          "start": 136,
+          "end": 139,
+          "hash": "3da10b895a6a02c6c0d40538549bdd2b80a7e1a2e3cc5518e46f1d7b232812ea"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/index_store.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 24892,
+      "lines": 537,
+      "textHash": "26ce414b54bd4b55bf9d7482d0d95779a8726facbdd354525b60bdee2612cc05",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 6,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 73,
+          "hash": "09c1621be667c6aab953f939d8b3a067af3b0b898dca05e5fd114ba8e88db555"
+        },
+        {
+          "start": 76,
+          "end": 119,
+          "hash": "911f0926f263478de86a850f2c20f7d0d21a65063bc05d7057efbb6a9263dcad"
+        },
+        {
+          "start": 122,
+          "end": 241,
+          "hash": "f712ef92b1d87ae223440313e981a6d516c79c546cde3929407d7f004be350f2"
+        },
+        {
+          "start": 242,
+          "end": 361,
+          "hash": "b70cd3269a56c1f9e1cd04d3c97ee8c2138c9f88ae087682728ef02fba1ab14f"
+        },
+        {
+          "start": 362,
+          "end": 481,
+          "hash": "6d3771663723aac7abd4a59bbdf7ee48264254dacba78d5a2692907fc3fa3548"
+        },
+        {
+          "start": 482,
+          "end": 537,
+          "hash": "065ddeb42a92b19d809590c0cca0ffc56233aee7e7e5f6f819a255dc78a535a3"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/knn.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 3407,
+      "lines": 84,
+      "textHash": "cc9de4f46fe43bb90f87261b38581fcd5945653fd5c32d6a20d0faef95c6dac1",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 83,
+          "hash": "9bf117c2748d8d4616f3c719793b2ad0b2f383d33adee7fa8690ad5e1b9242c7"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/reranker.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 2740,
+      "lines": 62,
+      "textHash": "d0d9c2fbd7755dd9f80fdfb322ea347670323dee13b8f024ee32778c354bdbf1",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 1,
+          "end": 61,
+          "hash": "b8e9f949b47f39c657f3617504791a828bb680d1d0dd9fdc10f3bbbd1f696278"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/selftest.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 11148,
+      "lines": 258,
+      "textHash": "2e6170080f2d266c88f9be86a42fa96dca64a2e17a177f4763cee76a36e48830",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 6,
+      "chunks": [
+        {
+          "start": 2,
+          "end": 41,
+          "hash": "b3e5eec81532ad0e1a3601ddab74ded2866f4f2298535168e3e79ae506dbb285"
+        },
+        {
+          "start": 43,
+          "end": 85,
+          "hash": "5486fa10a07d7be588f63018444798d7fc5ace4b012f39b529746ea9bcb38cf8"
+        },
+        {
+          "start": 88,
+          "end": 95,
+          "hash": "d3c0d87f739d68e485e5d785273181dbbca4f078a9a849b08f6ea2f17620e1f0"
+        },
+        {
+          "start": 98,
+          "end": 217,
+          "hash": "9d731ec6d103676ca21635ed25b28863e2804338f3c6db8eada5d772b5e499ae"
+        },
+        {
+          "start": 218,
+          "end": 253,
+          "hash": "869b3710b36f7ef85721ef0b0d95c2daec1ca751a16eb2698aee1c80af0c2ab5"
+        },
+        {
+          "start": 256,
+          "end": 257,
+          "hash": "85d88cdd4da2412dfa8cfeaedea8c2af5e280c7da58c315ec02ebec27389d2a4"
+        }
+      ]
+    },
+    {
+      "path": "server/code-index-service/server.py",
+      "repo": "dsh-plugins",
+      "language": "python",
+      "bytes": 25145,
+      "lines": 554,
+      "textHash": "252b4434e07fa149dc951a5ae2ae0be07bb3270780f8dd3c60277ff2cd7fc885",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 8,
+      "chunks": [
+        {
+          "start": 2,
+          "end": 41,
+          "hash": "e2a2f7f4416b447c093f552c58557cc4342462452b8dee15db78ec42850ca3dc"
+        },
+        {
+          "start": 42,
+          "end": 87,
+          "hash": "594ae0457dcb5e0735dd58345825f4b96a228e416ab2d40611b3df097ce27367"
+        },
+        {
+          "start": 90,
+          "end": 167,
+          "hash": "4dd1568de7b81a48f19bb156fb9ec8325795e159e3f52dd767e714e41e164ee1"
+        },
+        {
+          "start": 170,
+          "end": 256,
+          "hash": "901b66d38a3a4bee52bf76a6d3c33697426faf50ec173de61460501896f03841"
+        },
+        {
+          "start": 259,
+          "end": 299,
+          "hash": "a59ad094ce4036a1349b553ab9f0cf8543fe10416b3b4f3647fc83ee57343799"
+        },
+        {
+          "start": 303,
+          "end": 422,
+          "hash": "c0fe47d30e7404a00a0c1e0a222c36e88729ae805116803be93b0e8ddcab9dd0"
+        },
+        {
+          "start": 423,
+          "end": 533,
+          "hash": "23d6e64e71a941e4c55886d5a266515f75826326bebcbce2938a1007ca1ad2ff"
+        },
+        {
+          "start": 536,
+          "end": 553,
+          "hash": "63e8046867c95239699d108fdb8ade67ac3a6a5b181ce2e73dfade5197e6c5ec"
+        }
+      ]
+    },
+    {
+      "path": "application/app.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 1055,
+      "lines": 42,
+      "textHash": "6af14e303bde85e68f33319c7229dc1f76066a76b1d0c91d80dac78f6d702ea6",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 41,
+          "hash": "8b8bf8c401632ffca88917d97ff0f7777ed3744a7d2f05af3901ec7e08391d10"
+        }
+      ]
+    },
+    {
+      "path": "application/local_load.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 1950,
+      "lines": 68,
+      "textHash": "66557ce3ffcd9832e5cbddce1f89625194f83792f929e728e1c742768c1a7d68",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 67,
+          "hash": "47280015c39ec8e327fc5a5dc9d1774359272b041f13dc086a8592390bf20a2c"
+        }
+      ]
+    },
+    {
+      "path": "application/local_load_resource.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 1189,
+      "lines": 55,
+      "textHash": "7ce483e8646041af597073554f77b918c51ea236de1cc32a7fc7b85fb021ee43",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 54,
+          "hash": "8a7e6a68c5088d93c358d2c6d54a23a7a533794925548b7018bcfa992834050a"
+        }
+      ]
+    },
+    {
+      "path": "application/local_load_xhr_proxy.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 5664,
+      "lines": 217,
+      "textHash": "3527000c59d8bc5820479adf8e0ebbff5dd72c4479243de7acab16467aa549cf",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 4,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 56,
+          "hash": "0a1915840e8747cd9833f0749661dde75a78575fc49bfbd10a43eeb2cca77ac6"
+        },
+        {
+          "start": 61,
+          "end": 95,
+          "hash": "4504d101721a55a5e976ca42a615fee976aba1df09d4be09c1fa4d699854051f"
+        },
+        {
+          "start": 100,
+          "end": 183,
+          "hash": "63c305d4b8157143090adc2c7a8902ec86ca9b8eb4bce47c74ccb3a4437f4449"
+        },
+        {
+          "start": 185,
+          "end": 216,
+          "hash": "61daa02210798904ab8e5bac38faaa03cedbb187a4fff74ee3afaf1d93755bd2"
+        }
+      ]
+    },
+    {
+      "path": "application/options.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 3075,
+      "lines": 55,
+      "textHash": "9cad569ea315b68a85e5edbf0d8f18007d15e1d1f2358d359be304292bcd6a45",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 54,
+          "hash": "61be8f9e7525aa7399f73e7d6eda8ad3883fe68c3646ce249120dbaeb131409a"
+        }
+      ]
+    },
+    {
+      "path": "application/options.linux.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 416,
+      "lines": 18,
+      "textHash": "6230c62ca1d8f7d84687ebc228fbb5e4f7d92ff50f263781401b462dc3538cf0",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 17,
+          "hash": "c805e8a2b027f30173812a993b8182d4dc2bde64ad790e0a4290aaa4fec46a95"
+        }
+      ]
+    },
+    {
+      "path": "application/options.mac.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 2077,
+      "lines": 45,
+      "textHash": "512888e13e55cdf2caa0a297ac9ecd8577662430ba7980c18ae877d6b1618ccf",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 44,
+          "hash": "f02e0456c8b2b8892763c3abbc96ea59c097fea267e4c4eb0d0705ef41fc9896"
+        }
+      ]
+    },
+    {
+      "path": "application/options.windows.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 1452,
+      "lines": 53,
+      "textHash": "0c824f53d493da3a515e77e1d773b8a4ccd1531406428ff51e9125f5279fd98b",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 52,
+          "hash": "d4ff40153a1c763c9fd45297daff7aab0fe82bdaedb04e074e15018cff6cf838"
+        }
+      ]
+    },
+    {
+      "path": "application/pack/pack.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 668,
+      "lines": 35,
+      "textHash": "50196fb558a7d21da5835936762e73c6c8924405d4b443b8695f753a8a5c1b77",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 11,
+          "end": 34,
+          "hash": "ae8ea191d279fe5c7ab549b8ec0338a1e5c99b9fae5d08d4e4ecb20150584149"
+        }
+      ]
+    },
+    {
+      "path": "application/pack/pack_dev.go",
+      "repo": "energy",
+      "language": "go",
+      "bytes": 301,
+      "lines": 16,
+      "textHash": "81163d29760d21b3ae93b2e3505ad66519f45351311f45f9b93250ab0b8be0c0",
+      "strategy": "ast",
+      "fellBack": false,
+      "fallbackReason": null,
+      "chunkCount": 1,
+      "chunks": [
+        {
+          "start": 13,
+          "end": 15,
+          "hash": "9eea6c7d6f150fc62c18209517ef98c32fabeeb4c4bc715647dff523e2dbb0d8"
+        }
+      ]
+    }
+  ]
+}

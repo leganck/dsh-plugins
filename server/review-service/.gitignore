@@ -1,0 +1,15 @@
+# 运行时
+__pycache__/
+*.pyc
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+out/
+
+# 回放与调试产物
+*.log
+tmp/
+.venv/
+*_cache/
