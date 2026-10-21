@@ -664,6 +664,36 @@ def main():
           any(s.get("repo_name") == "smartpos-crm-order" for s in req("GET", "/health")[1].get("spaces", [])),
           None)
 
+    print("\n[28] 向量标签统计 / 清理旧 tag / 后台检索测试")
+    page = req_raw("/admin")[1]
+    check("后台包含「检索测试」与「模型与向量标签」卡片",
+          "检索测试" in page and "模型与向量标签" in page)
+    row = server.store.repo(NS_NULL)
+    vec = server.embedder.embed(["old model probe"])[0]
+    server.store.put_vectors(row["lineage_id"], "old-model-tag", [("hash-old-tag", vec)])
+    st, health = req("GET", "/health")
+    tag_rows = {t["tag"]: t for t in health.get("tags", [])}
+    check("/health.tags 同时列出当前模型与旧 tag",
+          server.state["info"]["tag"] in tag_rows and "old-model-tag" in tag_rows, list(tag_rows))
+    st, purged = req("POST", "/v1/admin/purge-tags", {})
+    check("purge-tags 删掉非当前 tag 的向量", st == 200 and purged.get("deleted", 0) >= 1, purged)
+    st, health2 = req("GET", "/health")
+    check("purge 后旧 tag 消失",
+          all(t["tag"] == server.state["info"]["tag"] for t in health2.get("tags", [])),
+          health2.get("tags"))
+    old_pw, old_key = server.ADMIN_PASSWORD, server.API_KEY
+    server.ADMIN_PASSWORD, server.API_KEY = "admin-pw", "test-key-123"
+    basic = "Basic " + base64.b64encode(b"admin:admin-pw").decode()
+    try:
+        st, _, body = req_auth("/v1/search", auth=basic, method="POST",
+                               body={"namespace": NS_NULL, "query": "null tag probe", "k": 3})
+        check("后台 Basic 可调用 /v1/search（检索测试）", st == 200 and "hits" in json.loads(body), st)
+        st, _, _ = req_auth("/v1/search", method="POST",
+                            body={"namespace": NS_NULL, "query": "x", "k": 1})
+        check("无凭据调用 /v1/search 仍 401", st == 401, st)
+    finally:
+        server.ADMIN_PASSWORD, server.API_KEY = old_pw, old_key
+
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")
     shutil.rmtree(TMP, ignore_errors=True)
