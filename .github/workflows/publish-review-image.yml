@@ -46,7 +46,7 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/dsh-review:latest
             ghcr.io/${{ github.repository_owner }}/dsh-review:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/dsh-review:sha-${{ steps.meta.outputs.short }}
+            # 不再推 sha-*（每次构建都涨）；版本 pin 用 review-v* 标签
 
       # 门禁：容器内自测不过就不推
       - name: 容器内自测
@@ -60,4 +60,4 @@ jobs:
         run: |
           docker push ghcr.io/${{ github.repository_owner }}/dsh-review:latest
           docker push ghcr.io/${{ github.repository_owner }}/dsh-review:${{ steps.meta.outputs.version }}
-          docker push ghcr.io/${{ github.repository_owner }}/dsh-review:sha-${{ steps.meta.outputs.short }}
+          # sha-* 标签已停用（见 docs/image-matrix.md）

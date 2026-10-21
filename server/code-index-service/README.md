@@ -238,10 +238,11 @@ curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
 |---|---|---|---|---|
 | `latest-cpu` | cpu 底座 + 嵌入模型 | **≈267 MB** | 485 MB | **默认推荐**：查询为主、局域网、没显卡 |
 | `latest-gpu` | gpu 底座 + 嵌入模型 | ≈1.7 GB | 3.06 GB | 大规模建库、高并发 |
-| `latest-cpu-rerank` | + 重排模型 | ≈759 MB | 1.06 GB | 要用远端重排（`rerank=fast|quality`） |
-| `latest-gpu-rerank` | gpu + 两个模型 | ≈2.0 GB | 3.63 GB | 大规模 + 远端重排 |
-| `base-cpu` / `base-gpu` | 只有运行时（无模型） | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | 模型在 NFS 上、或自己叠层 |
-| `jina-cpu` / `jina-gpu` | 底座 + **jina-embeddings-v2-base-code**（代码检索变体） | ≈0.37 / ≈1.8 GB（估） | **603 MB / 3.18 GB（实测）** | 英文/跨语言查询多、需要 8k 上下文 |
+| `latest-cpu-rerank` / `latest-gpu-rerank` | + 重排模型 | ≈759 MB / ≈2.0 GB | 1.06 / 3.63 GB | **deprecated**：重排改为挂载 `model-rerank`（保留 1 个版本周期） |
+| `base-cpu` / `base-gpu` | 只有运行时（无模型） | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | **推荐**：配合模型挂载（jina / 重排 / 自定义） |
+
+> 标签策略见 [`docs/image-matrix.md`](docs/image-matrix.md)：模型（bge / jina / 重排）**不进镜像矩阵**，
+> 统一用 Release 资产 + 挂载；`sha-*` 与 `jina-*` 别名已停止发布（旧标签冻结、仍可拉取）。
 
 > 为什么默认不带重排模型：服务端 `rerank` 默认就是 `off`，缺模型时 `/health` 报
 > `rerank_ready=false`、客户端**自动回退本机重排**。需要远端重排再拉 `-rerank` 变体即可。
@@ -252,15 +253,29 @@ curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
 1. **直接拉 GHCR（推荐）**：上面那段 `docker run`。
 2. **compose**（cpu）：`cp .env.example .env && docker compose up -d`；
    有 NVIDIA 卡就叠加覆盖层：`docker compose -f compose.yaml -f compose.gpu.yaml up -d`。
-3. **自建**（改代码 / 想自己出镜像）：
+3. **模型挂载**（推荐：同一个镜像，换模型不重新构建）：
+
+   ```bash
+   node scripts/fetch-models.mjs                  # → models/model、models/model-rerank（bge + 重排）
+   node scripts/fetch-jina-model.mjs              # → models/model-jina（jina，可选）
+
+   # bge + 重排（都从宿主机挂载）
+   IMAGE=ghcr.io/leganck/dsh-embed:base-gpu \
+     docker compose -f compose.yaml -f compose.gpu.yaml -f compose.models.yaml up -d
+
+   # jina（同一镜像，只换挂载与几个环境变量）
+   IMAGE=ghcr.io/leganck/dsh-embed:base-gpu \
+     docker compose -f compose.yaml -f compose.gpu.yaml -f compose.jina.yaml up -d
+   ```
+
+4. **自建**（改代码 / 想自己出镜像）：
 
    ```bash
    node scripts/fetch-models.mjs                 # → models/model、models/model-rerank
    docker compose -f compose.build.yaml up -d --build
    # 只出"不含模型"的小镜像：
    MODEL_TARGET=nomodel docker compose -f compose.build.yaml up -d --build
-   # 代码检索变体（jina-embeddings-v2-base-code）：
-   node scripts/fetch-jina-model.mjs              # → models/model-jina（Release 资产 + sha256 校验）
+   # 离线/内网需要"模型内置"镜像时（embed-jina 仅保留给离线场景，不再发布到 GHCR）：
    MODEL_TARGET=embed-jina docker compose -f compose.build.yaml up -d --build
    ```
 
