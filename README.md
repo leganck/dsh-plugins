@@ -131,6 +131,10 @@ plugins/
     docs/analysis/              多根工作空间调研与实现设计（从仓库根 docs/analysis 迁入）
     test.mjs                    自测
 server/
+  review-service/               自研 GitLab MR AI 评审（Python）：webhook + 镜像仓 + 语法图 + 并行流水线
+    Dockerfile                  镜像含 git + tree-sitter（231 MB）
+    compose.yaml                单容器部署（/data 卷：任务库/镜像仓/工作树）
+    docs/                       P0 验证报告、图谱说明
   code-index-service/           远端索引服务（Python）：/v1 索引层 + /embed + /rerank
     Dockerfile                  一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
     compose.yaml (+.gpu/.build) 开箱即用部署（镜像自带嵌入模型）
@@ -222,6 +226,23 @@ docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
 
 发布：`git tag server-v0.1.0 && git push origin server-v0.1.0` → `.github/workflows/publish-image.yml`
 先推 base 再叠模型出 4 个变体，**每个变体都先在容器里跑 `selftest.py`（43 项）通过才推**。
+
+## 评审服务（review-service，P1 已完成）
+
+自研 GitLab MR AI 评审，参考 CodeRabbit 的评审主链路：
+
+```bash
+cp server/review-service/.env.example server/review-service/.env   # 填 GitLab/LLM
+cd server/review-service && docker compose up -d
+```
+
+- 取数：镜像仓 + worktree + 本地 `git diff`（可回退 API 模式）；
+- 上下文：语义检索（code-index-service）+ 语法图（tree-sitter，带置信度）+ `git grep`；
+- 评审：Planner → 并行 Reviewer → 并行 Verifier → 降噪/去重 → 行内评论 + 汇总；
+- 影子模式：`DRY_RUN=1` 只记录不发布，`python -m app.report` 导出噪声/成本/待标注清单；
+- 测试：`app.selftest` 85 项 + 6 套验收（详见 `server/review-service/README.md`）。
+
+镜像由 `.github/workflows/publish-review-image.yml` 在 `review-v*` tag 时构建并推送（容器内自测通过才推）。
 
 ## 版本与 tag 约定
 

@@ -81,3 +81,29 @@ jobs:
               console.log(`ok ${pkg.name}@${pkg.version}`);
             }
           '
+
+  review-service:
+    name: review-service tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/review-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # 切块/图谱测试需要 tree-sitter（两包，无编译）
+      - run: pip install "tree-sitter==0.26.0" "tree-sitter-language-pack==1.22.1"
+      - name: 离线自测（diff/校验/回放/流水线/队列/发布/chunker/supersede）
+        run: python -m app.selftest
+      - name: 影子报表 + 索引同步 + 上下文/并行（无外部依赖）
+        run: |
+          python tests/test_report.py
+          python tests/test_repo_gitdiff.py
+          python tests/test_sync.py
+          python tests/test_context_parallel.py
+      - name: 语法图验收
+        run: python tests/test_graph.py
+      - name: chunker parity（仓库内文件；Go/energy 样本自动跳过）
+        run: python tests/parity_chunker.py --repo dsh-plugins=../..
