@@ -23,7 +23,10 @@
 跑法：python selftest.py
 """
 import base64
+import functools
 import gzip
+import hashlib
+import http.server
 import json
 import os
 import shutil
@@ -693,6 +696,50 @@ def main():
         check("无凭据调用 /v1/search 仍 401", st == 401, st)
     finally:
         server.ADMIN_PASSWORD, server.API_KEY = old_pw, old_key
+
+    print("\n[29] 模型下载（进度 / 校验 / 重传）")
+    import model_downloader as mdl
+
+    src = os.path.join(TMP, "dlsrc")
+    os.makedirs(src, exist_ok=True)
+    payloads = {"a.txt": b"hello-model" * 1000, "b.bin": os.urandom(200_000)}
+    for n, b in payloads.items():
+        with open(os.path.join(src, n), "wb") as f:
+            f.write(b)
+    shas = {n: hashlib.sha256(b).hexdigest() for n, b in payloads.items()}
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=src)
+    hsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=hsrv.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % hsrv.server_address[1]
+    catalog = {"tiny": {"label": "测试模型", "dir": "tiny", "release": base, "files": shas, "enable": {"MODEL_DIR": "x"}}}
+    dl = mdl.ModelDownloader(os.path.join(TMP, "dlroot"), catalog, timeout=10)
+    st = dl.get("tiny")
+    check("初始 idle / 未就绪", st["status"] == "idle" and st["ready"] is False, st["status"])
+    dl.start("tiny")
+    st = dl.wait("tiny", timeout=30)
+    check("下载完成且文件就绪", st["status"] == "done" and st["ready"] is True, st.get("error"))
+    check("进度字节数正确", st["bytesDone"] == sum(len(b) for b in payloads.values()), st["bytesDone"])
+    check("进度 100%", st["bytesTotal"] > 0 and st["bytesDone"] == st["bytesTotal"], (st["bytesDone"], st["bytesTotal"]))
+    st2 = dl.wait("tiny", timeout=5)
+    dl.start("tiny")
+    st2 = dl.wait("tiny", timeout=10)
+    check("重复下载跳过已存在文件", "跳过" in (st2.get("message") or ""), st2.get("message"))
+    dl.start("tiny", force=True)
+    st3 = dl.wait("tiny", timeout=30)
+    check("重传（force）可以重新下载", st3["status"] == "done" and st3["ready"] is True, st3["status"])
+    bad = json.loads(json.dumps(catalog))
+    bad["tiny"]["files"] = {"a.txt": "0" * 64}
+    dl2 = mdl.ModelDownloader(os.path.join(TMP, "dlroot2"), bad, timeout=10)
+    dl2.start("tiny")
+    st4 = dl2.wait("tiny", timeout=30)
+    check("sha256 不符 → failed", st4["status"] == "failed" and "sha256" in (st4.get("error") or ""), st4.get("error"))
+    check("失败可重试", st4["retryable"] is True)
+    hsrv.shutdown()
+    st5, body = req("GET", "/v1/admin/models")
+    ids = [m["name"] for m in (body or {}).get("models", [])]
+    check("/v1/admin/models 列出 jina 模型", st5 == 200 and "jina-v2-base-code" in ids, ids)
+    page = req_raw("/admin")[1]
+    check("后台页面包含「模型下载」与「重传」", "模型下载" in page and "重传" in page)
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")

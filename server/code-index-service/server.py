@@ -54,6 +54,7 @@ from urllib.parse import parse_qs, urlparse, unquote
 import numpy as np
 
 import index_store
+import model_downloader
 
 APP = os.path.dirname(os.path.abspath(__file__))
 F = os.environ
@@ -63,6 +64,7 @@ MODEL_NAME = F.get("MODEL_NAME", "")
 RERANK_DIR = F.get("RERANK_MODEL_DIR", os.path.join(APP, "model-rerank"))
 LOG_PATH = F.get("SERVER_LOG", os.path.join(APP, "out", "server.log"))
 DB_PATH = F.get("SERVER_DB", os.path.join(APP, "out", "index.db"))
+MODELS_DIR = F.get("MODELS_DIR", os.path.join(os.path.dirname(DB_PATH), "models"))
 PORT = int(F.get("PORT", "8000"))
 THREADS = int(F.get("ORT_THREADS", "6"))
 PROVIDERS = F.get("ORT_PROVIDERS", "CUDAExecutionProvider,CPUExecutionProvider").split(",")
@@ -97,6 +99,10 @@ SCOPE_SWEEP_FIRST_DELAY = max(0, int(float(F.get("SCOPE_SWEEP_FIRST_DELAY", "30"
 MAX_SCOPES = int(F.get("MAX_SCOPES", "200"))
 MAX_SEARCH_SCOPES = int(F.get("MAX_SEARCH_SCOPES", "4"))
 RRF_K = 20  # 与插件 lib/search.js 的 RRF_K 保持一致
+
+# 后台「模型下载」：白名单目录 + 后台线程；文件落在 /data/models 卷里
+MODEL_CATALOG = F.get("MODEL_CATALOG", "")
+downloader = model_downloader.ModelDownloader(MODELS_DIR, model_downloader.load_catalog(MODEL_CATALOG))
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -231,6 +237,10 @@ ADMIN_HTML = """<!doctype html>
       <button class="primary" id="btn-test">检索</button>
     </div>
     <div id="test-out" class="faint" style="font-size:12.5px">选择作用域、输入查询后点「检索」；结果来自服务端 kNN（附覆盖率与耗时）。</div>
+  </section>
+  <section class="card wide">
+    <h2>模型下载</h2>
+    <div id="models" class="faint" style="font-size:12.5px">加载中…</div>
   </section>
   <section class="card wide">
     <h2>作用域（快照）<span class="muted" id="scope-count" style="font-weight:400"> </span></h2>
@@ -437,6 +447,67 @@ async function purgeTags() {
   const r = await api('/v1/admin/purge-tags', { method: 'POST', body: '{}' });
   toast(r.status === 200 ? '已清理旧 tag 向量：' + (r.body?.deleted ?? 0) : '清理失败（' + r.status + '）');
   setTimeout(refresh, 300);
+}
+let MODELS = [];
+let MODEL_TIMER = null;
+function modelChip(s) {
+  const map = { idle: 'chip', downloading: 'chip warn', done: 'chip ok', failed: 'chip bad', cancelled: 'chip warn', verifying: 'chip warn' };
+  return '<span class="' + (map[s] || 'chip') + '"><span class="dot"></span>' + s + '</span>';
+}
+function renderModels() {
+  const box = $('#models');
+  if (!MODELS.length) { box.innerHTML = '<span class="faint">没有可下载的模型</span>'; return; }
+  box.innerHTML = MODELS.map(function (m) {
+    const pct = m.bytesTotal ? Math.min(100, Math.round(m.bytesDone * 100 / m.bytesTotal)) : (m.ready ? 100 : 0);
+    const cls = m.status === 'failed' ? 'bad' : (m.status === 'downloading' ? 'warn' : '');
+    const size = fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?');
+    const speed = (m.status === 'downloading' && m.speedBps) ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
+    const btn = m.status === 'downloading'
+      ? '<button data-cancel="' + m.name + '">取消</button>'
+      : '<button data-start="' + m.name + '"' + (m.ready ? ' disabled' : '') + '>' + (m.ready ? '已就绪' : ((m.status === 'failed' || m.status === 'cancelled') ? '重试' : '下载')) + '</button>'
+        + '<button data-force="' + m.name + '" title="删掉已下载文件，从头再下">重传</button>';
+    const enable = m.ready
+      ? '<details class="help"><summary>启用方式（需重启容器）</summary><div class="grid">'
+        + Object.keys(m.enable || {}).map(function (k) { return '<div><b>' + k + '</b> = <span class="mono">' + escapeHtml(m.enable[k]) + '</span></div>'; }).join('')
+        + '<div class="faint">目标目录：<span class="mono">' + escapeHtml(m.target) + '</span></div>'
+        + '<div class="faint">' + escapeHtml(m.note || '') + '</div></div></details>'
+      : '<div class="faint" style="font-size:11.5px">' + escapeHtml(m.error || m.message || '') + '</div>';
+    return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
+      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      + '<b>' + escapeHtml(m.name) + '</b> ' + modelChip(m.status)
+      + '<span class="faint">' + escapeHtml(m.label) + '</span>'
+      + '<span class="spacer"></span>' + btn + '</div>'
+      + '<div class="cov" style="margin-top:8px"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span>'
+      + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>'
+      + enable + '</div>';
+  }).join('');
+  document.querySelectorAll('[data-start]').forEach(function (b) { b.onclick = function () { startModel(b.dataset.start, false); }; });
+  document.querySelectorAll('[data-force]').forEach(function (b) { b.onclick = function () { if (confirm('删掉已下载文件，从头重新下载？')) startModel(b.dataset.force, true); }; });
+  document.querySelectorAll('[data-cancel]').forEach(function (b) { b.onclick = function () { cancelModel(b.dataset.cancel); }; });
+}
+async function loadModels() {
+  const r = await api('/v1/admin/models');
+  if (r.status !== 200 || !r.body) return;
+  MODELS = r.body.models || [];
+  renderModels();
+  if (MODELS.some(function (m) { return m.status === 'downloading'; })) ensureModelPolling();
+}
+function ensureModelPolling() {
+  if (MODEL_TIMER) return;
+  MODEL_TIMER = setInterval(async function () {
+    await loadModels();
+    if (!MODELS.some(function (m) { return m.status === 'downloading'; })) { clearInterval(MODEL_TIMER); MODEL_TIMER = null; }
+  }, 1000);
+}
+async function startModel(name, force) {
+  const r = await api('/v1/admin/models/' + encodeURIComponent(name) + '/download', { method: 'POST', body: JSON.stringify({ force: !!force }) });
+  if (r.status !== 200) toast('启动失败：' + r.status);
+  await loadModels(); ensureModelPolling();
+}
+async function cancelModel(name) {
+  const r = await api('/v1/admin/models/' + encodeURIComponent(name) + '/cancel', { method: 'POST', body: '{}' });
+  if (r.status !== 200) toast('取消失败：' + r.status);
+  await loadModels();
 }
 $('#btn-refresh').onclick = refresh;
 $('#btn-test').onclick = searchTest;
@@ -990,6 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._status_payload(public=not self._admin_ok()))
         if not self._admin_ok():
             return self._unauthorized(basic=bool(ADMIN_PASSWORD))
+        if path == "/v1/admin/models":
+            return self._send(200, {"root": MODELS_DIR, "models": downloader.list()})
         if path == "/log":
             n = 200
             if "n=" in (u.query or ""):
@@ -1264,6 +1337,21 @@ class Handler(BaseHTTPRequestHandler):
                                         "expiresAt": row["expires_at"]})
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
+                if action.startswith("models/"):
+                    rest = action[len("models/"):]
+                    name, _, verb = rest.partition("/")
+                    if verb == "download":
+                        try:
+                            st = downloader.start(name, force=bool(req.get("force")))
+                        except KeyError:
+                            return self._send(404, {"error": "unknown model", "name": name})
+                        return self._send(200, st)
+                    if verb == "cancel":
+                        try:
+                            return self._send(200, downloader.cancel(name))
+                        except KeyError:
+                            return self._send(404, {"error": "unknown model", "name": name})
+                    return self._send(400, {"error": "bad model action", "hint": "download | cancel"})
                 if action == "pause":
                     governor.pause()
                 elif action == "resume":
