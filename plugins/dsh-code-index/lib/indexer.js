@@ -210,10 +210,15 @@ export async function buildIndex({
       // 写作用域：显式 namespace 优先；否则用回调按**本轮指纹**推导；都没有则由 syncRemote 走旧默认
       const namespace =
         remote.namespace ?? (typeof remote.namespaceFor === 'function' ? remote.namespaceFor(fingerprint) : null)
+      // 上报人类可读的仓库名（服务端后台展示用；没有 origin 时用目录名）
+      const repoName =
+        remote.repoName ??
+        (remote.url ? path.basename(String(remote.url).replace(/\/+$/, '')).replace(/\.git$/, '') : path.basename(repoRoot))
       remoteInfo = await syncRemote({
         store,
         client: remote.client,
         repoId: remote.repoId,
+        repoName,
         url: remote.url,
         tag: remote.tag,
         lineage: remote.lineage ?? null,
@@ -357,6 +362,7 @@ export async function syncRemote({
   store,
   client,
   repoId,
+  repoName = null,
   url,
   tag,
   lineage = null,
@@ -376,6 +382,7 @@ export async function syncRemote({
   const lastRev = store.getMeta('remote_revision')
   const base = {
     repoId,
+    ...(repoName ? { repoName } : {}),
     chunkFp: fingerprint,
     url,
     tag,

@@ -37,6 +37,7 @@ create table if not exists repos (
   namespace text primary key,
   lineage_id text not null,
   repo_id text not null,
+  repo_name text,
   chunk_fp text not null,
   revision integer not null default 0,
   tag text,
@@ -267,6 +268,7 @@ class IndexStore:
             ("expires_at", "integer"),
             ("pinned", "integer not null default 0"),
             ("created_at", "integer"),
+            ("repo_name", "text"),
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
@@ -298,7 +300,7 @@ class IndexStore:
             self.db.commit()
         return lid
 
-    def ensure_repo(self, namespace, repo_id, chunk_fp, lineage_id, tag=None):
+    def ensure_repo(self, namespace, repo_id, chunk_fp, lineage_id, tag=None, repo_name=None):
         now = int(time.time())
         with self.lock:
             row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
@@ -308,14 +310,15 @@ class IndexStore:
                 meta = parse_scope_namespace(namespace)
                 kind = meta["kind"]
                 self.db.execute(
-                    "insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
-                    " repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, ttl_days, expires_at,"
-                    " pinned, created_at)"
-                    " values (?,?,?,?,0,?,null,null,?,?,?,null,null,null,?,?)",
+                    "insert into repos(namespace, lineage_id, repo_id, repo_name, chunk_fp, revision, tag,"
+                    " repo_state, repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, ttl_days,"
+                    " expires_at, pinned, created_at)"
+                    " values (?,?,?,?,?,0,?,null,null,?,?,?,null,null,null,?,?)",
                     (
                         namespace,
                         lineage_id,
                         repo_id,
+                        repo_name,
                         chunk_fp,
                         tag,
                         now,
@@ -324,6 +327,13 @@ class IndexStore:
                         1 if kind == "legacy" else 0,
                         now,
                     ),
+                )
+                self.db.commit()
+            elif repo_name and (row["repo_name"] or "") != repo_name:
+                # 老行补名字（插件/客户端后续同步时带上 repoName）
+                self.db.execute(
+                    "update repos set repo_name = ?, updated_at = ? where namespace = ?",
+                    (repo_name, now, namespace),
                 )
                 self.db.commit()
         return self.repo(namespace)
@@ -554,7 +564,8 @@ class IndexStore:
         lineage = payload.get("lineage")
         if not lineage:
             lineage = self.ensure_lineage(url, repo_id)
-        cur = self.ensure_repo(namespace, repo_id, chunk_fp, lineage, tag=tag)
+        repo_name = payload.get("repoName") or payload.get("repo_name")
+        cur = self.ensure_repo(namespace, repo_id, chunk_fp, lineage, tag=tag, repo_name=repo_name)
         # **血统在创建时定死**：后续同步即使不带 url/repoId，也绝不重新推导 ——
         # 否则一个"最小载荷"（只发 repoState + revision）会凭空造出一个新血统，
         # 表现是"刚 adopt 过的向量又变成缺失"。这个坑由自测用例抓出来。

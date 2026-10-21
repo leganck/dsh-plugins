@@ -637,6 +637,33 @@ def main():
         server.ADMIN_PASSWORD = old_admin_pw
         server.API_KEY = old_api_key
 
+    print("\n[27] 仓库可读名（repoName）")
+    NS_NAME = istore.canonical_namespace("named01", "fp1", "branch", "feat/n")
+    named = {
+        "repoId": "named01",
+        "chunkFp": "fp1",
+        "url": "https://git.example.com/team/smartpos-crm-order.git",
+        "repoName": "smartpos-crm-order",
+        "tag": server.state["info"].get("tag"),
+        "repoState": "named-1",
+        "mode": "full",
+        "upsert": [{"path": "n/J.java", "hash": "file-J.java",
+                    "chunks": [{"hash": "hj1", "start": 1, "end": 2}]}],
+        "remove": [],
+        "scope": {"kind": "branch", "ref": "feat/n"},
+    }
+    st, sy = req("POST", f"/v1/repos/{nsq(NS_NAME)}/sync", named)
+    check("sync 带 repoName → 200", st == 200, sy)
+    stl, lst = req("GET", "/v1/scopes?repoId=named01")
+    row = (lst.get("scopes") or [{}])[0]
+    check("/v1/scopes 返回可读仓库名", row.get("repoName") == "smartpos-crm-order", row)
+    sts, st_body = req("GET", f"/v1/repos/{nsq(NS_NAME)}/status")
+    check("status 带 repoName", st_body.get("repoName") == "smartpos-crm-order", st_body.get("repoName"))
+    old_name_row = istore.IndexStore  # noqa: F841  （仅保持脚本结构清晰）
+    check("健康检查 spaces 也带 repoName",
+          any(s.get("repo_name") == "smartpos-crm-order" for s in req("GET", "/health")[1].get("spaces", [])),
+          None)
+
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")
     shutil.rmtree(TMP, ignore_errors=True)
