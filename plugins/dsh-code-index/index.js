@@ -123,7 +123,7 @@ const REMOTE_DEFAULTS = {
    * 作用域推导（档 3）：未显式给 namespace 时按 `main|branch|pr|worktree` 推导命名空间，
    * 让 main / 分支 / PR / worktree 各写各的快照、互不覆盖。null = 沿用旧默认（不分作用域）。
    */
-  scope: null,
+  scope: 'auto',
   /** 额外**读取**的命名空间（如主干 main）；只参与检索，不会被写入 */
   readScopes: [],
   /** 显式指定服务端血统 id（fork / 镜像共用同一份向量时用） */
@@ -141,7 +141,7 @@ const REMOTE_DEFAULTS = {
  */
 const USER_DEFAULTS = {
   roots: [],
-  remote: { url: null, apiKey: null, namespace: null, scope: null, readScopes: [] },
+  remote: { url: null, apiKey: null, namespace: null, scope: 'auto', readScopes: [] },
   vectors: 'auto', // auto（有 remote.url 就用远端）| remote（强制，缺地址报错）| off（纯关键词）
   rerank: 'off', // off | fast | quality（远端）
   exclude: [], // 目录名，或含 "/" 的仓库相对路径前缀
@@ -508,6 +508,7 @@ function normalizeConfig(userRaw = {}) {
     }
     cfg.remote.namespace = cfg.remote.namespace.trim()
   }
+  if (cfg.remote.scope === null) cfg.remote.scope = 'auto'   // 旧配置写 null：统一按自动作用域处理（不再有 legacy 写入）
   if (cfg.remote.scope === 'auto') {
     // 自动作用域：按当前 git 分支推导（main/master → #main:default，其余 → #branch:<name>）。
     // 这样不同分支各自一个快照，不需要每个 checkout 手写 scope.ref。
@@ -792,7 +793,8 @@ function applyInner(ctx, rawConfig = {}) {
   /** `remote.scope: "auto"`：按当前 git 分支推导；无 git 时返回 null（退回 legacy 命名空间） */
   const autoScopeFor = (repoRoot) => {
     const b = gitBranch(repoRoot)
-    if (!b.name) return null
+    // 没有 git 也写到 main:default（repoId 已由本地路径哈希区分），不再产生 legacy 命名空间
+    if (!b.name) return { kind: 'main', ref: 'default' }
     if (!b.detached && (b.name === 'main' || b.name === 'master')) return { kind: 'main', ref: 'default' }
     return { kind: 'branch', ref: b.name }
   }
@@ -801,9 +803,8 @@ function applyInner(ctx, rawConfig = {}) {
   const resolveNamespace = (repoRoot, chunkFp) => {
     if (config.remote.namespace) return config.remote.namespace
     const repoId = repoIdOf(repoRoot, config.remote.repoId)
-    const scope = effectiveScopeFor(repoRoot)
-    if (scope) return canonicalNamespace(repoId, chunkFp, scope.kind, scope.ref)
-    return `${repoId}@${chunkFp}`
+    const scope = effectiveScopeFor(repoRoot) || { kind: 'main', ref: 'default' }
+    return canonicalNamespace(repoId, chunkFp, scope.kind, scope.ref)
   }
   const namespaceFor = (repoRoot, store) => resolveNamespace(repoRoot, store.getMeta('chunk_fingerprint') ?? 'default')
   /** 一次检索要读的全部作用域：写作用域在前 + readScopes，去重保序 */
