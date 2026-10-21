@@ -519,6 +519,8 @@ $('#btn-sweep').onclick = () => action('sweep');
 $('#filter').oninput = renderScopes;
 let timer = setInterval(() => { if ($('#auto').checked) refresh(); }, 15000);
 refresh();
+// 模型下载卡片：进页面就加载一次（之前漏了这行，卡片一直停在「加载中…」）
+loadModels();
 </script>
 </body>
 </html>
