@@ -143,7 +143,11 @@ jobs:
             models=server/code-index-service/models
           load: true
           tags: dsh-embed:smoke
-          cache-from: type=gha,scope=app-${{ matrix.flavor }}-${{ matrix.target }}
+          # 两个 cache 作用域：自己的 app 层 + base 依赖层（否则每个 app job 都会把
+          # Dockerfile 的 base 阶段（apt + 1.5GB pip install）重建一遍，GPU 单次 ~5 分钟）
+          cache-from: |
+            type=gha,scope=app-${{ matrix.flavor }}-${{ matrix.target }}
+            type=gha,scope=base-${{ matrix.flavor }}
           cache-to: type=gha,scope=app-${{ matrix.flavor }}-${{ matrix.target }},mode=max
 
       # 门禁：容器内自测（不需要模型，FAKE_EMBED=1），失败就绝不发布
