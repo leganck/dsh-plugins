@@ -1,0 +1,22 @@
+# jina-embeddings-v2-base-code → ONNX 导出用的锁定依赖
+#
+# 用途：
+#   1. .github/workflows/verify-jina-export.yml（手动触发，校验导出是否漂移）
+#   2. 本地复现：pip install -r requirements-export.txt
+#
+# 为什么锁版本：导出结果（算子/序列化）与 torch/onnx 版本相关。
+# 升级任一版本后必须重跑 scripts/export-jina-onnx.py、更新 scripts/jina-v2.sha256，
+# 并重新上传 Release 资产（人工确认），不要静默覆盖。
+#
+# torch 用 CPU 轮子：pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+# （PyPI 上的 torch==2.5.1 是 CUDA 版，体积大且导出不需要 GPU。）
+
+torch==2.5.1
+transformers==4.46.3
+tokenizers==0.20.3
+safetensors==0.4.5
+huggingface_hub==0.26.2
+numpy==1.26.4
+onnx==1.17.0
+onnxruntime==1.19.2
+onnxconverter-common==1.14.0

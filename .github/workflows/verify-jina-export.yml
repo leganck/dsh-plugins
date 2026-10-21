@@ -1,0 +1,119 @@
+name: verify-jina-export
+
+# 手动校验：用锁定依赖重新导出 jina ONNX，并与已发布的 Release 资产做**数值等价**比较。
+#
+# 目的：升级 torch / transformers / onnx 等工具链后，确认「导出实现没坏」。
+# 它**不生产、不上传**任何产物；漂移只在日志/Step Summary 里报告。
+# （发布流程仍由 publish-jina-image.yml 消费 Release 资产 + sha256 校验。）
+#
+# 触发：Actions → verify-jina-export → Run workflow
+# 参数：release —— 用来对比的发布版本（默认 dsh-embed-jina-v0.1.0）
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '对比的 Release tag'
+        required: true
+        default: 'dsh-embed-jina-v0.1.0'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装锁定依赖（CPU torch）
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+          pip install -r server/code-index-service/scripts/requirements-export.txt
+
+      - name: 下载已发布资产（作为对比基线）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/official
+          gh release download "${{ inputs.release }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'model_fp16.onnx' \
+            --pattern 'tokenizer.json' \
+            --dir /tmp/official
+          ls -l /tmp/official
+
+      - name: 重新导出（锁定依赖）
+        working-directory: server/code-index-service
+        run: |
+          python scripts/export-jina-onnx.py \
+            --src jinaai/jina-embeddings-v2-base-code \
+            --out /tmp/exported
+
+      - name: 数值等价校验（官方资产 vs 重新导出）
+        run: |
+          python - <<'PY'
+          import json
+          import numpy as np
+          import onnxruntime as ort
+          from tokenizers import Tokenizer
+
+          TEXTS = [
+              "def add(a, b):\n    return a + b\n",
+              "class UserService:\n    def get(self, uid):\n        return self.db.get(uid)\n",
+              "SELECT * FROM users WHERE id = ?",
+              "func main() {\n\tfmt.Println(\"hi\")\n}",
+              "async def sync(items):\n    for x in items:\n        await post(x)\n",
+          ]
+
+          def load(tok_path, model_path):
+              tok = Tokenizer.from_file(tok_path)
+              tok.enable_truncation(max_length=512)
+              pad = tok.token_to_id("<pad>") or 0
+              tok.enable_padding(pad_id=pad, pad_token="<pad>")
+              sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+              encs = tok.encode_batch(TEXTS)
+              ids = np.array([e.ids for e in encs], dtype=np.int64)
+              mask = np.array([e.attention_mask for e in encs], dtype=np.int64)
+              out = sess.run(None, {"input_ids": ids, "attention_mask": mask})[0]
+              return np.asarray(out, dtype=np.float32), list(tok.encode_batch(TEXTS)[0].ids)
+
+          a, ids_official = load("/tmp/official/tokenizer.json", "/tmp/official/model_fp16.onnx")
+          b, ids_exported = load("/tmp/exported/tokenizer.json", "/tmp/exported/model_fp16.onnx")
+
+          same_tokens = ids_official == ids_exported
+          cos = (a * b).sum(1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-9)
+          summary = {
+              "官方资产": "release asset",
+              "重新导出": "locked deps",
+              "tokenizer 一致": bool(same_tokens),
+              "cosine_min": float(cos.min()),
+              "cosine": [round(float(x), 6) for x in cos],
+          }
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          with open("/tmp/summary.json", "w", encoding="utf-8") as f:
+              json.dump(summary, f, ensure_ascii=False)
+
+          assert same_tokens, "tokenizer 行为漂移：同样的文本产生了不同 token"
+          assert float(cos.min()) >= 0.999, f"数值漂移：cosine_min={cos.min():.6f} < 0.999"
+          print("✅ 导出实现未漂移（数值等价）")
+          PY
+
+      - name: 写入 Step Summary
+        if: always()
+        run: |
+          echo "## verify-jina-export" >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/summary.json ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '校验未执行（依赖或导出失败，见上方日志）' >> "$GITHUB_STEP_SUMMARY"
+          fi
