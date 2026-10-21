@@ -12,11 +12,8 @@ name: publish-jina-image
 # 先决条件（首次）：创建 release 并上传资产
 #   gh release create dsh-embed-jina-v0.1.0 \
 #     -n "jina-code 嵌入变体 v0.1.0" \
-#     "dist/jina-v2-model_fp16.onnx#jina-v2-model_fp16.onnx" \
-#     "dist/jina-v2-tokenizer.json#jina-v2-tokenizer.json" \
-#     "dist/jina-v2-config.json#jina-v2-config.json" \
-#     "dist/jina-v2-tokenizer_config.json#jina-v2-tokenizer_config.json" \
-#     "dist/jina-v2-special_tokens_map.json#jina-v2-special_tokens_map.json"
+#     dist/model_fp16.onnx dist/tokenizer.json dist/config.json \
+#     dist/tokenizer_config.json dist/special_tokens_map.json
 
 on:
   push:

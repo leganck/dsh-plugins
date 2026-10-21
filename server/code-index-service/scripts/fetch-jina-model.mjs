@@ -117,7 +117,7 @@ async function main() {
       copyFrom(opt.from, item.name, dest)
     } else {
       console.log(`下载 ${item.name} ← ${opt.release}`)
-      await download(`${base}/jina-v2-${item.name}`, dest)
+      await download(`${base}/${item.name}`, dest)
     }
     const got = await sha256File(dest)
     if (got !== item.sha256) {
