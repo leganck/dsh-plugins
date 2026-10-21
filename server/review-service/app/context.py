@@ -13,6 +13,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from .clients import normalize_namespaces
 from .util import log
 
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
@@ -96,6 +97,7 @@ def build_context(
     index=None,
     graph=None,
     reader,
+    namespaces: list[str] | str | None = None,
     namespace: str = "",
     query: str,
     changed_paths: set[str] | None = None,
@@ -106,11 +108,13 @@ def build_context(
     s = settings or ContextSettings()
     changed = changed_paths or set()
     out: list[dict] = []
+    # 档3：多作用域检索；`namespace` 保留给旧调用（单值等价于 [namespace]）
+    nss = normalize_namespaces(namespaces if namespaces else ([namespace] if namespace else []))
 
     # ① 语义检索
-    if index is not None and namespace:
+    if index is not None and nss:
         try:
-            hits = index.search(namespace, query, k=max(s.max_semantic * 2, s.max_chunks))
+            hits = index.search(nss, query, k=max(s.max_semantic * 2, s.max_chunks))
         except Exception as e:  # noqa: BLE001
             log(f"语义检索失败（降级为空）：{type(e).__name__}: {e}")
             hits = []
@@ -127,10 +131,14 @@ def build_context(
                 continue
             text = _read_range(reader, path, start, end, s.chars)
             if text:
-                out.append(
-                    {"path": path, "start": start, "end": end, "text": text, "source": "semantic",
-                     "confidence": float(h.get("score") or 0.0)}
-                )
+                item = {"path": path, "start": start, "end": end, "text": text, "source": "semantic",
+                        "confidence": float(h.get("score") or 0.0)}
+                # 命中项带来源作用域，进 evidence 供模型/审计辨别上下文来自哪个快照
+                if h.get("namespace"):
+                    item["namespace"] = str(h["namespace"])
+                if isinstance(h.get("scope"), dict):
+                    item["scope"] = h["scope"]
+                out.append(item)
                 got += 1
 
     # ② 图谱邻居（只取高置信边，低置信的只用于"知道有这个符号"）

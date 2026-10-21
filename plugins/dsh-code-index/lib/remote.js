@@ -355,15 +355,44 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
         rethrow(e)
       }
     },
-    /** 服务端 kNN（可选在同一请求里做重排） */
-    async search(namespace, query, { k = 10, tag = null, rerankCandidates = 0, embedText = null } = {}) {
+    /**
+     * 服务端 kNN（可选在同一请求里做重排）。
+     *
+     * 0.11.0 起支持一次检索**多个作用域**（写作用域 + readScopes）：
+     *   - 传字符串 / 长度 1 的数组 → 仍发旧协议 `{namespace}`（旧服务端零回归；
+     *     且单作用域没有理由走新形态）；
+     *   - 传长度 > 1 的数组 → 发 `{namespaces:[{namespace},...]}`（§4.2）。
+     * 返回体的 `hits[].namespace` 原样保留；单作用域时服务端不回 namespace，
+     * 这里按请求值补齐，保证调用方拿到的每条命中都知道来源。
+     *
+     * 旧服务端遇到 `namespaces` 会 400/404 —— **回退重试不在这里做**：
+     * 那是调用方（index.js 的 code_search）的协议兼容策略，客户端层只把 status 带出去。
+     */
+    async search(namespacesOrOne, query, { k = 10, tag = null, rerankCandidates = 0, embedText = null } = {}) {
+      const namespaces = (Array.isArray(namespacesOrOne) ? namespacesOrOne : [namespacesOrOne])
+        .map((ns) => (typeof ns === 'string' ? ns.trim() : ''))
+        .filter(Boolean)
+      if (!namespaces.length) {
+        throw new RemoteError('检索需要一个非空 namespace', { code: 'bad-request' })
+      }
+      const body = {
+        query,
+        k,
+        tag,
+        embedText: embedText ?? undefined,
+        rerank: rerankCandidates ? { candidates: rerankCandidates } : undefined,
+      }
+      if (namespaces.length > 1) body.namespaces = namespaces.map((namespace) => ({ namespace }))
+      else body.namespace = namespaces[0]
       try {
-        return await client.request(
-          'POST',
-          `${base}/v1/search`,
-          { namespace, query, k, tag, embedText: embedText ?? undefined, rerank: rerankCandidates ? { candidates: rerankCandidates } : undefined },
-          { timeoutMs: Math.max(timeoutMs, 15000) },
-        )
+        const res = await client.request('POST', `${base}/v1/search`, body, { timeoutMs: Math.max(timeoutMs, 15000) })
+        // 命中项带来源是"多作用域"的验收点之一：单作用域时服务端可能省略，客户端补齐
+        if (Array.isArray(res?.hits)) {
+          for (const hit of res.hits) {
+            if (!hit.namespace && namespaces.length === 1) hit.namespace = namespaces[0]
+          }
+        }
+        return res
       } catch (e) {
         rethrow(e)
       }

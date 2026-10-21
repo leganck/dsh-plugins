@@ -242,8 +242,33 @@ class GitLabClient:
 # ---------------------------------------------------------------- 索引服务
 
 
+def normalize_namespaces(namespaces) -> list[str]:
+    """把 `str | [str] | [{namespace,...}] | None` 统一成去重保序的 list[str]。
+
+    兼容旧调用（单字符串）与新多作用域调用；空值/坏值安静丢弃。
+    """
+    if not namespaces:
+        return []
+    if isinstance(namespaces, str):
+        items = [namespaces]
+    elif isinstance(namespaces, dict):
+        items = [namespaces.get("namespace")]
+    else:
+        items = []
+        for item in namespaces:
+            if isinstance(item, dict):
+                item = item.get("namespace")
+            items.append(item)
+    out: list[str] = []
+    for ns in items:
+        text = str(ns or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 class IndexClient:
-    """code-index-service 的只读客户端（/v1/search）。"""
+    """code-index-service 的只读客户端（/v1/search，以及档3 的 scope 解析/删除）。"""
 
     def __init__(self, base_url: str, api_key: str = "", *, timeout: float = 15.0, rps: float = 10.0):
         self.base_url = base_url.rstrip("/")
@@ -254,10 +279,18 @@ class IndexClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
-    def search(self, namespace: str, query: str, k: int = 6, *, embed_text: str | None = None) -> list[dict]:
-        if not self.base_url or not namespace:
+    def search(self, namespaces, query: str, k: int = 6, *, embed_text: str | None = None) -> list[dict]:
+        """检索一个或多个作用域。多作用域失败（旧服务端 400/404）自动回退单作用域重试一次。"""
+        nss = normalize_namespaces(namespaces)
+        if not self.base_url or not nss:
             return []
-        payload = {"namespace": namespace, "query": query, "k": k}
+        multi = len(nss) > 1
+        payload: dict = {"query": query, "k": k}
+        if multi:
+            # 档3 契约 §4.2：namespaces:[{namespace, weight?}]；权重默认 1
+            payload["namespaces"] = [{"namespace": ns} for ns in nss]
+        else:
+            payload["namespace"] = nss[0]
         if embed_text:
             payload["embedText"] = embed_text
         try:
@@ -267,8 +300,50 @@ class IndexClient:
             )
         except HttpError as e:
             log(f"索引检索失败（降级为空上下文）：HTTP {e.status} {e.body[:120]}")
+            if multi and e.status in (400, 404):
+                log(f"服务端不支持多作用域检索（HTTP {e.status}），回退单作用域重试")
+                return self.search(nss[0], query, k, embed_text=embed_text)
             return []
         return list((data or {}).get("hits") or [])
+
+    def resolve_scope(
+        self, repo_id: str, chunk_fp: str, kind: str, ref: str, *, commit: str = "", timeout: float | None = None
+    ) -> dict | None:
+        """`POST /v1/scopes/resolve`：namespace 一律以服务端返回为准（review 侧不实现 canonical 规则）。
+
+        失败返回 None，由调用方决定降级（best-effort）。
+        """
+        if not self.base_url or not repo_id or not chunk_fp:
+            return None
+        payload: dict = {"repoId": repo_id, "chunkFp": chunk_fp, "kind": kind, "ref": ref}
+        if commit:
+            payload["commit"] = commit
+        try:
+            self.limiter.wait()
+            data = http_json(
+                "POST",
+                f"{self.base_url}/v1/scopes/resolve",
+                payload,
+                headers=self._headers(),
+                timeout=timeout or self.timeout,
+            )
+        except HttpError as e:
+            log(f"作用域解析失败（降级）：HTTP {e.status} {str(e.body)[:120]}")
+            return None
+        return data if isinstance(data, dict) else None
+
+    def delete_scope(self, namespace: str, *, timeout: float | None = None) -> dict | None:
+        """`DELETE /v1/scopes/{ns}`（幂等）。失败返回 None，调用方只记日志。"""
+        if not self.base_url or not namespace:
+            return None
+        url = f"{self.base_url}/v1/scopes/{urllib.parse.quote(namespace, safe='')}"
+        try:
+            self.limiter.wait()
+            data = http_json("DELETE", url, None, headers=self._headers(), timeout=timeout or self.timeout)
+        except HttpError as e:
+            log(f"删除作用域失败（忽略）：HTTP {e.status} {str(e.body)[:120]}")
+            return None
+        return data if isinstance(data, dict) else None
 
     def health(self) -> dict:
         try:
@@ -339,6 +414,7 @@ __all__ = [
     "LocalDirReader",
     "GitLabClient",
     "IndexClient",
+    "normalize_namespaces",
     "gitlab_client_from_env",
     "gitlab_file_reader",
     "index_client_from_env",
