@@ -115,6 +115,15 @@ curl -s localhost:18000/health | python -m json.tool
 镜像/`MODEL_DIR` 换回 `latest-gpu` 即可。注意 **tag 变化会触发客户端全量重嵌**（这是预期行为）：
 两套模型不能共用同一份索引。
 
+## 工具链与导出校验
+
+- 导出依赖锁定在 `scripts/requirements-export.txt`（torch 2.5.1 CPU / transformers 4.46.3 / onnx 1.17 / onnxruntime 1.19.2 …）；
+- 升级任一依赖后：重跑 `scripts/export-jina-onnx.py` → 更新 `scripts/jina-v2.sha256` → 重新上传 Release 资产（人工确认）；
+- **导出不放在发布 CI 里**（依赖重、输出与工具链版本相关、发布频率低）；发布 CI 只下载资产并做 sha256 校验；
+- 需要确认"导出实现没坏"时，手动触发 `.github/workflows/verify-jina-export.yml`：
+  用锁定依赖重新导出，与 Release 资产做**数值等价**比较（tokenizer 一致 + cosine ≥ 0.999），
+  只报告漂移，不自动上传。
+
 ## 已知限制
 
 - 吞吐比 bge 低约 18%（P4 实测），大规模首建索引会慢一点；
