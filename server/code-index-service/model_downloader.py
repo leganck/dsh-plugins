@@ -21,6 +21,42 @@ import urllib.request
 
 # 预置模型目录（新增模型在这里加一项即可；也可以由 MODEL_CATALOG 指向的 JSON 覆盖/扩展）
 DEFAULT_CATALOG = {
+    "bge-base-zh": {
+        "label": "bge-base-zh-v1.5（fp16，中文嵌入，MIT）",
+        "dir": "model-bge",
+        "release": [
+            "https://modelscope.cn/models/Xenova/bge-base-zh-v1.5/resolve/master",
+            "https://huggingface.co/Xenova/bge-base-zh-v1.5/resolve/main",
+        ],
+        "files": {
+            "model_fp16.onnx": {"sha256": "9ed3f10ed06aafe0320567019d18fdec255339350525a33ae18f85f4def288f0",
+                                "remote": "onnx/model_fp16.onnx"},
+            "tokenizer.json": {"sha256": "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839"},
+            "tokenizer_config.json": {"sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"},
+            "config.json": {"sha256": "855206771223efad2dfb8e212a716b20c4c71c8094309ca2da79d31bacb03276"},
+            "special_tokens_map.json": {"sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3"},
+        },
+        "enable": {"MODEL_DIR": "（把下面的绝对路径填进来）", "MODEL_NAME": "bge-base-zh-v1.5"},
+        "note": "与镜像内置的 bge 同一份文件（MIT）；默认模型，一般不需要手动下载。",
+    },
+    "bge-reranker-base": {
+        "label": "bge-reranker-base（fp16，交叉编码器，MIT）",
+        "dir": "model-rerank",
+        "release": [
+            "https://modelscope.cn/models/Xenova/bge-reranker-base/resolve/master",
+            "https://huggingface.co/Xenova/bge-reranker-base/resolve/main",
+        ],
+        "files": {
+            "model_fp16.onnx": {"sha256": "abab42dea13b5245198d510469deceb45ac60e670a8b1cbd1a7dcb77d494c16e",
+                                "remote": "onnx/model_fp16.onnx"},
+            "tokenizer.json": {"sha256": "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c"},
+            "tokenizer_config.json": {"sha256": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b"},
+            "config.json": {"sha256": "b6575b9d5be20d6747417c8e20c5a0db1636356e0b6d422d7244c628423c4d4c"},
+            "special_tokens_map.json": {"sha256": "d5469a60db23249c7f8945013d78df30b44b6bf686c6bb4740f4223f77b1b535"},
+        },
+        "enable": {"RERANK_MODEL_DIR": "（把下面的绝对路径填进来）"},
+        "note": "挂到 /models/model-rerank 后重启；不挂时服务端 rerank 自动降级（不影响检索）。",
+    },
     "jina-v2-base-code": {
         "label": "jina-embeddings-v2-base-code（代码检索，Apache-2.0，768 维）",
         "dir": "model-jina",
@@ -138,11 +174,27 @@ class ModelDownloader:
             "files": [],
         }
 
+    @staticmethod
+    def _norm_file(entry) -> dict:
+        """files 项兼容两种写法："<sha256>" 或 {"sha256": "...", "remote": "onnx/xxx.onnx"}。"""
+        if isinstance(entry, str):
+            return {"sha256": entry, "remote": ""}
+        entry = entry or {}
+        return {"sha256": str(entry.get("sha256") or ""), "remote": str(entry.get("remote") or "")}
+
+    def _bases(self, name: str) -> list[str]:
+        spec = self.catalog[name]
+        rel = spec.get("release") or ""
+        if isinstance(rel, str):
+            rel = [rel]
+        return [str(x).rstrip("/") + "/" for x in rel if x]
+
     def _scan_files(self, name: str) -> list[dict]:
         spec = self.catalog[name]
         target = os.path.join(self.root, spec.get("dir", name))
         out = []
-        for fname, sha in (spec.get("files") or {}).items():
+        for fname, entry in (spec.get("files") or {}).items():
+            sha = self._norm_file(entry)["sha256"]
             path = os.path.join(target, fname)
             size = os.path.getsize(path) if os.path.exists(path) else 0
             ok = False
@@ -163,23 +215,28 @@ class ModelDownloader:
         target = os.path.join(self.root, spec.get("dir", name))
         os.makedirs(target, exist_ok=True)
         files = spec.get("files") or {}
-        base = str(spec.get("release") or "").rstrip("/") + "/"
+        bases = self._bases(name) or [""]
         t0 = time.time()
         done = 0
         total = 0
 
         # 先 HEAD 拿总大小（失败不致命：进度显示为未知总量）
         sizes: dict[str, int] = {}
-        for fname in files:
-            try:
-                sizes[fname] = _http_size(base + fname, self.timeout)
-            except Exception:  # noqa: BLE001
-                sizes[fname] = 0
+        for fname, entry in files.items():
+            remote = self._norm_file(entry)["remote"] or fname
+            for base in bases:
+                try:
+                    sizes[fname] = _http_size(base + remote, self.timeout)
+                    break
+                except Exception:  # noqa: BLE001
+                    sizes[fname] = 0
         total = sum(sizes.values())
         self._set(name, bytesTotal=total, message="开始下载")
 
         ok_files = skipped = 0
-        for fname, sha in files.items():
+        for fname, entry in files.items():
+            sha = self._norm_file(entry)["sha256"]
+            remote = self._norm_file(entry)["remote"] or fname
             if cancel.is_set():
                 self._set(name, status="cancelled", message="已取消", finishedAt=time.time())
                 return
@@ -196,14 +253,26 @@ class ModelDownloader:
             if force and os.path.exists(part):
                 os.remove(part)
 
-            try:
-                got = _download(base + fname, part, cancel,
-                                on_progress=lambda n, fn=fname: self._progress(name, done + n, total, t0, fn))
-            except _Cancelled:
-                self._set(name, status="cancelled", message="已取消", finishedAt=time.time())
-                return
-            except Exception as e:  # noqa: BLE001
-                self._set(name, status="failed", error=f"{fname}: {type(e).__name__}: {e}",
+            got = 0
+            last_err = None
+            for base in bases:
+                try:
+                    got = _download(base + remote, part, cancel,
+                                    on_progress=lambda n, fn=fname: self._progress(name, done + n, total, t0, fn))
+                    last_err = None
+                    break
+                except _Cancelled:
+                    self._set(name, status="cancelled", message="已取消", finishedAt=time.time())
+                    return
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                    self._set(name, message=f"{fname} 换源重试")
+            if last_err is not None:
+                self._set(name, status="failed", error=f"{fname}: {type(last_err).__name__}: {last_err}",
                           message="下载失败", finishedAt=time.time())
                 return
             if _sha256(part) != sha:

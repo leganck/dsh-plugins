@@ -104,7 +104,8 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - 页面只做「查看 + 暂停/恢复/清扫 + 检索测试」，删除作用域等破坏性操作仍走 curl/API。
 - **检索测试**：选一个作用域、输入 query、点「检索」，直接调 `/v1/search` 展示命中 `path:start-end`、score、embed/kNN 耗时与覆盖率；后台 Basic 即可调用（`/v1/search` 对 Basic 与 Bearer 都开放）。
 - **模型与向量标签**：页面显示当前模型 tag 以及所有 tag 的条数/占用，并提供「清理非当前 tag 的向量」。
-- **模型下载**：页面「模型下载」卡片可下载预置模型（如 `jina-v2-base-code`）到 `/data/models/`，实时显示进度/速度，
+- **模型下载**：页面「模型下载」卡片可下载预置模型（`bge-base-zh` / `bge-reranker-base` / `jina-v2-base-code`），
+  多源（ModelScope 优先、HF 回退，支持同一文件不同远端路径）、逐文件 sha256 校验，落到 `/data/models/`；实时显示进度/速度，
   支持取消、失败重试、**强制重传**、断点续传与 sha256 校验；文件在 `/data` 卷里，容器重启不丢。
   **启用需要重启容器**（`MODEL_DIR` 指向下载目录 + 对应环境变量，jina 见 `docs/jina-v2.md`）。
   落盘根目录用 `MODELS_DIR` 改；扩展预置模型用 `MODEL_CATALOG`（JSON，字段见 `model_downloader.DEFAULT_CATALOG`）。
