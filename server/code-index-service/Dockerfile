@@ -45,7 +45,7 @@ RUN apt-get update \
 
 WORKDIR /app
 # 只拷服务端代码：模型走 build context，测试脚本也带上（发布前在容器里跑自测）
-COPY server.py index_store.py knn.py governor.py embedder.py reranker.py selftest.py bench_knn_modes.py scope_format.json /app/
+COPY server.py index_store.py knn.py governor.py embedder.py reranker.py model_downloader.py selftest.py bench_knn_modes.py scope_format.json /app/
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod 0755 /app/docker-entrypoint.sh
 
