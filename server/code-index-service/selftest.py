@@ -101,6 +101,15 @@ def chunk(h, body, path, start):
     return {"hash": h, "body": body, "path": path, "start": start}
 
 
+def req_raw(path, headers=None):
+    """原样返回 (status, text, content-type)；用于 /admin HTML 这类非 JSON 响应。"""
+    r = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}")
+    for k, v in (headers or {}).items():
+        r.add_header(k, v)
+    with urllib.request.urlopen(r, timeout=30) as resp:
+        return resp.status, resp.read().decode("utf-8", "replace"), resp.headers.get("content-type", "")
+
+
 def sync(ns, payload, gz=False):
     return req("POST", f"/v1/repos/{ns}/sync", payload, gz=gz)
 
@@ -534,6 +543,44 @@ def main():
     stq, sq = req("POST", "/v1/search", {"namespace": NS_NULL, "query": "null tag probe", "k": 3})
     check("显式 null tag 的命名空间可检索（不再 no-tag）",
           stq == 200 and bool(sq.get("hits")), sq)
+
+    print("\n[24] /admin 后台页面")
+    st, html, ctype = req_raw("/admin")
+    check("/admin → 200 text/html", st == 200 and "text/html" in ctype, (st, ctype))
+    check("页面包含标题与关键区块",
+          "code-index-service · 后台" in html and "作用域（快照）" in html and "/v1/scopes" in html)
+    st, html_slash, _ = req_raw("/admin/")
+    check("/admin/ 同样可用", st == 200 and "code-index-service" in html_slash)
+
+    print("\n[25] API_KEY（Bearer）鉴权")
+    old_key = server.API_KEY
+    server.API_KEY = "test-key-123"
+    try:
+        st, hp = req("GET", "/health")
+        check("health 免鉴权", st == 200, st)
+        check("公开 health 只给最小字段（不泄露 spaces）", "spaces" not in hp, list(hp.keys()))
+        st, _ = req("GET", "/")
+        check("根路径需鉴权（401）", st == 401, st)
+        st, _ = req("GET", "/log?n=1")
+        check("log 需鉴权（401）", st == 401, st)
+        st, _ = req("GET", "/v1/scopes")
+        check("scopes 需鉴权（401）", st == 401, st)
+        st, _ = req("GET", f"/v1/repos/{nsq(NS_NULL)}/status")
+        check("repo status 需鉴权（401）", st == 401, st)
+        st, _ = req("POST", "/embed", {"texts": ["auth probe"]})
+        check("POST 需鉴权（401）", st == 401, st)
+        auth = {"Authorization": "Bearer test-key-123"}
+        st, _ = req("GET", "/v1/scopes", headers=auth)
+        check("带 Bearer 的 GET 放行", st == 200, st)
+        st, hf = req("GET", "/health", headers=auth)
+        check("带 key 的 health 是完整版（含 spaces/limits）",
+              st == 200 and "spaces" in hf and "limits" in hf, list(hf.keys()))
+        st, _ = req("POST", "/embed", {"texts": ["auth probe"]}, headers=auth)
+        check("带 Bearer 的 POST 放行", st == 200, st)
+        st, html, ctype = req_raw("/admin")
+        check("管理员页面本身免鉴权（数据接口才要 key）", st == 200 and "text/html" in ctype, st)
+    finally:
+        server.API_KEY = old_key
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")
