@@ -27,14 +27,18 @@
     POST /embed                    {texts, is_query} -> {vectors_b64, dim, count, ms}   （兼容 0.7.0）
     POST /rerank                   {query, texts, max_tokens} -> {scores, ms}          （兼容 0.7.0）
     POST /v1/repos/{ns}/sync       {repoState, revision?, mode, upsert, remove, tag, url, repoId, chunkFp,
-                                    scope?{kind,ref,commit?,ttlDays?}} -> {revision, unchanged, missing[], chunks, vectors, coverage, namespace}
+                                    scope?{kind,ref,commit?,ttlDays?}, simhash?{v,path,content,files},
+                                    adopt?, reuse?}
+                                    -> {revision, unchanged, missing[], chunks, vectors, coverage, namespace,
+                                        adopted?{fromLineage,fromRepo,similarity,overlap,blobs,vectors}, adoptError?}
     POST /v1/repos/{ns}/chunks     {bodies:[{hash, body}]} -> {accepted, deduped}
     POST /v1/repos/{ns}/embed      {order?, batch?} -> 入队后台嵌入
     GET  /v1/repos/{ns}/status     -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes, scope{}}
     POST /v1/search                {namespace} 或 {namespaces:[{namespace,weight?}]}, query, k?, tag?,
                                     rerank?:{candidates} -> {hits[]（带 namespace/scope）, ms{}, coverage, byScope[]}
     POST /v1/admin/pause | /resume | /rate | /gc | /sweep
-    POST /v1/lineages/{id}/adopt   {from, hashes?} 显式跨血统借用
+    POST /v1/lineages/{id}/adopt   {from, hashes?} 显式跨血统借用（管理员指定来源）
+    GET  /v1/lineages/similar?path=&content=&tag=&limit=  simhash 候选（只返回元信息，不返回正文）
     GET  /v1/scopes?repoId=&kind=  作用域清单（kind/ref/TTL/占用）
     POST /v1/scopes/resolve        {repoId, chunkFp, kind, ref, commit?} -> {namespace, exists, revision?}
     POST /v1/scopes/{ns}/pin       {pinned, ttlDays?} -> {namespace, pinned, expiresAt}
@@ -2441,6 +2445,47 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"scopes": scope_list(repo_id, kind)})
         if path == "/v1/spaces":
             return self._send(200, {"spaces": store.scope_overview() if store else []})
+        if path == "/v1/lineages/similar":
+            # 诊断接口：只看 simhash 候选的元信息，绝不返回正文（不泄内容）。
+            # 鉴权与其余索引接口一致：Bearer Key 或后台会话/Basic（见上面的 auth 分支）。
+            if not store:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            q = parse_qs(u.query or "")
+
+            def qv(name, default=None):
+                return (q.get(name) or [default])[0]
+
+            path_hex = index_store.normalize_simhash_hex(qv("path"))
+            content_hex = index_store.normalize_simhash_hex(qv("content"))
+            if not path_hex or not content_hex:
+                return self._send(400, {
+                    "error": "bad-simhash",
+                    "detail": "path/content 必填：≤16 位十六进制（64-bit simhash，可省略前导 0）",
+                })
+            tag = str(qv("tag") or "").strip()
+            if not tag:
+                return self._send(400, {"error": "tag-required",
+                                        "detail": "tag 不能为空（只列同一 embedding 模型的候选）"})
+            try:
+                limit = max(1, min(int(qv("limit", 5) or 5), 50))
+            except (TypeError, ValueError):
+                limit = index_store.MAX_ADOPT_CANDIDATES
+            try:
+                min_similarity = float(qv("minSimilarity", index_store.SIMHASH_MIN_SIMILARITY)
+                                       or index_store.SIMHASH_MIN_SIMILARITY)
+            except (TypeError, ValueError):
+                min_similarity = index_store.SIMHASH_MIN_SIMILARITY
+            algo = qv("algo") or qv("v") or None
+            candidates = store.similar_lineages(
+                path_hex, content_hex, None, tag, limit=limit,
+                min_similarity=min_similarity, algo=algo,
+            )
+            return self._send(200, {
+                "tag": tag,
+                "minSimilarity": min_similarity,
+                "count": len(candidates),
+                "candidates": candidates,
+            })
         return self._send(404, {"error": "not found"})
 
     def do_DELETE(self):
@@ -2616,6 +2661,13 @@ class Handler(BaseHTTPRequestHandler):
                         if name == "SyncDiverged":
                             return self._send(400, {"error": "diverged", "detail": str(e)})
                         raise
+                    # 跨血统 simhash 复用是"尽力而为"：成功记一行，失败也记一行但 sync 已正常返回。
+                    if payload.get("adopted"):
+                        a = payload["adopted"]
+                        log(f"adopt: {effective_ns} <- {a.get('fromNamespace')} blobs={a.get('blobs')} "
+                            f"vectors={a.get('vectors')} overlap={a.get('overlap')} sim={a.get('similarity')}")
+                    elif payload.get("adoptError"):
+                        log(f"adopt failed (sync 继续): {effective_ns}: {payload['adoptError']}")
                     repo = store.repo(effective_ns)
                     # 注册/刷新 scope 元数据：新行落默认 TTL；老行只更新 commit/updated_at，
                     # 不覆盖 pinned/expires_at（除非 ttlDays 显式给出）。

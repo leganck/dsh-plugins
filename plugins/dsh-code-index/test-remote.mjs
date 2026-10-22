@@ -295,6 +295,11 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   const builtText = built.content[0].text
   check('code_index 成功', /索引完成/.test(builtText), builtText.slice(0, 100))
   const sync1 = stub.state.syncCalls.at(-1)
+  check(
+    'sync payload 带 simhash 与 reuse（供服务端候选复用）',
+    /^[0-9a-f]{16}$/.test(String(sync1.body.simhash?.path)) && /^[0-9a-f]{16}$/.test(String(sync1.body.simhash?.content)) && sync1.body.reuse === 'suggest',
+    JSON.stringify({ simhash: sync1.body.simhash, reuse: sync1.body.reuse }),
+  )
   check('同步路径用推导出的分支命名空间（#branch:feat-x-d6e256）', /#branch:feat-x-d6e256$/.test(sync1.namespace), sync1.namespace)
   check(
     'sync payload 带 scope（kind/ref/ttlDays）',

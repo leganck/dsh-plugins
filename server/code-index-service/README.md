@@ -33,7 +33,7 @@ code-index-service/
 ├── governor.py      # 后台嵌入：限流、暂停、优先级、进度
 ├── embedder.py      # ONNX 嵌入会话 + 向量标签（tag）
 ├── reranker.py      # 交叉编码器重排
-├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），81 项
+├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），248 项
 ├── Dockerfile       # 一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
 ├── docker-entrypoint.sh  # 拼 CUDA 路径、查设备、校验模型、/data 权限；能降级就降级
 ├── scripts/fetch-models.mjs  # 拉模型 → models/model、models/model-rerank（也支持 --check）
@@ -51,11 +51,15 @@ code-index-service/
 ```sql
 lineages(id, url_norm, created_at, last_seen)
 repos   (namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,
-         scope_kind, scope_ref, commit_sha, ttl_days, expires_at, pinned, created_at)  -- 档 3
+         scope_kind, scope_ref, commit_sha, ttl_days, expires_at, pinned, created_at,
+         simhash_path, simhash_content, simhash_algo, simhash_files, simhash_at)
 blobs   (lineage_id, hash, body)                     -- 正文，血统内按内容哈希去重
 chunks  (namespace, lineage_id, path, start, end, hash)
 vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内容哈希去重
 ```
+
+> `simhash_*` 5 列是 P3 加的幂等迁移列（只增不删），旧客户端不写 → 保持 `null`；
+> 它们只用于"找候选"，**不是存储键**（复制仍按 `blobs`/`vectors` 的精确内容 hash 做）。
 
 **实测依据**（4 个无关仓库两两比对）：跨项目块重合 **0.00%**，同仓库跨分支 **~98%**、同仓库内重复块 0.1–0.4%。
 
@@ -64,7 +68,12 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - **存储边界是血统**（= 归一化后的 git remote URL）。10 个分支的同一仓库只占 **235 MB**；
   按分支各存一份就是 **2.35 GB**；全局存无关项目则是纯累积（0% 收益）。
 - **去重按内容哈希**：改文件只有变化的块需要重嵌；第二个克隆 **0 块新嵌入**（实测）。
-- 跨血统只留显式口子：`POST /v1/lineages/{id}/adopt {from, hashes?}`（fork / vendor 借用）。
+- 跨血统默认不共享，只留两个显式口子：
+  - `POST /v1/lineages/{id}/adopt {from, hashes?}`：管理员点名从哪个血统借（fork / vendor 借用）；
+  - **simhash 候选 + 精确哈希 adopt**：`sync` 里 `full + adopt` 时自动找候选，或
+    `GET /v1/lineages/similar` 只做诊断；只复制候选与目标**都拥有**的精确内容 hash
+    （`blobs`/`vectors`），绝不复制候选的 `chunks`/`path`。阈值 `SIMHASH_MIN_SIMILARITY=0.85`、
+    `ADOPT_MIN_OVERLAP=0.80`。详见下文「跨血统冷启动复用」。
 - 上界：`MAX_VECTORS_PER_LINEAGE`（默认 50 万块）、`MAX_TOTAL_GB`（默认 20 GB）→ 超限 **507 + 可清理清单**，
   不静默丢数据。`RETENTION_DAYS`（默认 30）控制"没人引用的 blob/vector 什么时候删"。
 
@@ -72,7 +81,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 
 | 端点 | 说明 |
 |---|---|
-| `POST /v1/repos/{ns}/sync` | 清单差分。`{repoState, revision?, mode:'diff'|'full', tag, url, repoId, chunkFp, lineage?, scope?{kind,ref,commit?,ttlDays?}, upsert[], remove[]}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace}` |
+| `POST /v1/repos/{ns}/sync` | 清单差分。`{repoState, revision?, mode:'diff'|'full', tag, url, repoId, chunkFp, lineage?, scope?{kind,ref,commit?,ttlDays?}, upsert[], remove[], simhash?{v,path,content,files}, adopt?, reuse?}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace, adopted?{fromLineage,fromRepo,similarity,overlap,blobs,vectors}, adoptError?}` |
 | `POST /v1/repos/{ns}/chunks` | 上传缺失正文（gzip、批量、幂等）→ `{accepted, deduped}` |
 | `POST /v1/repos/{ns}/embed` | 触发后台嵌入（可带 `rate`） |
 | `GET /v1/repos/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt,expiresAt,pinned}, limits}` |
@@ -88,7 +97,8 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
 | `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按**仓库·作用域**（业务/系统分类、embed/search/rerank、延迟、**P50/P95**、上期对比）；`days=1/7/30` |
 | `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
-| `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
+| `POST /v1/lineages/{id}/adopt` | 显式跨血统借用（管理员点名 `{from, hashes?}`；旧行为不变） |
+| `GET /v1/lineages/similar?path=&content=&tag=&limit=5` | **simhash 候选诊断**：只返回 `{lineage, namespace, repoId, repoName, similarity, pathSimilarity, contentSimilarity, distance, files, updatedAt}`，**不返回正文**；`path/content` 非法 → 400 `bad-simhash`，缺 `tag` → 400 `tag-required` |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
 | `GET /` `/v1/status` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/` 对浏览器（`Accept: text/html`）302 到 `/admin`，对 API 客户端仍返回 JSON（插件 `describe` 契约） |
 | `GET /admin` | **控制台**（单文件 HTML，无外部依赖）：登录页 + 6 个 Tab（概览 / 模型 / API Key / 统计 / 作用域 / 日志）；支持暂停嵌入、清扫、热切换模型、Key 管理、调用统计 |
@@ -243,9 +253,83 @@ legacy（不含 #）原样保留，scope_kind='legacy'、pinned=1、expires_at=n
 - **升级零手工步骤**：`IndexStore.__init__` 对旧 `repos` 表做幂等 `alter table` 补 7 列 + 建 `repos_scope` 索引；
   老行回填 `scope_kind='legacy'`、`pinned=1`、`expires_at=null`、`created_at=updated_at`。
   二次启动不会再把管理员显式 unpin 的 legacy 行重新钉住。
+  P3 又补了 5 个 `simhash_*` 列（同样幂等；旧客户端不写 → 保持 `null`，补列不会触发 legacy 重新 pin）。
 - **回滚**：换回旧镜像/旧插件即可 —— 多出的列旧代码不读不写；旧 DB 删列需要手工（SQLite 不支持 drop column 的旧版本，
   一般没必要回滚数据结构）。
 - 老客户端（0.10.1）继续只传 `namespace`：同步/检索/状态行为不变；janitor 只碰带 `expires_at` 的 scope，不会动 legacy 行。
+
+## 跨血统冷启动复用（simhash 候选 + 精确哈希 adopt）
+
+**同一 remote 不需要它**：`lineage = hash(归一化 git remote)`，同仓库的分支/克隆/开发者本来就共享
+`blobs`/`vectors`（实测同仓库跨分支复用 ~98%）。simhash 只解决"换了身份"的仓库：**fork、remote 改名、
+vendor 副本** —— 内容几乎一样，但 remote 不同 → lineage 不同 → 冷启动要重新嵌入整库。
+
+不做"整份 index copy"，做四步：
+
+1. 客户端把文件清单压成两个 64-bit simhash（`path`-aware / 仅 `content`），随 `sync` 上传；
+2. 服务端在**有 simhash 的 repos 行**里按 Hamming 找候选（`similarity = max(pathSimilarity,
+   contentSimilarity) = 1 - hamming/64`），过滤：不同 lineage、同 embedding `tag`、算法版本一致、
+   相似度 ≥ `SIMHASH_MIN_SIMILARITY`（0.85）；
+3. 不直接信 simhash：对候选算**精确重叠**
+   `目标 namespace 的 distinct chunk hash ∩ 候选 lineage 当前 tag 的 vectors / 目标 distinct chunk hash 数`，
+   只有 ≥ `ADOPT_MIN_OVERLAP`（0.80）才复制（分母用 distinct hash 与 vectors 的存储口径一致，
+   同内容多路径不会稀释覆盖率；`adopt_overlap()` 同时返回 chunk 行数便于诊断）；
+4. 只把"目标确实拥有 + 候选 `blobs` 与当前 tag `vectors` 都有"的**精确内容 hash** 复制到目标 lineage
+   （`insert or ignore`）。**绝不复制**候选的 `chunks` / `path` / `repos` / 旧 tag 向量。
+   目标继续用自己的 manifest / chunks / 搜索，候选独有文件不会出现在目标结果里。
+
+### 客户端 payload
+
+```json
+{
+  "mode": "full",
+  "simhash": {"v": 1, "path": "a1b2c3d4e5f60718", "content": "0f1e2d3c4b5a6978", "files": 2088},
+  "adopt": true,
+  "reuse": "auto"
+}
+```
+
+- `simhash` 可选：`path`/`content` 是 ≤16 位十六进制（64-bit，缺前导 0 服务端左补）；`v` 是算法版本；
+  `files` 是文件数。非法值**静默忽略**（sync 照常成功，repos 里保持 `null`），不会 500。
+- `adopt` 只在 `mode:'full'` 且为开（`true` / `"auto"`）时生效；`reuse:'off'` 一票否决。
+  客户端只传 `reuse` 时，`reuse:'auto'` 本身视为显式 adopt 开关（`suggest` 默认不复制）。
+  **普通 sync（diff / 未带 adopt 的 full / `reuse:suggest`）绝不会做候选查询**，
+  不为它多付一次全 repos 扫描。
+- sync 响应多两个字段：
+  `adopted:{fromLineage, fromRepo, fromNamespace, similarity, pathSimilarity, contentSimilarity,
+  overlap, blobs, vectors, hashes}`；失败时是 `adoptError`（类型 + 消息），**sync 本身仍 200**，
+  `missing` 按正常逻辑返回（adopt 失败 = 这次退回普通 sync）。
+
+### 阈值 / 上界
+
+| 常量（`index_store.py`） | 默认 | 含义 |
+|---|---|---|
+| `SIMHASH_MIN_SIMILARITY` | `0.85` | 候选相似度门槛（max(path, content)） |
+| `ADOPT_MIN_OVERLAP` | `0.80` | 精确重叠门槛（不达标不复制） |
+| `MAX_ADOPT_CANDIDATES` | `5` | 单次最多看几个候选 |
+| `MAX_ADOPT_HASHES` | `50000` | 单次复制 hash 上限（超出截断并置 `truncated`） |
+| `MAX_SIMHASH_FILES` | `10000000` | `simhash.files` 上界（防超长/异常值） |
+
+### 诊断接口（只读元信息）
+
+```bash
+curl -H "Authorization: Bearer $KEY" \
+  "http://host:8000/v1/lineages/similar?path=a1b2c3d4e5f60718&content=0f1e2d3c4b5a6978&tag=bge-base-zh-v1.5-c4fa1e57-fp16&limit=5"
+# -> {tag, minSimilarity, count, candidates:[{lineage, namespace, repoId, repoName, similarity,
+#      pathSimilarity, contentSimilarity, distance, algo, files, updatedAt}]}
+```
+
+鉴权与其它索引接口一致（Bearer Key / 后台会话或 Basic）。只返回元信息，**不返回正文**；
+`path`/`content` 非法 → 400 `bad-simhash`，`tag` 为空 → 400 `tag-required`。
+
+### 安全边界
+
+- 候选只在同一服务内可见（当前单团队部署；多团队 ACL 不在本轮）；
+- 只复制目标 manifest 里已有的 hash；候选独有文件不会进入目标 namespace，也不会被检索到；
+- 不复制候选 path/行号：目标命中结果永远用自己的 `chunks`；
+- tag 不一致 / 相似度不足 / overlap 不足 / `reuse=off` → 0 复制；
+- 目标 lineage **已有当前 tag 向量**时不做候选（不是冷启动；同 lineage 本来就会自动共享）；
+- 失败只记服务端日志 + 响应 `adoptError`，绝不影响正常 sync。
 
 ## 热路径上别做聚合查询（实测踩坑）
 
@@ -459,9 +543,12 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 ## 自测
 
 ```bash
-python selftest.py     # 81 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+python selftest.py     # 248 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
                        # + 档 3：namespace 夹具、scope 注册/resolve/列表、legacy pinned 不被 sweep、
                        #   TTL 过期删除、DELETE 后 GC 不误删共享内容、多 scope 去重/来源/权重/等价、配额 507、旧 DB 迁移
+                       # + P3 simhash：schema 迁移、simhash 存取/非法值、相同/无关相似度、tag 过滤、overlap 计算、
+                       #   只复制精确 hash+当前 tag、不复制 chunks、候选独有 hash 不可见、full+adopt 集成、
+                       #   reuse=off/diff 不查询、adopt 失败不影响 sync、诊断接口鉴权
 
 # 容器里跑（不需要模型，发布门禁就是这条）
 docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app/selftest.py

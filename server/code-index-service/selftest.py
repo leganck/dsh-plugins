@@ -20,6 +20,12 @@
   ㉑ MAX_SCOPES 配额 → 507
   ㉒ 旧 DB 启动即幂等迁移（legacy → pinned=1，created_at 回填）
 
+P3（simhash 候选 + 精确哈希 adopt）：
+  · 旧库补 simhash 5 列；simhash 存取 / 非法值 / Hamming
+  · 候选查询（相似 / 无关 / tag / 排除 / 非冷启动）与 overlap 计算
+  · 只复制精确 hash + 当前 tag，不复制 chunks/path；full+adopt 集成
+  · reuse=off / diff 不查询；adopt 失败不影响 sync；诊断接口与鉴权
+
 跑法：python selftest.py
 """
 import base64
@@ -539,6 +545,11 @@ def main():
     check("老库补列后 legacy/pinned/no-expiry",
           row["scope_kind"] == "legacy" and row["pinned"] == 1 and row["expires_at"] is None, row)
     check("created_at 回填 updated_at", row["created_at"] == 1000, row.get("created_at"))
+    simhash_cols = {"simhash_path", "simhash_content", "simhash_algo", "simhash_files", "simhash_at"}
+    check("老库幂等补上 simhash 5 列（值保持 null）",
+          simhash_cols <= set(row) and all(row[c] is None for c in simhash_cols), row)
+    check("simhash 5 列已落进 repos schema",
+          simhash_cols <= {r["name"] for r in m1.db.execute("pragma table_info(repos)").fetchall()})
     m1.close()
     m2 = istore.IndexStore(old_db)
     check("二次启动迁移幂等", m2.repo("old@fp")["pinned"] == 1)
@@ -982,6 +993,286 @@ def main():
     check("清空后服务仍 ready（模型不受影响）", st == 200 and hp.get("ready") is True, hp.get("ready"))
     st, ks = req("GET", "/v1/admin/keys")
     check("清空索引不影响 API Key 库", st == 200 and "keys" in (ks or {}), st)
+
+    # ================================================================ P3：simhash 候选 + 精确哈希 adopt
+    print("\n[35] simhash 候选 / 精确 hash adopt（跨血统冷启动）")
+    TAG_NOW = server.state["info"]["tag"]
+
+    # ---- 单元层：hex 校验 / 归一化 / Hamming
+    check("normalize_simhash_hex：大写转小写、短值左补零",
+          istore.normalize_simhash_hex("ABC") == "0000000000000abc", istore.normalize_simhash_hex("ABC"))
+    check("normalize_simhash_hex：超长 / 注入 / 非字符串 → None",
+          istore.normalize_simhash_hex("0" * 17) is None
+          and istore.normalize_simhash_hex("'; drop table repos; --") is None
+          and istore.normalize_simhash_hex(123) is None)
+    check("parse_simhash：非法 files 归 null、非法 hex 整体丢弃",
+          istore.parse_simhash({"path": "1", "content": "2", "files": "x"})["files"] is None
+          and istore.parse_simhash({"path": "zz", "content": "2"}) is None)
+    check("Hamming：相同 = 1.0 / 全反 = 0.0 / 差 1 bit = 63/64",
+          istore.hamming_similarity("0" * 16, "0" * 16) == 1.0
+          and istore.hamming_similarity("0" * 16, "f" * 16) == 0.0
+          and abs(istore.hamming_similarity("0" * 16, "0" * 15 + "1") - 63 / 64) < 1e-9)
+
+    SIM_PATH_IN = "A1B2C3D4E5F60718"   # 大写输入：落库应规范成小写
+    SIM_PATH = SIM_PATH_IN.lower()
+    SIM_CONTENT_IN = "0F1E2D3C4B5A6978"
+    SIM_CONTENT = SIM_CONTENT_IN.lower()
+    SIM_OBJ = {"v": 1, "path": SIM_PATH_IN, "content": SIM_CONTENT_IN, "files": 9}
+    A_SHARED = ["sh1", "sh2", "sh3", "sh4", "sh5", "sh6", "sh7", "sh8"]
+    A_ONLY = "sh-cand-only"       # 只属于候选：绝不能出现在目标
+    STALE = "sh-stale-tag-only"   # 候选只有旧 tag 向量：不能算 overlap、不能复制
+    B_NEW = "sh-target-new"       # 只属于目标：adopt 后仍要嵌入
+    NS_CA = "simcand@fp1"         # 候选血统（legacy ns 即可）
+    NS_TB = "simtarg@fp1"         # 目标血统（另一个 URL → 另一个 lineage）
+
+    def _sim_manifest(repo_id, repo_name, url, state, hashes, path,
+                      simhash=None, adopt=False, reuse=None, no_embed=True):
+        payload = {
+            "repoId": repo_id, "repoName": repo_name, "chunkFp": "fp1", "url": url,
+            "repoState": state, "mode": "full",
+            "upsert": [{"path": path, "hash": "file-" + path,
+                        "chunks": [{"hash": h, "start": i * 2 + 1, "end": i * 2 + 2}
+                                   for i, h in enumerate(hashes)]}],
+            "remove": [],
+        }
+        if simhash is not None:
+            payload["simhash"] = simhash
+        if adopt:
+            payload["adopt"] = True
+        if reuse is not None:
+            payload["reuse"] = reuse
+        if no_embed:
+            payload["noEmbed"] = True
+        return payload
+
+    # ---- 候选仓库：full sync 带 simhash，正常上传正文 + 后台嵌入
+    st, rca = sync(NS_CA, _sim_manifest("simcand01", "sim-candidate", "https://git.example.com/team/sim-candidate.git",
+                                        "ca-1", A_SHARED + [A_ONLY], "cand.java",
+                                        simhash=SIM_OBJ, no_embed=False))
+    check("候选仓库 full sync + simhash → 200", st == 200, (st, rca))
+    row_ca = server.store.repo(NS_CA)
+    check("repos 存 simhash（小写 16 位 / 算法 / 文件数 / 时间）",
+          row_ca["simhash_path"] == SIM_PATH and row_ca["simhash_content"] == SIM_CONTENT
+          and row_ca["simhash_algo"] == "1" and row_ca["simhash_files"] == 9
+          and isinstance(row_ca["simhash_at"], int), row_ca)
+    bodies_a = [{"hash": h, "body": "body-" + h} for h in A_SHARED + [A_ONLY]]
+    bodies_a.append({"hash": STALE, "body": "body-" + STALE})  # 候选有正文，但只有 stale tag 向量
+    req("POST", f"/v1/repos/{NS_CA}/chunks", {"bodies": bodies_a})
+    stv = wait_vectors(NS_CA, len(A_SHARED) + 1)
+    check("候选仓库块全部嵌入（adopt 的前提）", stv.get("vectors") == 9, stv.get("vectors"))
+    stale_vec = server.embedder.embed(["stale-tag-probe"])[0]
+    server.store.put_vectors(row_ca["lineage_id"], "stale-model-tag", [(STALE, stale_vec)])
+    check("候选血统另有 stale tag 向量（用于验证 tag 过滤）",
+          server.store.vector_count(row_ca["lineage_id"], "stale-model-tag") == 1)
+
+    # ---- 目标仓库：10 块里 8 块与候选同内容（overlap 恰好 0.80）
+    st, rtb = sync(NS_TB, _sim_manifest("simtarg01", "sim-target", "https://git.example.com/team/sim-target.git",
+                                        "tb-1", A_SHARED + [STALE, B_NEW], "target.java",
+                                        simhash=SIM_OBJ, adopt=True, reuse="auto"))
+    adopted = rtb.get("adopted") or {}
+    check("full + adopt 开关 → 200 且返回 adopted", st == 200 and bool(adopted), (st, rtb))
+    check("adopted 元信息（fromLineage / fromRepo / similarity / overlap）",
+          adopted.get("fromLineage") == row_ca["lineage_id"]
+          and adopted.get("fromRepo") == "sim-candidate"
+          and adopted.get("similarity") == 1.0 and adopted.get("overlap") == 0.8, adopted)
+    check("只复制 8 个共享 hash 的 blob + vector",
+          adopted.get("blobs") == 8 and adopted.get("vectors") == 8, adopted)
+    check("missing 只剩目标独有的 2 块（adopt 后算 _missing）",
+          sorted(rtb.get("missing") or []) == sorted([STALE, B_NEW]), rtb.get("missing"))
+
+    row_tb = server.store.repo(NS_TB)
+    db = server.store.db
+    target_chunks = int(db.execute("select count(*) as n from chunks where namespace = ?",
+                                   (NS_TB,)).fetchone()["n"])
+    target_paths = sorted(r["path"] for r in db.execute(
+        "select distinct path from chunks where namespace = ?", (NS_TB,)).fetchall())
+    check("不复制候选 chunks / path：目标块数与路径不变",
+          target_chunks == 10 and target_paths == ["target.java"], (target_chunks, target_paths))
+    target_vecs = {r["hash"] for r in db.execute(
+        "select hash from vectors where lineage_id = ?", (row_tb["lineage_id"],)).fetchall()}
+    target_tags = {r["tag"] for r in db.execute(
+        "select distinct tag from vectors where lineage_id = ?", (row_tb["lineage_id"],)).fetchall()}
+    target_blobs = {r["hash"] for r in db.execute(
+        "select hash from blobs where lineage_id = ?", (row_tb["lineage_id"],)).fetchall()}
+    check("只复制精确 hash：共享 8 块在、候选独有 / stale-only / 目标新增都不在",
+          set(A_SHARED) <= target_vecs and A_ONLY not in target_vecs
+          and STALE not in target_vecs and B_NEW not in target_vecs, sorted(target_vecs))
+    check("只复制当前 tag：目标血统只有当前 tag 向量",
+          target_tags == {TAG_NOW}, target_tags)
+    check("blob 与 vector 一起复制（不含候选独有 / stale / 目标新增）",
+          target_blobs == set(A_SHARED), sorted(target_blobs))
+    check("目标 repos 也保存了 simhash", row_tb["simhash_path"] == SIM_PATH, row_tb.get("simhash_path"))
+
+    ov = server.store.adopt_overlap(NS_TB, row_ca["lineage_id"], TAG_NOW)
+    check("overlap = 目标 chunks ∩ 候选当前 tag vectors = 8/10",
+          ov.get("targetHashes") == 10 and ov.get("targetChunks") == 10
+          and ov.get("matched") == 8 and ov.get("overlap") == 0.8, ov)
+    again = server.store.adopt_hashes(row_ca["lineage_id"], row_tb["lineage_id"], A_SHARED, TAG_NOW,
+                                      namespace=NS_TB)
+    check("adopt_hashes 幂等（重复调用不重复插入）",
+          again.get("blobs") == 0 and again.get("vectors") == 0 and again.get("hashes") == 8, again)
+    orphan = server.store.adopt_hashes(row_ca["lineage_id"], row_tb["lineage_id"], [A_ONLY], TAG_NOW,
+                                       namespace=NS_TB)
+    check("目标 chunks 没有的候选 hash 不复制",
+          orphan.get("hashes") == 0 and orphan.get("vectors") == 0, orphan)
+
+    # ---- 候选查询：相似 / 无关 / tag / 排除 / 非冷启动
+    cands = server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, TAG_NOW)
+    hit = next((c for c in cands if c["lineage"] == row_ca["lineage_id"]), None)
+    check("相同 simhash → 候选 similarity = 1.0", hit is not None and hit.get("similarity") == 1.0, cands)
+    check("候选只返回元信息、不含正文", hit is not None and all("body" not in c for c in cands))
+    check("候选带 repoName / namespace / updatedAt / path+content 相似度",
+          hit is not None and hit.get("repoName") == "sim-candidate" and hit.get("namespace") == NS_CA
+          and isinstance(hit.get("updatedAt"), int) and hit.get("pathSimilarity") == 1.0
+          and hit.get("contentSimilarity") == 1.0, hit)
+    excluded = server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, row_ca["lineage_id"], TAG_NOW)
+    check("exclude_lineage 生效", all(c["lineage"] != row_ca["lineage_id"] for c in excluded), excluded)
+    check("无关 simhash → 空候选（阈值 0.85）",
+          server.store.similar_lineages("0" * 16, "0" * 16, None, TAG_NOW) == [])
+    check("tag 不一致 → 空候选",
+          server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, "other-model-tag") == [])
+    check("tag 为空不乱匹配 → 空候选",
+          server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, "") == [])
+    check("目标血统已有当前 tag 向量 → 不再返回候选（非冷启动）",
+          server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, TAG_NOW,
+                                        target_namespace=NS_TB) == [])
+
+    # ---- 诊断接口 GET /v1/lineages/similar
+    qs = urllib.parse.urlencode({"path": SIM_PATH_IN, "content": SIM_CONTENT_IN, "tag": TAG_NOW, "limit": 5})
+    st, diag = req("GET", f"/v1/lineages/similar?{qs}")
+    meta = next((c for c in (diag.get("candidates") or []) if c.get("lineage") == row_ca["lineage_id"]), None)
+    check("GET /v1/lineages/similar → 200 + 候选元信息（无正文）",
+          st == 200 and (diag.get("count") or 0) >= 2 and meta is not None and "body" not in meta, (st, diag))
+    st, badq = req("GET", "/v1/lineages/similar?path=zz&content=" + "0" * 16 + "&tag=" + urllib.parse.quote(TAG_NOW))
+    check("诊断接口：非法 simhash → 400 bad-simhash", st == 400 and badq.get("error") == "bad-simhash", (st, badq))
+    st, notag = req("GET", f"/v1/lineages/similar?path={SIM_PATH}&content={SIM_CONTENT}")
+    check("诊断接口：缺 tag → 400 tag-required", st == 400 and notag.get("error") == "tag-required", (st, notag))
+    old_api_key = server.API_KEY
+    server.API_KEY = "test-key-123"
+    try:
+        st, _ = req("GET", f"/v1/lineages/similar?{qs}")
+        check("诊断接口走现有 API Key 鉴权（无 key → 401）", st == 401, st)
+        st, okq = req("GET", f"/v1/lineages/similar?{qs}", headers={"Authorization": "Bearer test-key-123"})
+        check("诊断接口带 Bearer → 200", st == 200 and bool(okq.get("candidates")), st)
+    finally:
+        server.API_KEY = old_api_key
+
+    # ---- 非法 simhash：sync 不失败、不落库
+    NS_BAD = "simbad@fp1"
+    st, rbad = sync(NS_BAD, _sim_manifest("simbad01", "sim-bad", "https://git.example.com/team/sim-bad.git",
+                                          "bad-1", ["bad1"], "bad.java",
+                                          simhash={"v": 1, "path": "z" * 17, "content": "0" * 16, "files": 1}))
+    row_bad = server.store.repo(NS_BAD)
+    check("非法 simhash 值：sync 仍 200", st == 200, (st, rbad))
+    check("非法 simhash 不落库（保持 null）",
+          row_bad["simhash_path"] is None and row_bad["simhash_at"] is None, row_bad)
+    st, rbad2 = sync(NS_BAD, _sim_manifest("simbad01", "sim-bad", "https://git.example.com/team/sim-bad.git",
+                                           "bad-2", ["bad1"], "bad.java",
+                                           simhash={"v": 1, "path": "'; drop table repos; --",
+                                                    "content": "0" * 16, "files": 1}))
+    check("注入串 simhash：sync 200 且仍不落库",
+          st == 200 and server.store.repo(NS_BAD)["simhash_path"] is None, (st, rbad2))
+
+    # ---- overlap 门槛 / 无关 simhash
+    NS_LOW = "simlow@fp1"
+    st, rlow = sync(NS_LOW, _sim_manifest("simlow01", "sim-low", "https://git.example.com/team/sim-low.git",
+                                          "low-1", A_SHARED[:5] + ["low1", "low2", "low3", "low4", "low5"],
+                                          "low.java", simhash=SIM_OBJ, adopt=True, reuse="auto"))
+    check("overlap 5/10 低于 0.80 → 不 adopt，missing 保持全量",
+          st == 200 and "adopted" not in rlow and len(rlow.get("missing") or []) == 10, (st, rlow))
+    NS_FAR = "simfar@fp1"
+    far_obj = {"v": 1, "path": "0" * 16, "content": "0" * 16, "files": 1}
+    st, rfar = sync(NS_FAR, _sim_manifest("simfar01", "sim-far", "https://git.example.com/team/sim-far.git",
+                                          "far-1", ["far1", "far2"], "far.java",
+                                          simhash=far_obj, adopt=True, reuse="auto"))
+    check("无关 simhash → 不 adopt", st == 200 and "adopted" not in rfar, (st, rfar))
+
+    # ---- 兼容只传 reuse 的客户端：reuse=auto 视为显式 adopt 开关；suggest 不复制
+    NS_TB2 = "simtarg2@fp1"
+    st, rtb2 = sync(NS_TB2, _sim_manifest(
+        "simtarg02", "sim-target2", "https://git.example.com/team/sim-target-2.git",
+        "tb2-1", A_SHARED + [STALE, B_NEW], "target2.java", simhash=SIM_OBJ, reuse="auto"))
+    check("只传 reuse=auto（无 adopt 字段）→ 也执行 adopt（兼容当前插件契约）",
+          st == 200 and (rtb2.get("adopted") or {}).get("vectors") == 8, rtb2.get("adopted") or rtb2)
+    NS_TB3 = "simtarg3@fp1"
+    st, rtb3 = sync(NS_TB3, _sim_manifest(
+        "simtarg03", "sim-target3", "https://git.example.com/team/sim-target-3.git",
+        "tb3-1", A_SHARED + [STALE, B_NEW], "target3.java", simhash=SIM_OBJ, reuse="suggest"))
+    check("reuse=suggest（默认配置）不复制", st == 200 and "adopted" not in rtb3, (st, rtb3))
+
+    # ---- 只在 full + 显式 adopt + reuse 非 off 时查询候选；adopt 失败不能拖垮 sync
+    orig_similar = server.store.similar_lineages
+
+    def _simhash_boom(*_args, **_kwargs):
+        raise RuntimeError("simhash boom")
+
+    server.store.similar_lineages = _simhash_boom
+    try:
+        st, roff = sync("simoff@fp1", _sim_manifest(
+            "simoff01", "sim-off", "https://git.example.com/team/sim-off.git",
+            "off-1", ["off1"], "off.java", simhash=SIM_OBJ, adopt=True, reuse="off"))
+        check("reuse=off → 不查候选（sync 200，无 adopted / adoptError）",
+              st == 200 and "adopted" not in roff and "adoptError" not in roff, roff)
+        st, rno = sync("simnoflag@fp1", _sim_manifest(
+            "simnf01", "sim-noflag", "https://git.example.com/team/sim-noflag.git",
+            "nf-1", ["nf1"], "nf.java", simhash=SIM_OBJ))
+        check("full 但无 adopt 开关 → 不查候选 / 不 adopt（不会对所有 sync 做候选查询）",
+              st == 200 and "adopted" not in rno and "adoptError" not in rno, rno)
+        diff_payload = _sim_manifest("simdf01", "sim-diff", "https://git.example.com/team/sim-diff.git",
+                                     "df-1", ["df1"], "df.java", simhash=SIM_OBJ, adopt=True, reuse="auto")
+        diff_payload["mode"] = "diff"
+        st, rdiff = sync("simdiff@fp1", diff_payload)
+        check("mode=diff + adopt 开关 → 仍不查候选",
+              st == 200 and "adopted" not in rdiff and "adoptError" not in rdiff, rdiff)
+        st, rfail = sync("simfail@fp1", _sim_manifest(
+            "simfl01", "sim-fail", "https://git.example.com/team/sim-fail.git",
+            "fl-1", ["fl1", "fl2"], "fl.java", simhash=SIM_OBJ, adopt=True, reuse="auto"))
+        check("adopt 抛异常不影响 sync：200 + 正常 missing 清单",
+              st == 200 and sorted(rfail.get("missing") or []) == ["fl1", "fl2"], rfail)
+        check("adopt 失败被记录在 adoptError（不抛 500）", bool(rfail.get("adoptError")),
+              rfail.get("adoptError"))
+        row_fail = server.store.repo("simfail@fp1")
+        fail_chunks = int(db.execute("select count(*) as n from chunks where namespace = ?",
+                                     ("simfail@fp1",)).fetchone()["n"])
+        check("adopt 失败回滚后目标 chunks 完好", row_fail is not None and fail_chunks == 2,
+              (row_fail is not None, fail_chunks))
+    finally:
+        server.store.similar_lineages = orig_similar
+
+    # ---- 旧客户端不带 simhash → null；后来带则每次 sync 更新
+    NS_OLD = "simold@fp1"
+    st, rold = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
+                                          "old-1", ["old1"], "old.java"))
+    row_old = server.store.repo(NS_OLD)
+    check("旧客户端不带 simhash → repos 保持 null（sync 仍 200）",
+          st == 200 and row_old["simhash_path"] is None and row_old["simhash_at"] is None, row_old)
+    st, _ = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
+                                       "old-2", ["old1"], "old.java",
+                                       simhash={"v": 1, "path": "1" * 16, "content": "2" * 16, "files": 7}))
+    row_old = server.store.repo(NS_OLD)
+    first_simhash_at = row_old["simhash_at"]
+    check("后来带 simhash 的 sync 会补上（含 files）",
+          row_old["simhash_path"] == "1" * 16 and row_old["simhash_content"] == "2" * 16
+          and row_old["simhash_files"] == 7 and isinstance(first_simhash_at, int), row_old)
+    st, _ = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
+                                       "old-3", ["old1"], "old.java",
+                                       simhash={"v": 2, "path": "3" * 16, "content": "4" * 16, "files": 8}))
+    row_old = server.store.repo(NS_OLD)
+    check("再次 sync 覆盖 simhash（含算法版本 / 时间戳）",
+          row_old["simhash_path"] == "3" * 16 and row_old["simhash_algo"] == "2"
+          and row_old["simhash_files"] == 8 and row_old["simhash_at"] >= first_simhash_at, row_old)
+    bad_set = False
+    try:
+        server.store.set_simhash(NS_OLD, {"path": "zz", "content": "0" * 16})
+    except ValueError:
+        bad_set = True
+    check("set_simhash 非法值抛 ValueError（明确失败，不静默写坏）", bad_set)
+
+    # ---- legacy adopt 端点保持兼容（老调用不带 tag，按 hash 复制候选全部 tag）
+    st, legacy_adopt = req("POST", f"/v1/lineages/{row_tb['lineage_id']}/adopt",
+                           {"from": row_ca["lineage_id"], "hashes": [A_ONLY]})
+    check("旧 POST /v1/lineages/{id}/adopt 仍兼容（按 hash 复制）",
+          st == 200 and legacy_adopt.get("vectors") == 1, (st, legacy_adopt))
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")
