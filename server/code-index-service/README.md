@@ -86,7 +86,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/admin/models/activate`、`POST /v1/admin/models/deactivate` | **模型热切换**：`{kind:'embed'|'rerank', dir|name}` 动态加载，无需重启（见下文） |
 | `POST /v1/admin/reset-index` | **清空索引**：`{confirm:'RESET'}` 删除全部作用域/块/向量/正文并 VACUUM（Key/统计保留）；客户端下次同步自动全量重建 |
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
-| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按端点（请求、错误、embed/search/rerank、延迟、**P50/P95**、**上期对比**）；`days=1/7/30` |
+| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按**仓库·作用域**（业务/系统分类、embed/search/rerank、延迟、**P50/P95**、上期对比）；`days=1/7/30` |
 | `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
@@ -124,10 +124,15 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - **模型**：当前嵌入/重排、已安装模型（本机 `/models` 与 `/data/models` 自动发现）、一键**热切换**、
   可下载模型（进度/取消/重试/重传）、重排启用/关闭。
 - **API Key**：新建（固定 index 角色）、启用/禁用、删除、一次性明文展示、一键测试访问索引服务。
-- **统计**：今日 / 近 7 天 / 近 30 天；8 个 KPI（请求、错误率、平均延迟、P95、embed/search/rerank、活跃 Key，带环比）；
-  每日请求/错误柱状图、每日延迟趋势、请求构成；按端点与按 Key 明细（占比条、错误率、每 Key 平均延迟、最后使用）；
-  运行状态卡（模型、限速、作用域覆盖率、**嵌入积压**）；自动刷新与 CSV 导出。
-  延迟分位为桶上界近似（`usage_latency` 表按天累加，最多保留 90 天，即"≤X ms"）。
+- **统计**：今日 / 近 7 天 / 近 30 天；8 个 KPI（业务请求、检索/重排、embed 文本、业务成功率、平均延迟、
+  P95、索引操作、活跃 Key，带环比）；每日业务请求堆叠图（检索/索引/嵌入）、每日延迟趋势、业务请求构成；
+  **按仓库 / 作用域**明细（块/向量/覆盖率 + 请求/检索/嵌入/重排/错误率/延迟，Top 15）与按 Key 明细；
+  运行状态 / 配额卡（模型、限速、作用域上限、存储上限、块/向量、**嵌入积压**、业务/系统请求）；
+  自动刷新与 CSV 导出。
+  - **系统/轮询请求**（`status`/`scopes`/`admin` 等，含控制台轮询与健康检查）单独归类，**不进入业务 KPI 与主图**，
+    只在运行状态卡和日志页可见；不再展示原始端点表。
+  - 延迟分位为桶上界近似（`usage_latency` 表按天累加，最多保留 90 天，即"≤X ms"）。
+  - **按作用域**用量写 `usage_scope` 表（同样保留 90 天），从本版本开始累计；多作用域检索只计第一个写作用域。
 - **作用域**：快照表（块/向量/覆盖率/占用/TTL/命名空间）+ 检索测试。
 - **日志**：服务日志尾部。
 

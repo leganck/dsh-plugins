@@ -37,7 +37,9 @@ import time
 DAY_FMT = "%Y-%m-%d"
 ROLES = ("index", "admin")
 LEGACY_KEY_ID = 0
-LEGACY_KEY_NAME = "legacy/env"
+# id=0：控制台会话/管理请求（以及历史环境变量 API_KEY 的调用）；
+# 环境变量 Key 在 2026-10-22 已从本部署移除，这里保留中性名字避免看板误导。
+LEGACY_KEY_NAME = "控制台/旧 env key"
 
 # 攒够这么多条 record() 就立刻落一次盘（正常是定时线程落盘，这里只兜底"突发流量"）
 FLUSH_EVENTS = 200
@@ -102,6 +104,17 @@ create table if not exists usage_latency(
   requests integer not null default 0,
   primary key(day, bucket)
 );
+create table if not exists usage_scope(
+  day text not null,
+  namespace text not null,
+  requests integer not null default 0,
+  errors integer not null default 0,
+  search_calls integer not null default 0,
+  embed_texts integer not null default 0,
+  rerank_calls integer not null default 0,
+  latency_sum real not null default 0,
+  primary key(day, namespace)
+);
 """
 
 
@@ -163,6 +176,9 @@ class AdminStore:
         self._pending = {}
         # (day, bucket) -> 次数；与 _pending 一起 flush / 失败回滚
         self._latency = {}
+        # (day, namespace) -> [requests, errors, search_calls, embed_texts, rerank_calls, latency_sum]
+        # 只对带作用域的请求（/v1/search、/v1/repos/<ns>/*）累加
+        self._scope_pending = {}
         self._events = 0
         # key_id -> 最近一次 lookup 时间（内存里立即生效，落库节流）
         self._last_used = {}
@@ -339,12 +355,14 @@ class AdminStore:
         return {key_id: (value[0], value[1]) for key_id, value in out.items()}
 
     # ---------------------------------------------------------------- 统计
-    def record(self, key_id, endpoint, ok, latency_ms, embed_texts=0, search_calls=0, rerank_calls=0):
+    def record(self, key_id, endpoint, ok, latency_ms, embed_texts=0, search_calls=0, rerank_calls=0,
+               namespace=None):
         """热路径：只做内存累加（线程安全、**绝不写 SQLite**），攒够 200 条才落盘。"""
         now = time.time()
         day = time.strftime(DAY_FMT, time.localtime(now))
         key_id = int(key_id or 0)
         endpoint = "" if endpoint is None else str(endpoint)
+        namespace = str(namespace) if namespace else None
         latency = float(latency_ms or 0.0)
         embed_texts = int(embed_texts or 0)
         search_calls = int(search_calls or 0)
@@ -366,6 +384,17 @@ class AdminStore:
                 slot[6] = latency
             bucket = _latency_bucket(latency)
             self._latency[(day, bucket)] = self._latency.get((day, bucket), 0) + 1
+            if namespace:
+                sslot = self._scope_pending.get((day, namespace))
+                if sslot is None:
+                    sslot = [0, 0, 0, 0, 0, 0.0]
+                    self._scope_pending[(day, namespace)] = sslot
+                sslot[0] += 1
+                sslot[1] += 0 if ok else 1
+                sslot[2] += search_calls
+                sslot[3] += embed_texts
+                sslot[4] += rerank_calls
+                sslot[5] += latency
             self._events += 1
             need_flush = self._events >= FLUSH_EVENTS
         # 落盘放在锁外：200 条聚合后是一次小事务，不要占着锁做 IO
@@ -387,10 +416,11 @@ class AdminStore:
             # last_used_at 节流：最多每 LAST_USED_WRITE 秒写一次库；close() 时 force=True 兜底
             used_due = force or (now - self._last_used_write) >= LAST_USED_WRITE
             used_items = list(self._last_used.items()) if used_due else []
-            if not self._pending and not used_items and not purge_due and not self._latency:
+            if not self._pending and not used_items and not purge_due and not self._latency and not self._scope_pending:
                 return
             pending, self._pending = self._pending, {}
             latency_pending, self._latency = self._latency, {}
+            scope_pending, self._scope_pending = self._scope_pending, {}
             events, self._events = self._events, 0
             try:
                 for (key_id, day, endpoint), v in pending.items():
@@ -423,6 +453,19 @@ class AdminStore:
                         " on conflict(day, bucket) do update set requests = requests + excluded.requests",
                         (day, int(bucket), int(count)),
                     )
+                for (day, namespace), v in scope_pending.items():
+                    self.db.execute(
+                        "insert into usage_scope(day, namespace, requests, errors, search_calls,"
+                        " embed_texts, rerank_calls, latency_sum) values (?,?,?,?,?,?,?,?)"
+                        " on conflict(day, namespace) do update set"
+                        " requests = requests + excluded.requests,"
+                        " errors = errors + excluded.errors,"
+                        " search_calls = search_calls + excluded.search_calls,"
+                        " embed_texts = embed_texts + excluded.embed_texts,"
+                        " rerank_calls = rerank_calls + excluded.rerank_calls,"
+                        " latency_sum = latency_sum + excluded.latency_sum",
+                        (day, namespace, v[0], v[1], v[2], v[3], v[4], v[5]),
+                    )
                 for key_id, last_used in used_items:
                     self.db.execute(
                         "update api_keys set last_used_at = ? where id = ?", (float(last_used), int(key_id))
@@ -434,6 +477,7 @@ class AdminStore:
                     self.db.execute("delete from usage_daily where day < ?", (cutoff,))
                     self.db.execute("delete from usage_endpoint where day < ?", (cutoff,))
                     self.db.execute("delete from usage_latency where day < ?", (cutoff,))
+                    self.db.execute("delete from usage_scope where day < ?", (cutoff,))
                 self.db.commit()
             except Exception:
                 # 写失败不能丢数据：回滚后把这一轮缓冲/脏标记并回去，等下一轮重试
@@ -453,6 +497,14 @@ class AdminStore:
                                 current[i] += value[i]
                 for key, count in latency_pending.items():
                     self._latency[key] = self._latency.get(key, 0) + count
+                for key, value in scope_pending.items():
+                    current = self._scope_pending.get(key)
+                    if current is None:
+                        self._scope_pending[key] = value
+                    else:
+                        for i in range(5):
+                            current[i] += value[i]
+                        current[5] += value[5]
                 self._events += events
                 return
             # 提交成功后才清脏标记（提交前清会让失败那轮丢掉 last_used 更新）
@@ -513,6 +565,26 @@ class AdminStore:
                 " from usage_daily where day >= ? and day <= ?",
                 (prev_from, prev_to),
             ).fetchone()
+            scope_rows = self.db.execute(
+                "select namespace, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(search_calls),0) as search_calls, coalesce(sum(embed_texts),0) as embed_texts,"
+                " coalesce(sum(rerank_calls),0) as rerank_calls, coalesce(sum(latency_sum),0) as latency_sum"
+                " from usage_scope where day >= ? and day <= ? group by namespace",
+                (day_from, day_to),
+            ).fetchall()
+            day_endpoint_rows = self.db.execute(
+                "select day, endpoint, coalesce(sum(requests),0) as requests,"
+                " coalesce(sum(errors),0) as errors, coalesce(sum(latency_sum),0) as latency_sum"
+                " from usage_endpoint where day >= ? and day <= ? group by day, endpoint",
+                (day_from, day_to),
+            ).fetchall()
+            prev_endpoint_rows = self.db.execute(
+                "select endpoint, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(latency_sum),0) as latency_sum"
+                " from usage_endpoint where day >= ? and day <= ? group by endpoint",
+                (prev_from, prev_to),
+            ).fetchall()
+            scope_pending = list(self._scope_pending.items())
 
         for r in rows:
             day = r["day"]
@@ -544,6 +616,40 @@ class AdminStore:
             ep["requests"] += v[0]
             ep["errors"] += v[1]
             ep["latencySum"] += v[5]
+
+        # 按作用域（usage_scope）：历史表 + 未落盘缓冲
+        by_scope = {}
+        for r in scope_rows:
+            by_scope[r["namespace"]] = {
+                "requests": int(r["requests"]), "errors": int(r["errors"]),
+                "searchCalls": int(r["search_calls"]), "embedTexts": int(r["embed_texts"]),
+                "rerankCalls": int(r["rerank_calls"]), "latencySum": float(r["latency_sum"]),
+            }
+        for (day, namespace), v in scope_pending:
+            if day < day_from or day > day_to:
+                continue
+            acc = by_scope.setdefault(namespace, {"requests": 0, "errors": 0, "searchCalls": 0,
+                                                  "embedTexts": 0, "rerankCalls": 0, "latencySum": 0.0})
+            acc["requests"] += v[0]
+            acc["errors"] += v[1]
+            acc["searchCalls"] += v[2]
+            acc["embedTexts"] += v[3]
+            acc["rerankCalls"] += v[4]
+            acc["latencySum"] += v[5]
+
+        # 按天 × endpoint group（用于"业务/系统"趋势，不直接展示原始端点）
+        by_day_endpoint = {}
+        for r in day_endpoint_rows:
+            by_day_endpoint[(r["day"], r["endpoint"] or "")] = {
+                "requests": int(r["requests"]), "errors": int(r["errors"]), "latencySum": float(r["latency_sum"]),
+            }
+        for (key_id, day, endpoint), v in pending:
+            if day < day_from or day > day_to:
+                continue
+            acc = by_day_endpoint.setdefault((day, endpoint), {"requests": 0, "errors": 0, "latencySum": 0.0})
+            acc["requests"] += v[0]
+            acc["errors"] += v[1]
+            acc["latencySum"] += v[5]
 
         # 延迟分桶（已落库 + 未落盘缓冲）
         latency_counts = {}
@@ -607,6 +713,37 @@ class AdminStore:
             }
             for endpoint, acc in sorted(by_endpoint.items(), key=lambda item: (-item[1]["requests"], item[0]))
         ]
+        scopes_out = [
+            {
+                "namespace": namespace,
+                "requests": acc["requests"],
+                "errors": acc["errors"],
+                "searchCalls": acc["searchCalls"],
+                "embedTexts": acc["embedTexts"],
+                "rerankCalls": acc["rerankCalls"],
+                "latencyAvg": _avg(acc["latencySum"], acc["requests"]),
+            }
+            for namespace, acc in sorted(by_scope.items(), key=lambda item: (-item[1]["requests"], item[0]))
+        ]
+        day_endpoint_out = [
+            {
+                "day": day,
+                "endpoint": endpoint,
+                "requests": acc["requests"],
+                "errors": acc["errors"],
+                "latencyAvg": _avg(acc["latencySum"], acc["requests"]),
+            }
+            for (day, endpoint), acc in sorted(by_day_endpoint.items())
+        ]
+        prev_endpoint_out = []
+        for r in prev_endpoint_rows:
+            endpoint = r["endpoint"] or ""
+            prev_endpoint_out.append({
+                "endpoint": endpoint,
+                "requests": int(r["requests"]),
+                "errors": int(r["errors"]),
+                "latencyAvg": _avg(r["latency_sum"], r["requests"]),
+            })
 
         # 延迟分位（桶上界近似）：P50/P95 只是"≤X ms"，用于判断大体水位，不做精确分位
         lat_total = sum(latency_counts.values())
@@ -656,6 +793,9 @@ class AdminStore:
             "byDay": days_out,
             "byKey": keys_out,
             "byEndpoint": endpoints_out,
+            "byScope": scopes_out,
+            "byDayEndpoint": day_endpoint_out,
+            "prevByEndpoint": prev_endpoint_out,
             "latency": latency_out,
         }
 
