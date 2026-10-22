@@ -140,6 +140,89 @@ def _endpoint_group(path):
         return "status"
     return "other"
 
+
+# 统计页只展示"业务用量"：系统/轮询请求单独归类，不进入 KPI 与主图
+STATS_CATEGORY_GROUPS = {
+    "retrieval": ("search", "rerank"),
+    "embedding": ("embed",),
+    "indexing": ("sync", "vectors", "embed-queue"),
+    "system": ("status", "scopes", "admin", "other"),
+}
+
+
+def _stats_category(group):
+    for category, groups in STATS_CATEGORY_GROUPS.items():
+        if group in groups:
+            return category
+    return "system"
+
+
+def _enrich_stats(data):
+    """给 /v1/admin/stats 补业务分类、按天分类计数、按作用域元信息。"""
+    categories = {name: {"requests": 0, "errors": 0, "latencySum": 0.0} for name in STATS_CATEGORY_GROUPS}
+
+    def add_category(acc, endpoint, requests, errors, latency_avg):
+        category = _stats_category(endpoint or "")
+        slot = acc[category]
+        slot["requests"] += int(requests or 0)
+        slot["errors"] += int(errors or 0)
+        slot["latencySum"] += float(latency_avg or 0.0) * int(requests or 0)
+
+    for item in data.get("byEndpoint") or []:
+        add_category(categories, item.get("endpoint"), item.get("requests"), item.get("errors"),
+                     item.get("latencyAvg"))
+    data["categories"] = {
+        name: {"requests": slot["requests"], "errors": slot["errors"],
+               "latencyAvg": round(slot["latencySum"] / slot["requests"], 6) if slot["requests"] else 0.0}
+        for name, slot in categories.items()
+    }
+
+    prev_categories = {name: {"requests": 0, "errors": 0, "latencySum": 0.0} for name in STATS_CATEGORY_GROUPS}
+    for item in data.get("prevByEndpoint") or []:
+        add_category(prev_categories, item.get("endpoint"), item.get("requests"), item.get("errors"),
+                     item.get("latencyAvg"))
+    data["prevCategories"] = {
+        name: {"requests": slot["requests"], "errors": slot["errors"],
+               "latencyAvg": round(slot["latencySum"] / slot["requests"], 6) if slot["requests"] else 0.0}
+        for name, slot in prev_categories.items()
+    }
+
+    day_categories = {}
+    for item in data.get("byDayEndpoint") or []:
+        category = _stats_category(item.get("endpoint") or "")
+        slot = day_categories.setdefault(item["day"], {name: 0 for name in STATS_CATEGORY_GROUPS})
+        slot[category] += int(item.get("requests") or 0)
+    for day in data.get("byDay") or []:
+        slot = day_categories.get(day.get("day")) or {}
+        for name in STATS_CATEGORY_GROUPS:
+            day[name + "Requests"] = int(slot.get(name, 0))
+
+    scope_map = {}
+    if store:
+        try:
+            for item in store.scope_overview(limit=MAX_SCOPES):
+                scope_map[item.get("namespace")] = item
+        except Exception:  # noqa: BLE001 —— 补元信息失败不影响统计
+            pass
+    for item in data.get("byScope") or []:
+        known = scope_map.get(item.get("namespace"))
+        if known:
+            scope = known.get("scope") or {}
+            item.update({
+                "repoName": known.get("repo_name"),
+                "kind": scope.get("kind") or "legacy",
+                "ref": scope.get("ref"),
+                "chunks": known.get("chunks"),
+                "vectors": known.get("vectors"),
+                "coverage": known.get("coverage"),
+                "missing": False,
+            })
+        else:
+            item.update({"repoName": None, "kind": None, "ref": None, "chunks": None,
+                         "vectors": None, "coverage": None, "missing": True})
+    return data
+
+
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -236,6 +319,8 @@ ADMIN_HTML = r"""<!doctype html>
   .bar > i { display:block; height:100%; border-radius:99px; background:var(--ok); }
   .bar.warn > i { background:var(--warn); } .bar.bad > i { background:var(--bad); }
   .bar.blue > i { background:var(--blue); }
+  .bar.purple > i { background:var(--purple); }
+  .bar.ok > i { background:var(--ok); }
   .muted { color:var(--muted); } .faint { color:var(--faint); }
   .ns { font-family:var(--mono); font-size:11.5px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; display:inline-block; vertical-align:middle; }
   .copy { border:0; background:transparent; color:var(--faint); cursor:pointer; padding:0 2px; font-size:12px; }
@@ -274,11 +359,17 @@ ADMIN_HTML = r"""<!doctype html>
   .chart .bars i { display:block; width:44%; border-radius:2px 2px 0 0; background:var(--blue); min-height:1px; }
   .chart .bars i.err { background:var(--bad); }
   .chart .bars i.lat { width:70%; background:var(--purple); }
+  .chart .stack { flex:1; width:100%; height:100%; display:flex; flex-direction:column; justify-content:flex-end; gap:1px; }
+  .chart .stack i { display:block; width:100%; min-height:1px; border-radius:1px; }
+  .chart .stack i.s-ret { background:var(--blue); }
+  .chart .stack i.s-idx { background:var(--purple); }
+  .chart .stack i.s-emb { background:var(--ok); }
   .chart .x { font-size:9.5px; color:var(--faint); white-space:nowrap; line-height:1.2; }
   .chart .col:hover .bars i { opacity:.8; }
   .legend { display:flex; align-items:center; gap:10px; margin-top:6px; font-size:11px; color:var(--muted); flex-wrap:wrap; }
   .legend .lg { width:9px; height:9px; border-radius:2px; display:inline-block; background:var(--blue); }
   .legend .lg.err { background:var(--bad); } .legend .lg.lat { background:var(--purple); }
+  .legend .lg.idx { background:var(--purple); } .legend .lg.emb { background:var(--ok); }
   .mix { display:grid; gap:8px; }
   .mix .row { display:grid; grid-template-columns:78px 1fr 120px; align-items:center; gap:10px; font-size:12px; }
   .mix .bar { width:100%; }
@@ -421,41 +512,42 @@ ADMIN_HTML = r"""<!doctype html>
       <h2>趋势 <span class="tail faint" id="stat-range-label"></span></h2>
       <div class="grid2">
         <div>
-          <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日请求 / 错误</div>
+          <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日业务请求（检索 / 索引 / 嵌入，不含系统轮询）</div>
           <div class="chart" id="stat-trend"></div>
-          <div class="legend"><span class="lg req"></span>请求 <span class="lg err"></span>错误</div>
+          <div class="legend"><span class="lg req"></span>检索/重排 <span class="lg idx"></span>索引操作 <span class="lg emb"></span>嵌入</div>
         </div>
         <div>
           <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日平均延迟</div>
           <div class="chart" id="stat-latency"></div>
-          <div class="legend"><span class="lg lat"></span>平均延迟（悬停看当日最大）</div>
+          <div class="legend"><span class="lg lat"></span>全部请求平均延迟（悬停看当日最大/请求数）</div>
         </div>
       </div>
       <div style="margin-top:16px">
-        <div class="faint" style="font-size:11.5px;margin-bottom:6px">请求构成（相对请求总数）</div>
+        <div class="faint" style="font-size:11.5px;margin-bottom:6px">业务请求构成</div>
         <div class="mix" id="stat-mix"></div>
       </div>
     </section>
     <section class="card wide">
-      <h2>运行状态 <span class="tail faint" id="stat-runtime-at"></span></h2>
+      <h2>运行状态 / 配额 <span class="tail faint" id="stat-runtime-at"></span></h2>
       <div class="stats" id="stat-runtime"></div>
       <div class="toolbar" style="margin:12px 0 0">
         <button data-goto="models">模型页</button>
         <button data-goto="scopes">作用域页</button>
-        <span class="faint" style="font-size:11.5px">嵌入积压 = Σ(作用域块数 − 已嵌向量数)，由服务端后台限速嵌入</span>
+        <span class="faint" id="stat-system-note" style="font-size:11.5px"></span>
       </div>
     </section>
     <section class="card wide">
-      <h2>按端点</h2>
+      <h2>按仓库 / 作用域 <span class="tail faint" id="stat-scope-tip"></span></h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>端点</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">错误率</th><th class="num">平均延迟</th></tr></thead>
-        <tbody id="stat-endpoints"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+        <thead><tr><th>仓库 / 作用域</th><th>类型</th><th class="num">块 / 向量</th><th class="num">请求</th><th class="num">检索</th><th class="num">嵌入</th><th class="num">重排</th><th class="num">错误率</th><th class="num">平均延迟</th></tr></thead>
+        <tbody id="stat-scopes"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table></div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">按作用域的用量从本版本开始累计；多作用域检索只计第一个写作用域。</div>
     </section>
     <section class="card wide">
       <h2>按 Key</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>Key</th><th>角色</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">embed</th><th class="num">search</th><th class="num">rerank</th><th class="num">平均延迟</th><th>最后使用</th></tr></thead>
+        <thead><tr><th>Key</th><th>角色</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">嵌入</th><th class="num">检索</th><th class="num">重排</th><th class="num">平均延迟</th><th>最后使用</th></tr></thead>
         <tbody id="stat-keys"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
       </table></div>
     </section>
@@ -1010,6 +1102,8 @@ async function deleteKey(id) {
 let STATS_DAYS = 7;
 let STATS = null;
 let STATS_TIMER = null;
+const STATS_CAT_ORDER = ['retrieval', 'indexing', 'embedding'];
+const STATS_CAT_LABEL = { retrieval: '检索/重排', indexing: '索引操作', embedding: '嵌入', system: '系统/轮询' };
 function fmtMs(v) { const n = Number(v || 0); return n > 0 ? Math.round(n) + ' ms' : '—'; }
 function ratePct(errors, requests) { return requests ? (Number(errors || 0) / Number(requests)) * 100 : 0; }
 function rateText(errors, requests) { const r = ratePct(errors, requests); return (requests ? r.toFixed(1) : '0.0') + '%'; }
@@ -1024,33 +1118,57 @@ function deltaTag(cur, prev, lowerBetter) {
 function statCard(label, value, sub) {
   return '<div class="stat"><div class="n">' + value + '</div><div class="l">' + label + (sub ? ' ' + sub : '') + '</div></div>';
 }
+function catOf(categories, name) {
+  const c = (categories || {})[name] || {};
+  return { requests: Number(c.requests || 0), errors: Number(c.errors || 0), latencyAvg: Number(c.latencyAvg || 0) };
+}
+function sumCats(categories, names) {
+  let requests = 0, errors = 0, latencySum = 0;
+  for (const name of names) {
+    const c = catOf(categories, name);
+    requests += c.requests;
+    errors += c.errors;
+    latencySum += c.latencyAvg * c.requests;
+  }
+  return { requests, errors, latencyAvg: requests ? latencySum / requests : 0 };
+}
+function businessCats(categories) { return sumCats(categories, STATS_CAT_ORDER); }
 function renderStatCards() {
-  const d = STATS || {}; const t = d.totals || {}; const p = d.prevTotals || {}; const lat = d.latency || {};
+  const d = STATS || {}; const t = d.totals || {}; const lat = d.latency || {};
+  const cats = d.categories || {}; const prevCats = d.prevCategories || {};
+  const biz = businessCats(cats); const prevBiz = businessCats(prevCats);
+  const retrieval = catOf(cats, 'retrieval'); const indexing = catOf(cats, 'indexing');
+  const success = biz.requests ? 100 - ratePct(biz.errors, biz.requests) : null;
   $('#stat-cards').innerHTML = [
-    statCard('请求总数', fmtNum(t.requests), deltaTag(t.requests, p.requests, false)),
-    statCard('错误 / 错误率', fmtNum(t.errors) + ' <span class="sub">' + rateText(t.errors, t.requests) + '</span>', deltaTag(t.errors, p.errors, true)),
-    statCard('平均延迟', fmtMs(t.latencyAvg), deltaTag(t.latencyAvg, p.latencyAvg, true)),
-    statCard('P95 延迟', lat.p95 || '—', lat.count ? '<span class="sub">' + fmtNum(lat.count) + ' 次采样</span>' : '<span class="sub">本次部署后开始累计</span>'),
+    statCard('业务请求', fmtNum(biz.requests), deltaTag(biz.requests, prevBiz.requests, false)),
+    statCard('检索 / 重排', fmtNum(retrieval.requests), '<span class="sub">' + fmtNum(t.searchCalls) + ' 次检索</span>'),
     statCard('embed 文本', fmtNum(t.embedTexts), ''),
-    statCard('search', fmtNum(t.searchCalls), ''),
-    statCard('rerank', fmtNum(t.rerankCalls), ''),
+    statCard('业务成功率', success === null ? '—' : success.toFixed(1) + '%', '<span class="sub">' + fmtNum(biz.errors) + ' 错误</span>'),
+    statCard('平均延迟（业务）', fmtMs(biz.latencyAvg), deltaTag(biz.latencyAvg, prevBiz.latencyAvg, true)),
+    statCard('P95 延迟', lat.p95 || '—', lat.count ? '<span class="sub">' + fmtNum(lat.count) + ' 次采样（全部）</span>' : '<span class="sub">本次部署后累计</span>'),
+    statCard('索引操作', fmtNum(indexing.requests), '<span class="sub">同步 / 上传 / 触发</span>'),
     statCard('活跃 Key', fmtNum((d.byKey || []).filter((k) => k.role !== 'deleted').length), '<span class="sub">' + (d.days === 1 ? '今日' : '区间内') + ' 有调用</span>'),
   ].join('');
 }
-function chartCol(x, bars, label) {
-  return '<div class="col" title="' + escapeHtml(x.day) + '"><div class="bars">' + bars + '</div><span class="x">' + escapeHtml(label) + '</span></div>';
+function chartCol(x, bars, label, title) {
+  return '<div class="col" title="' + escapeHtml(title || x.day) + '"><div class="bars">' + bars + '</div><span class="x">' + escapeHtml(label) + '</span></div>';
 }
 function renderTrend() {
   const rows = (STATS && STATS.byDay) || [];
   const el = $('#stat-trend');
   if (!rows.length) { el.innerHTML = '<div class="empty">没有数据</div>'; return; }
-  const max = Math.max(1, ...rows.map((x) => Number(x.requests || 0)));
+  const totals = rows.map((x) => STATS_CAT_ORDER.reduce((a, n) => a + Number(x[n + 'Requests'] || 0), 0));
+  const max = Math.max(1, ...totals);
   const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
   el.innerHTML = rows.map((x, i) => {
-    const rh = Math.max(1, Math.round((Number(x.requests || 0) / max) * 100));
-    const eh = Number(x.errors || 0) ? Math.max(1, Math.round((Number(x.errors) / max) * 100)) : 0;
-    const bars = '<i style="height:' + rh + '%"></i>' + (eh ? '<i class="err" style="height:' + eh + '%"></i>' : '');
-    return chartCol(x, bars, i % step === 0 ? String(x.day || '').slice(5) : '');
+    const seg = (name, cls) => {
+      const v = Number(x[name + 'Requests'] || 0);
+      return v ? '<i class="' + cls + '" style="height:' + ((v / max) * 100).toFixed(2) + '%"></i>' : '';
+    };
+    const bars = '<div class="stack">' + seg('embedding', 's-emb') + seg('indexing', 's-idx') + seg('retrieval', 's-ret') + '</div>';
+    const title = x.day + '：检索/重排 ' + fmtNum(x.retrievalRequests) + ' · 索引 ' + fmtNum(x.indexingRequests)
+      + ' · 嵌入 ' + fmtNum(x.embeddingRequests) + ' · 系统/轮询 ' + fmtNum(x.systemRequests) + ' · 错误 ' + fmtNum(x.errors);
+    return chartCol(x, bars, i % step === 0 ? String(x.day || '').slice(5) : '', title);
   }).join('');
 }
 function renderLatencyTrend() {
@@ -1061,31 +1179,44 @@ function renderLatencyTrend() {
   const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
   el.innerHTML = rows.map((x, i) => {
     const h = Math.max(1, Math.round((Number(x.latencyAvg || 0) / max) * 100));
-    const bars = '<i class="lat" style="height:' + h + '%"></i>';
-    return chartCol(x, bars, i % step === 0 ? String(x.day || '').slice(5) : '');
+    return chartCol(x, '<i class="lat" style="height:' + h + '%"></i>', i % step === 0 ? String(x.day || '').slice(5) : '');
   }).join('');
-  // 悬停 title 里补上最大延迟
   $$('#stat-latency .col').forEach((col, i) => {
     const x = rows[i] || {};
     col.title = String(x.day || '') + '：平均 ' + fmtMs(x.latencyAvg) + ' · 最大 ' + fmtMs(x.latencyMax) + ' · 请求 ' + fmtNum(x.requests);
   });
 }
 function renderMix() {
-  const t = (STATS && STATS.totals) || {};
-  const items = [['embed', Number(t.embedTexts || 0)], ['search', Number(t.searchCalls || 0)], ['rerank', Number(t.rerankCalls || 0)]];
+  const cats = (STATS && STATS.categories) || {};
+  const items = STATS_CAT_ORDER.map((name) => [STATS_CAT_LABEL[name], catOf(cats, name).requests]);
+  const total = items.reduce((a, x) => a + x[1], 0);
   const max = Math.max(1, ...items.map((x) => x[1]));
-  $('#stat-mix').innerHTML = items.map(([label, count]) => {
+  const colors = ['blue', 'purple', 'ok'];
+  $('#stat-mix').innerHTML = items.map(([label, count], i) => {
     const w = Math.max(1, Math.round((count / max) * 100));
-    const share = t.requests ? (count / t.requests) * 100 : 0;
-    return '<div class="row"><span class="faint">' + label + '</span><span class="bar blue"><i style="width:' + w + '%"></i></span><span class="num">' + fmtNum(count) + ' · ' + share.toFixed(1) + '%</span></div>';
+    const share = total ? (count / total) * 100 : 0;
+    return '<div class="row"><span class="faint">' + label + '</span><span class="bar ' + (colors[i] || 'blue') + '"><i style="width:' + w + '%"></i></span><span class="num">' + fmtNum(count) + ' · ' + share.toFixed(1) + '%</span></div>';
   }).join('');
+}
+function shortNs(ns) {
+  const s = String(ns || '');
+  const at = s.indexOf('@');
+  if (at > 0) return s.slice(0, at) + '…';
+  return s.length > 18 ? s.slice(0, 18) + '…' : s;
 }
 function renderRuntime(health, scopesBody) {
   const sc = (scopesBody && scopesBody.scopes) || [];
-  let chunks = 0, vectors = 0;
-  for (const s of sc) { chunks += Number(s.chunks || 0); vectors += Number(s.vectors || 0); }
+  let chunks = 0, vectors = 0, used = 0;
+  for (const s of sc) { chunks += Number(s.chunks || 0); vectors += Number(s.vectors || 0); used += Number(s.totalBytes || 0); }
   const backlog = Math.max(0, chunks - vectors);
   const coverage = chunks ? (vectors / chunks) * 100 : 0;
+  const limits = (health && health.limits) || {};
+  const maxGb = Number(limits.maxTotalGb || 0);
+  const maxBytes = maxGb * 1024 * 1024 * 1024;
+  const storagePct = maxBytes ? Math.min(100, (used / maxBytes) * 100) : 0;
+  const scopeMax = Number(limits.maxScopes || 0);
+  const cats = (STATS && STATS.categories) || {};
+  const biz = businessCats(cats); const sys = catOf(cats, 'system');
   let cards;
   if (!health) {
     cards = [statCard('运行状态', '<span class="chip bad">不可用</span>', ''), statCard('作用域', fmtNum(sc.length), '')];
@@ -1095,26 +1226,36 @@ function renderRuntime(health, scopesBody) {
       statCard('服务', '<span class="chip ' + (health.ready ? 'ok' : 'bad') + '"><span class="dot"></span>' + (health.ready ? 'ready' : '未就绪') + '</span>', ''),
       statCard('当前模型', '<span class="mono" style="font-size:11px">' + escapeHtml(health.tag || '—') + '</span>', ''),
       statCard('嵌入限速', (g.paused ? '已暂停' : '运行中') + ' · ' + fmtNum(g.rate) + '/s · batch ' + fmtNum(g.batch), ''),
-      statCard('作用域', fmtNum(sc.length), '<span class="sub">平均覆盖 ' + coverage.toFixed(1) + '%</span>'),
+      statCard('作用域', fmtNum(sc.length) + (scopeMax ? ' / ' + fmtNum(scopeMax) : ''), '<span class="sub">平均覆盖 ' + coverage.toFixed(1) + '%</span>'),
+      statCard('存储', maxGb ? fmtBytes(used) + ' / ' + maxGb + ' GB' : fmtBytes(used), '<span class="sub">' + storagePct.toFixed(1) + '%</span>'),
       statCard('块 / 向量', fmtNum(chunks) + ' / ' + fmtNum(vectors), ''),
       statCard('嵌入积压', backlog > 0 ? fmtNum(backlog) + ' 块' : '0', backlog > 0 ? '<span class="sub">后台嵌入中</span>' : '<span class="sub">已全部完成</span>'),
+      statCard('业务 / 系统请求', fmtNum(biz.requests) + ' / ' + fmtNum(sys.requests), '<span class="sub">系统请求不计入 KPI</span>'),
     ];
   }
   $('#stat-runtime').innerHTML = cards.join('');
   $('#stat-runtime-at').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  const note = $('#stat-system-note');
+  if (note) note.textContent = '系统/轮询请求（status/scopes/admin）：' + fmtNum(sys.requests) + ' 次，明细可在「日志」查看';
 }
-function renderStatTables() {
-  const eps = (STATS && STATS.byEndpoint) || [];
-  const epMax = Math.max(1, ...eps.map((e) => Number(e.requests || 0)));
-  $('#stat-endpoints').innerHTML = eps.length ? eps.map((e) => {
-    const share = epMax ? (Number(e.requests || 0) / epMax) * 100 : 0;
-    const er = ratePct(e.errors, e.requests);
-    const cls = er > 10 ? 'bad' : (er > 1 ? 'warn' : 'blue');
-    return '<tr><td class="mono">' + escapeHtml(e.endpoint) + '</td><td class="num">' + fmtNum(e.requests) + '</td>'
-      + '<td><div class="cov"><span class="bar ' + cls + '" style="width:110px"><i style="width:' + share.toFixed(1) + '%"></i></span><span class="faint">' + share.toFixed(0) + '%</span></div></td>'
-      + '<td class="num">' + fmtNum(e.errors) + '</td><td class="num">' + (e.requests ? er.toFixed(1) + '%' : '—') + '</td>'
-      + '<td class="num">' + fmtMs(e.latencyAvg) + '</td></tr>';
-  }).join('') : '<tr><td colspan="6" class="empty">没有数据</td></tr>';
+function renderScopeTable() {
+  const rows = (STATS && STATS.byScope) || [];
+  const top = rows.slice(0, 15);
+  $('#stat-scope-tip').textContent = rows.length ? ('Top ' + top.length + ' / ' + rows.length) : '';
+  $('#stat-scopes').innerHTML = top.length ? top.map((s) => {
+    const name = s.repoName || shortNs(s.namespace);
+    const kind = s.kind || (s.missing ? 'deleted' : 'unknown');
+    const label = kind === 'main' ? '#main:default' : (s.ref ? '#' + kind + ':' + s.ref : (s.missing ? '已删除' : '—'));
+    const counts = s.chunks != null ? fmtNum(s.chunks) + ' / ' + fmtNum(s.vectors) : '—';
+    const cov = s.chunks ? ' <span class="faint">' + Math.round((Number(s.vectors || 0) / Number(s.chunks)) * 100) + '%</span>' : '';
+    return '<tr><td title="' + escapeHtml(s.namespace || '') + '"><span class="mono">' + escapeHtml(name) + '</span> <span class="faint" style="font-size:11px">' + escapeHtml(label) + '</span></td>'
+      + '<td>' + (s.kind ? '<span class="kind ' + escapeHtml(s.kind) + '">' + escapeHtml(s.kind) + '</span>' : '<span class="chip bad">' + escapeHtml(kind) + '</span>') + '</td>'
+      + '<td class="num">' + counts + cov + '</td><td class="num">' + fmtNum(s.requests) + '</td>'
+      + '<td class="num">' + fmtNum(s.searchCalls) + '</td><td class="num">' + fmtNum(s.embedTexts) + '</td><td class="num">' + fmtNum(s.rerankCalls) + '</td>'
+      + '<td class="num">' + (s.requests ? rateText(s.errors, s.requests) : '—') + '</td><td class="num">' + fmtMs(s.latencyAvg) + '</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">按作用域用量从本版本开始累计（历史数据没有该维度）</td></tr>';
+}
+function renderKeyTable() {
   const keys = (STATS && STATS.byKey) || [];
   const totalReq = Number((STATS && STATS.totals && STATS.totals.requests) || 0);
   $('#stat-keys').innerHTML = keys.length ? keys.map((k) => {
@@ -1152,26 +1293,40 @@ async function loadStats(days) {
   renderLatencyTrend();
   renderMix();
   renderRuntime(h.status === 200 ? h.body : null, s.status === 200 ? s.body : null);
-  renderStatTables();
+  renderScopeTable();
+  renderKeyTable();
   if (location.hash === '#stats') startStatsTimer();
 }
 function csvCell(v) { const s = String(v === undefined || v === null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 function exportStatsCsv() {
   if (!STATS) { toast('统计还没加载完'); return; }
   const t = STATS.totals || {}; const lat = STATS.latency || {};
+  const cats = STATS.categories || {};
   const lines = [];
   lines.push('区间,' + STATS.from + ' ~ ' + STATS.to + ',天数,' + STATS.days);
   lines.push('');
-  lines.push('汇总,请求,错误,错误率,平均延迟ms,最大延迟ms,embed,search,rerank,P50,P95');
-  lines.push(['合计', t.requests, t.errors, rateText(t.errors, t.requests), Number(t.latencyAvg || 0).toFixed(1), Number(t.latencyMax || 0).toFixed(1), t.embedTexts, t.searchCalls, t.rerankCalls, lat.p50 || '', lat.p95 || ''].join(','));
+  lines.push('分类,请求,错误,平均延迟ms');
+  for (const name of STATS_CAT_ORDER.concat(['system'])) {
+    const c = catOf(cats, name);
+    lines.push([STATS_CAT_LABEL[name], c.requests, c.errors, c.latencyAvg.toFixed(1)].join(','));
+  }
   lines.push('');
-  lines.push('日期,请求,错误,错误率,平均延迟ms,最大延迟ms,embed,search,rerank');
-  for (const d of STATS.byDay || []) lines.push([d.day, d.requests, d.errors, rateText(d.errors, d.requests), Number(d.latencyAvg || 0).toFixed(1), Number(d.latencyMax || 0).toFixed(1), d.embedTexts, d.searchCalls, d.rerankCalls].join(','));
+  lines.push('日期,业务请求,检索/重排,索引操作,嵌入,系统/轮询,错误,成功率,平均延迟ms,最大延迟ms');
+  for (const d of STATS.byDay || []) {
+    const biz = Number(d.retrievalRequests || 0) + Number(d.indexingRequests || 0) + Number(d.embeddingRequests || 0);
+    const success = d.requests ? (100 - ratePct(d.errors, d.requests)) : 0;
+    lines.push([d.day, biz, d.retrievalRequests, d.indexingRequests, d.embeddingRequests, d.systemRequests,
+      d.errors, success.toFixed(1), Number(d.latencyAvg || 0).toFixed(1), Number(d.latencyMax || 0).toFixed(1)].join(','));
+  }
   lines.push('');
-  lines.push('端点,请求,错误,平均延迟ms');
-  for (const e of STATS.byEndpoint || []) lines.push([csvCell(e.endpoint), e.requests, e.errors, Number(e.latencyAvg || 0).toFixed(1)].join(','));
+  lines.push('仓库/作用域,类型,请求,检索,嵌入,重排,错误率,平均延迟ms');
+  for (const s of STATS.byScope || []) {
+    const label = (s.repoName || s.namespace || '') + (s.kind ? ' #' + s.kind + (s.ref ? ':' + s.ref : '') : '');
+    lines.push([csvCell(label), s.kind || 'deleted', s.requests, s.searchCalls, s.embedTexts, s.rerankCalls,
+      s.requests ? rateText(s.errors, s.requests) : '—', Number(s.latencyAvg || 0).toFixed(1)].join(','));
+  }
   lines.push('');
-  lines.push('Key,角色,请求,错误,embed,search,rerank,平均延迟ms,最后使用');
+  lines.push('Key,角色,请求,错误,嵌入,检索,重排,平均延迟ms,最后使用');
   for (const k of STATS.byKey || []) lines.push([csvCell(k.name || ('#' + k.keyId)), k.role, k.requests, k.errors, k.embedTexts, k.searchCalls, k.rerankCalls, Number(k.latencyAvg || 0).toFixed(1), k.lastUsedAt ? new Date(k.lastUsedAt * 1000).toISOString() : ''].join(','));
   const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
@@ -1179,7 +1334,6 @@ function exportStatsCsv() {
   a.download = 'code-index-stats-' + STATS.days + 'd-' + STATS.to + '.csv';
   document.body.appendChild(a);
   a.click();
-  // 不要立刻移除/回收：部分浏览器（含 headless）会在 anchor 被移除时取消 blob 下载
   setTimeout(() => { a.remove(); URL.revokeObjectURL(a.href); }, 3000);
 }
 
@@ -2166,6 +2320,7 @@ class Handler(BaseHTTPRequestHandler):
         self._t0 = time.time()
         self._status = 200
         self._counts = {"embed_texts": 0, "search_calls": 0, "rerank_calls": 0}
+        self._scope_ns = None
         try:
             self._who = self._auth_info()
         except Exception:  # noqa: BLE001 —— 统计失败绝不能影响请求
@@ -2175,8 +2330,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             key_id = int(self._who["id"]) if self._who else 0
+            scope_ns = getattr(self, "_scope_ns", None)
+            if not scope_ns:
+                parts = path.split("/")
+                if len(parts) >= 4 and parts[1] == "v1" and parts[2] == "repos":
+                    scope_ns = unquote(parts[3]) or None
             adm.record(key_id, _endpoint_group(path), self._status < 400,
-                       (time.time() - self._t0) * 1000.0, **self._counts)
+                       (time.time() - self._t0) * 1000.0, namespace=scope_ns, **self._counts)
         except Exception:  # noqa: BLE001
             pass
 
@@ -2243,7 +2403,12 @@ class Handler(BaseHTTPRequestHandler):
                 days = int((q.get("days") or ["7"])[0])
             except (TypeError, ValueError):
                 days = 7
-            return self._send(200, adm.stats(days))
+            data = adm.stats(days)
+            try:
+                data = _enrich_stats(data)
+            except Exception as e:  # noqa: BLE001 —— enrichment 失败不能拖垮统计接口
+                log(f"stats: enrich 失败（忽略）{type(e).__name__}: {e}")
+            return self._send(200, data)
         if path == "/v1/admin/models":
             return self._send(200, models_payload())
         if path == "/log":
@@ -2518,6 +2683,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "too-many-namespaces",
                                             "count": len(raw_namespaces), "limit": MAX_SEARCH_SCOPES})
                 entries = _namespaces_from_request(raw_namespaces, req.get("namespace"))
+                self._scope_ns = entries[0][0] if entries else None
                 self._counts["search_calls"] += 1
                 # 检索也会 embed 1 次 query（计入 embed 文本数，便于统计算力消耗）
                 self._counts["embed_texts"] += 1
