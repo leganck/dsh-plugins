@@ -994,7 +994,7 @@ function renderStatCards() {
     statCard('embed 文本', fmtNum(t.embedTexts), ''),
     statCard('search', fmtNum(t.searchCalls), ''),
     statCard('rerank', fmtNum(t.rerankCalls), ''),
-    statCard('活跃 Key', fmtNum((d.byKey || []).length), '<span class="sub">' + (d.days === 1 ? '今日' : '区间内') + ' 有调用</span>'),
+    statCard('活跃 Key', fmtNum((d.byKey || []).filter((k) => k.role !== 'deleted').length), '<span class="sub">' + (d.days === 1 ? '今日' : '区间内') + ' 有调用</span>'),
   ].join('');
 }
 function chartCol(x, bars, label) {
