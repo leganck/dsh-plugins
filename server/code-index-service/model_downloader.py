@@ -128,6 +128,7 @@ class ModelDownloader:
         out["dir"] = self.catalog[name].get("dir", name)
         out["target"] = os.path.join(self.root, out["dir"])
         out["enable"] = dict(self.catalog[name].get("enable") or {})
+        out["kind"] = "rerank" if "RERANK_MODEL_DIR" in out["enable"] else "embed"
         out["note"] = self.catalog[name].get("note", "")
         # 就绪判定：所有文件存在且 sha256 一致
         files = out["files"]
