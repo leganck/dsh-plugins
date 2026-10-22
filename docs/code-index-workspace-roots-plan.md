@@ -1,6 +1,6 @@
 # roots 自动推导计划与实施记录
 
-- 状态：已实施（0.13.0）
+- 状态：已实施（0.13.1）
 - 日期：2026-10-22
 
 ## 目标
@@ -25,7 +25,7 @@ sessionCwd    = exec.agent.session.cwd ?? exec.cwd ?? process.cwd()
   - `normalizeWorkspaceDefinition`
   - `resolveAllowedRoots`
   - `isInsideRoots`
-- `assertAllowed(repoRoot, exec)` 按当前工具调用动态计算允许根；
+- `assertAllowed(repoRoot, exec)` 按当前工具调用动态计算允许根；`sandboxPolicy.resolve({session})` 优先，apply 阶段没有 session 时退回默认 workspaceRoot；
 - 四个工具（index/search/map/status）传入 `exec`；
 - 自动 watcher 内部使用 `{ trusted: true }`，registry 中已索引仓库继续监听；
 - 旧 `roots` 配置保留一版兼容：接受但忽略，启动 warning；
