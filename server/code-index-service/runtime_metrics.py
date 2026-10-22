@@ -188,8 +188,9 @@ def _gpu_snapshot() -> dict:
                         "index": index,
                         "name": row[1].strip(),
                         "utilizationPercent": _num(row[2]),
-                        "memoryUsedBytes": int(used) if used is not None else None,
-                        "memoryTotalBytes": int(total) if total is not None else None,
+                        # nvidia-smi 的 memory.used/total 在 noheader,nounits 下单位是 MiB。
+                        "memoryUsedBytes": int(used * 1024 * 1024) if used is not None else None,
+                        "memoryTotalBytes": int(total * 1024 * 1024) if total is not None else None,
                         "memoryPercent": round(used * 100.0 / total, 1) if used is not None and total else None,
                         "temperatureC": _num(row[5]),
                         "powerW": _num(row[6]),
