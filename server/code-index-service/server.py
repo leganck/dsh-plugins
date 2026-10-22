@@ -157,7 +157,7 @@ def log(msg):
 # ---------------- 管理页面（GET /admin）----------------
 # 单文件、无依赖：页面壳不需要鉴权，数据一律走后端 API（API_KEY 开启时需在页面里填 key）。
 # 只做"查看 + 治理"（暂停/恢复/清扫），删除作用域等破坏性操作留给 curl。
-ADMIN_HTML = """<!doctype html>
+ADMIN_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -740,7 +740,7 @@ async function cancelModel(name) {
 }
 async function switchModel(kind, dir) {
   const what = kind === 'embed' ? '嵌入模型' : '重排模型';
-  if (!confirm('切换' + what + '？\n\n切换嵌入模型会改变向量 tag：旧向量保留但立即检索不到，客户端下次同步会全量重嵌（覆盖率从 0 恢复）。')) return;
+  if (!confirm('切换' + what + '？切换嵌入模型会改变向量 tag：旧向量保留但立即检索不到，客户端下次同步会全量重嵌（覆盖率从 0 恢复）。')) return;
   toast('正在切换' + what + '…');
   const r = await api('/v1/admin/models/activate', { method: 'POST', body: JSON.stringify({ kind, dir }) });
   if (r.status !== 200) { toast('切换失败：' + ((r.body && (r.body.detail || r.body.error)) || r.status)); return; }
@@ -856,7 +856,7 @@ async function loadStats(days) {
 async function loadLogs() {
   const r = await api('/log?n=300');
   if (r.status !== 200) return;
-  $('#log-lines').textContent = ((r.body && r.body.lines) || []).join('\n') || '（空）';
+  $('#log-lines').textContent = ((r.body && r.body.lines) || []).join(String.fromCharCode(10)) || '（空）';
 }
 
 // ---------------- 初始化 ----------------
@@ -886,7 +886,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && 
 </html>
 """
 
-LOGIN_HTML = """<!doctype html>
+LOGIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>code-index-service · 登录</title>
 <style>
@@ -1532,11 +1532,28 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _body(self):
+        """读请求体并**始终返回 dict**。
+
+        兼容三种来源：JSON 客户端、浏览器原生表单提交（x-www-form-urlencoded，页面脚本没跑起来时）、
+        以及空 body。之前直接 json.loads 遇到表单体/JSON 字符串会抛异常或返回 str，
+        /admin/login 会 500（实测踩到，2026-10-22）。
+        """
         n = int(self.headers.get("Content-Length", "0") or 0)
-        raw = self.rfile.read(n) if n else b"{}"
+        raw = self.rfile.read(n) if n else b""
         if self.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
-        return json.loads(raw or b"{}")
+        if not raw:
+            return {}
+        try:
+            val = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            try:
+                from urllib.parse import parse_qs
+
+                return {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items() if v}
+            except Exception:  # noqa: BLE001
+                return {}
+        return val if isinstance(val, dict) else {}
 
     # ---------------- 鉴权：API Key（多把）/ 后台会话或 Basic ----------------
     def _bearer(self):
@@ -1736,6 +1753,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self._admin_ok():
                 return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
             return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
+        if path == "/favicon.ico":
+            return self._send(204, b"", ctype="image/x-icon")
         if path == "/health":
             # 免鉴权，但无人认领时只返回最小探活字段（不泄露作用域/存储/治理信息）
             return self._send(200, self._status_payload(public=not self._admin_ok()))

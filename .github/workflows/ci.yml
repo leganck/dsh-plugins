@@ -82,6 +82,22 @@ jobs:
             }
           '
 
+  code-index-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/code-index-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - name: 服务端自测（FAKE_EMBED，不加载 ONNX）
+        run: python selftest.py
+      - name: 控制台内联 JS 语法检查（node --check）
+        run: python scripts/check-admin-html.py
+
   review-service:
     name: review-service tests
     runs-on: ubuntu-latest
