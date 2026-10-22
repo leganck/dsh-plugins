@@ -774,6 +774,8 @@ def main():
     page = req_raw("/admin")[1]
     check("后台页面包含「可下载模型」与「重传」", "可下载模型" in page and "重传" in page)
     check("后台页面初始化会加载模型列表（不会停在加载中）", "loadModels();" in page)
+    check("API Key 页含权限说明与测试按钮", "测试访问索引服务" in page and "index · 索引/检索服务" in page)
+    check("作用域页含清空索引危险操作", "清空所有作用域" in page and "输入 RESET 确认" in page)
 
     # ================================================================
     print("\n[30] 入口内容协商 / 会话登录")
@@ -912,6 +914,25 @@ def main():
         server.ADMIN_PASSWORD = old_admin_pw
         if TMP in server.MODEL_ROOTS:
             server.MODEL_ROOTS.remove(TMP)
+
+    print("\n[34] 清空索引（reset-index）")
+    st, before = req("GET", "/v1/scopes")
+    check("重置前有作用域", st == 200 and len((before or {}).get("scopes") or []) > 0,
+          len((before or {}).get("scopes") or []))
+    st, body = req("POST", "/v1/admin/reset-index", {})
+    check("缺少 confirm → 400", st == 400, st)
+    st, body = req("POST", "/v1/admin/reset-index", {"confirm": "RESET"})
+    deleted = (body or {}).get("deleted") or {}
+    check("confirm=RESET → 200 且删除统计 > 0",
+          st == 200 and deleted.get("chunks", 0) > 0 and deleted.get("repos", 0) > 0, (st, deleted))
+    st, after = req("GET", "/v1/scopes")
+    check("清空后作用域列表为空", st == 200 and (after or {}).get("scopes") == [], st)
+    st, hp = req("GET", "/health")
+    check("清空后 health.spaces/tags 均为空", st == 200 and hp.get("spaces") == [] and hp.get("tags") == [],
+          (hp.get("spaces"), hp.get("tags")))
+    check("清空后服务仍 ready（模型不受影响）", st == 200 and hp.get("ready") is True, hp.get("ready"))
+    st, ks = req("GET", "/v1/admin/keys")
+    check("清空索引不影响 API Key 库", st == 200 and "keys" in (ks or {}), st)
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")
