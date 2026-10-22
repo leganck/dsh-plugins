@@ -470,6 +470,14 @@ ADMIN_HTML = r"""<!doctype html>
     .download-actions .primary, .download-actions .danger { flex:1; justify-content:center; }
     .model-table .dir-text { max-width:130px; }
   }
+  #tab-overview { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  #tab-overview .runtime-card .kv { grid-template-columns:96px minmax(0,1fr) 96px minmax(0,1fr); column-gap:18px; }
+  #tab-overview .runtime-card .kv .k:nth-child(4n+1) { padding-left:2px; }
+  @media (max-width:980px) { #tab-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width:640px) {
+    #tab-overview { grid-template-columns:1fr; }
+    #tab-overview .runtime-card .kv { grid-template-columns:86px minmax(0,1fr); }
+  }
 </style>
 </head>
 <body>
@@ -499,7 +507,7 @@ ADMIN_HTML = r"""<!doctype html>
 <main>
   <!-- ============================ 概览 ============================ -->
   <section id="tab-overview" class="panel active">
-    <section class="card">
+    <section class="card wide runtime-card">
       <h2>运行时</h2>
       <div class="kv" id="runtime"><div class="k">加载中…</div><div class="v"></div></div>
     </section>
