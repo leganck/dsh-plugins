@@ -8,7 +8,10 @@
 
     10 个分支的同一仓库 → 235 MB（去重后），而不是 2.35 GB（每分支一份）
 
-跨血统只留显式口子 `adopt()`（fork / vendor 代码借用），默认不共享。
+跨血统只留两个显式口子（默认不共享）：`adopt()`（调用方点名从哪个血统借）；
+以及"simhash 候选 → 精确哈希 adopt"（`similar_lineages()` / `adopt_overlap()` /
+`adopt_hashes()`，给 fork / remote 改名 / vendor 副本的冷启动用）。后者只复制
+**候选里确实存在、且目标自己 manifest 也拥有**的内容哈希，绝不复制 chunks / path。
 
 ## 为什么 blob 与 vector 都用 hash 做主键的一部分
 
@@ -50,7 +53,12 @@ create table if not exists repos (
   ttl_days integer,
   expires_at integer,
   pinned integer not null default 0,
-  created_at integer
+  created_at integer,
+  simhash_path text,
+  simhash_content text,
+  simhash_algo text,
+  simhash_files integer,
+  simhash_at integer
 );
 create table if not exists chunks (
   namespace text not null,
@@ -86,6 +94,18 @@ create table if not exists vectors (
 SCOPE_KINDS = ("legacy", "main", "branch", "pr", "worktree")
 # 默认 TTL（天）：main / legacy 永久。服务端可用环境变量覆盖后传给 IndexStore。
 DEFAULT_SCOPE_TTL = {"branch": 30, "pr": 14, "worktree": 1, "main": None, "legacy": None}
+
+# ---------------------------------------------------------------- simhash 候选（跨血统冷启动）
+# 客户端把整棵文件清单压成两个 64-bit simhash（path-aware / content-only）。
+# 服务端只用它**找候选**，绝不把它当存储键：真正复制的仍是精确内容哈希（blobs/vectors）。
+SIMHASH_HEX_LEN = 16          # 64-bit → 16 hex
+SIMHASH_MIN_SIMILARITY = 0.85  # max(path/content 相似度) 门槛
+ADOPT_MIN_OVERLAP = 0.80       # 目标 chunks ∩ 候选当前 tag vectors / 目标 chunks
+MAX_ADOPT_CANDIDATES = 5
+MAX_ADOPT_HASHES = 50000
+MAX_SIMHASH_FILES = 10_000_000
+_SIMHASH_HEX_RE = re.compile(r"^[0-9a-fA-F]{1,16}$")
+_SIMHASH_ALGO_RE = re.compile(r"^[A-Za-z0-9._:-]{1,16}$")
 _TOKENS = {"main": "main", "branch": "branch", "pr": "pr", "worktree": "wt"}
 _TOKEN_KINDS = {v: k for k, v in _TOKENS.items()}
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -238,6 +258,77 @@ def lineage_id_of(url_norm, fallback_seed):
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------- simhash 校验 / 距离
+def normalize_simhash_hex(value):
+    """把 64-bit simhash 规范成 16 位小写 hex；非法返回 None。
+
+    输入放宽到 1–16 位（客户端可能没补前导 0，服务端按左补零对齐），但长度有硬上界：
+    simhash 只是候选线索，**绝不能**原样拼进 SQL / 路径，这里先把注入面消掉。
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip().lower()
+    if not _SIMHASH_HEX_RE.match(s):
+        return None
+    return s.rjust(SIMHASH_HEX_LEN, "0")
+
+
+def parse_simhash(obj):
+    """校验 sync payload 里的可选 simhash 对象 → {path, content, algo, files}；非法返回 None。
+
+    非法只意味着"这次不更新 simhash"，**绝不抛异常**：旧客户端 / 坏客户端不能拖垮 sync。
+    """
+    if not isinstance(obj, dict):
+        return None
+    path = normalize_simhash_hex(obj.get("path"))
+    content = normalize_simhash_hex(obj.get("content"))
+    if not path or not content:
+        return None
+    raw_algo = obj.get("v", obj.get("algo", 1))
+    if raw_algo is None or isinstance(raw_algo, bool):
+        return None
+    algo = str(raw_algo).strip()
+    if not _SIMHASH_ALGO_RE.match(algo):
+        return None
+    files = obj.get("files")
+    if files is not None:
+        try:
+            files = int(files)
+        except (TypeError, ValueError):
+            files = None
+        if files is not None:
+            files = max(0, min(files, MAX_SIMHASH_FILES))
+    return {"path": path, "content": content, "algo": algo, "files": files}
+
+
+def hamming_similarity(a, b):
+    """两个 64-bit simhash 的相似度 = 1 - hamming_bits / 64；任一非法返回 None。"""
+    na = normalize_simhash_hex(a)
+    nb = normalize_simhash_hex(b)
+    if not na or not nb:
+        return None
+    x = int(na, 16) ^ int(nb, 16)
+    bits = x.bit_count() if hasattr(x, "bit_count") else bin(x).count("1")
+    return 1.0 - bits / 64.0
+
+
+def _chunked(seq, size=400):
+    """把 IN (...) 的参数分批：SQLite 老版本变量上限是 999，adopt 可能有几万 hash。"""
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def _as_bool(value):
+    """把 payload 里的开关宽松归一（true / 1 / "auto" 都算开；"off"/"false"/0 算关）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "auto")
+    return False
+
+
 class IndexStore:
     def __init__(self, db_path, scope_ttl=None):
         self.db_path = db_path
@@ -259,7 +350,7 @@ class IndexStore:
         # 幂等迁移：早期 0.8.0 的库里 repos 没有 repo_state_chunks 这一列；
         # 档 3 又加了 scope 相关 7 列。老库补齐后，legacy 行标成 pinned（永不被 janitor 删）。
         cols = {r["name"] for r in self.db.execute("pragma table_info(repos)").fetchall()}
-        added = False
+        scope_added = False
         for name, ddl in (
             ("scope_kind", "text not null default 'legacy'"),
             ("scope_ref", "text"),
@@ -272,12 +363,23 @@ class IndexStore:
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
-                added = True
+                scope_added = True
         if "repo_state_chunks" not in cols:
             self.db.execute("alter table repos add column repo_state_chunks integer")
+        # P3 simhash：只增不删的幂等列（旧库启动自动补齐；旧客户端不写 → 保持 null）。
+        # 刻意与 scope 的 `scope_added` 回填解耦：补 simhash 列不能触发 legacy 重新 pin。
+        for name, ddl in (
+            ("simhash_path", "text"),
+            ("simhash_content", "text"),
+            ("simhash_algo", "text"),
+            ("simhash_files", "integer"),
+            ("simhash_at", "integer"),
+        ):
+            if name not in cols:
+                self.db.execute(f"alter table repos add column {name} {ddl}")
         # 只在"本次才补上 scope 列"的老库上做 legacy 回填：先 pinned/expires，再回填 created_at，
         # 这样二次启动不会再把管理员显式 unpin 的 legacy 行重新钉上（幂等）。
-        if added:
+        if scope_added:
             self.db.execute("update repos set pinned = 1 where scope_kind = 'legacy' and created_at is null")
             self.db.execute("update repos set expires_at = null where scope_kind = 'legacy' and created_at is null")
         self.db.execute("update repos set created_at = updated_at where created_at is null")
@@ -604,6 +706,14 @@ class IndexStore:
             and cur_chunks is not None
             and int(cur_chunks) == int(client_chunks)
         ):
+            # 指纹短路也要顺手更新 simhash（客户端升级后第一次 full sync 可能正好命中短路；
+            # 不更新就会永远没有候选线索）。失败无所谓：simhash 只是线索，绝不影响 sync。
+            sh = parse_simhash(payload.get("simhash"))
+            if sh and (cur.get("simhash_path") != sh["path"] or cur.get("simhash_content") != sh["content"]):
+                try:
+                    self.set_simhash(namespace, sh)
+                except Exception:  # noqa: BLE001
+                    pass
             return {
                 "revision": cur["revision"],
                 "unchanged": True,
@@ -627,6 +737,21 @@ class IndexStore:
                 raise SyncDiverged(f"path 同时出现在 upsert 与 remove：{f.get('path')}")
 
         now = int(time.time())
+        # simhash 只作为候选线索：非法值直接忽略（老客户端/坏客户端不能拖垮 sync）。
+        simhash = parse_simhash(payload.get("simhash"))
+        # 跨血统冷启动复用只在 full + 客户端显式 adopt 开关 + reuse 非 off 时发生；
+        # 其他 sync（diff / 普通 full）**绝不做**候选查询，避免热路径多付一次全 repos 扫描。
+        # adopt 开关优先看 payload.adopt；客户端只发 reuse 时，"auto" 本身就是
+        # "达到阈值自动复制"的显式配置（suggest/off 都不复制）。
+        reuse = str(payload.get("reuse") or "").strip().lower()
+        if payload.get("adopt") is not None:
+            adopt_switch = _as_bool(payload.get("adopt"))
+        else:
+            adopt_switch = reuse == "auto"
+        adopt_requested = mode == "full" and adopt_switch and reuse != "off"
+        adopted = None
+        adopt_error = None
+        adopt_candidates = None
         with self.lock:
             # ① 删除：整文件移除 + 文件内不再存在的块
             for path in remove_set:
@@ -651,9 +776,39 @@ class IndexStore:
             self.db.commit()
             self._invalidate()  # sync 改了数据 → 计数/体积缓存失效
             rev = int(self.db.execute("select revision from repos where namespace = ?", (namespace,)).fetchone()["revision"])
+            # 每次 sync 都刷新 simhash（仅当本次带了合法值）
+            if simhash:
+                try:
+                    self._write_simhash(namespace, simhash, now=now)
+                except Exception:  # noqa: BLE001 —— simhash 落库失败不影响 sync
+                    pass
+            # 写入目标 chunks 之后、计算 _missing 之前尝试 adopt；失败回滚并继续正常 sync。
+            if adopt_requested and simhash:
+                try:
+                    adopted = self._maybe_adopt(namespace, lineage, tag, simhash)
+                except Exception as e:  # noqa: BLE001 —— adopt 是尽力而为，绝不返回 500
+                    self.db.rollback()  # adopt 中途失败时不要留下半截事务
+                    adopted = None
+                    adopt_error = f"{type(e).__name__}: {e}"
+            # suggest 只返回候选元信息，不复制；让调用方决定是否改 auto。
+            if mode == "full" and reuse == "suggest" and simhash:
+                try:
+                    adopt_candidates = self.similar_lineages(
+                        simhash["path"], simhash["content"], lineage, tag,
+                        limit=3, algo=simhash.get("algo"), target_namespace=namespace,
+                    )
+                except Exception:  # noqa: BLE001 —— 候选只是建议
+                    adopt_candidates = None
             missing = self._missing(namespace, lineage, tag)
 
-        return {"revision": rev, "unchanged": False, "missing": missing, **self.counts(namespace)}
+        out = {"revision": rev, "unchanged": False, "missing": missing, **self.counts(namespace)}
+        if adopted:
+            out["adopted"] = adopted
+        if adopt_candidates:
+            out["adoptCandidates"] = adopt_candidates
+        if adopt_error:
+            out["adoptError"] = adopt_error
+        return out
 
     def _missing(self, namespace, lineage, tag, limit=None):
         """该命名空间里"没有向量的块"。tag 为空表示还没定过模型 → 全部视为缺。"""
@@ -937,6 +1092,265 @@ class IndexStore:
             self.db.commit()
             self._invalidate()  # adopt 改了数据 → 计数/体积缓存失效
         return {"blobs": len(b), "vectors": len(v)}
+
+    # ---------------------------------------------------------------- simhash 候选 / 精确 adopt
+    def set_simhash(self, namespace, simhash, now=None):
+        """写入/更新一个命名空间的 simhash 元信息；非法值抛 ValueError（sync 内部不走这里）。"""
+        data = parse_simhash(simhash)
+        if data is None:
+            raise ValueError("bad simhash: path/content 必须是 ≤16 位十六进制，v/files 必须合法")
+        return self._write_simhash(namespace, data, now=now)
+
+    def _write_simhash(self, namespace, data, now=None):
+        """已是校验过的 simhash dict；返回写入后的 dict，未知 namespace 返回 None。"""
+        ts = int(time.time()) if now is None else int(now)
+        with self.lock:
+            cur = self.db.execute(
+                "update repos set simhash_path = ?, simhash_content = ?, simhash_algo = ?,"
+                " simhash_files = ?, simhash_at = ? where namespace = ?",
+                (data["path"], data["content"], data["algo"], data["files"], ts, namespace),
+            )
+            self.db.commit()
+        return dict(data) if cur.rowcount else None
+
+    def similar_lineages(self, simhash_path, simhash_content, exclude_lineage, tag,
+                         limit=MAX_ADOPT_CANDIDATES, min_similarity=SIMHASH_MIN_SIMILARITY,
+                         algo=None, target_namespace=None):
+        """按 simhash 找相似血统（只返回元信息，**不返回正文**）。
+
+        实现取"扫 repos 行"而不是"扫块"：有 simhash 的行数 = 血统/scope 数，量级远小于块数。
+        每个 lineage 按 updated_at 取最新一行再过滤：
+
+          - 不是 `exclude_lineage`；
+          - 候选 `repos.tag == tag`：tag 为空直接返回 []，模型不同就没有可复用的向量；
+          - `algo` 给定时算法版本必须一致（算法升级后旧 simhash 不参与候选）；
+          - `similarity = max(pathSimilarity, contentSimilarity) >= min_similarity`；
+          - 给了 `target_namespace` 且目标血统当前 tag 已有向量 → 返回 []（不是冷启动，没必要）。
+
+        结果按相似度降序，最多 `limit` 条。
+        """
+        query_path = normalize_simhash_hex(simhash_path)
+        query_content = normalize_simhash_hex(simhash_content)
+        if not query_path or not query_content:
+            return []
+        tag = "" if tag is None else str(tag)
+        if not tag:
+            return []
+        try:
+            limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            limit = MAX_ADOPT_CANDIDATES
+        try:
+            threshold = float(min_similarity)
+        except (TypeError, ValueError):
+            threshold = SIMHASH_MIN_SIMILARITY
+        algo_s = None if algo is None else str(algo)
+        with self.lock:
+            if target_namespace:
+                trow = self.db.execute(
+                    "select lineage_id from repos where namespace = ?", (target_namespace,)
+                ).fetchone()
+                if trow:
+                    if not exclude_lineage:
+                        exclude_lineage = trow["lineage_id"]
+                    # 目标血统已经有当前 tag 的向量 → 不是冷启动，做候选/adopt 没有收益
+                    if self.vector_count(trow["lineage_id"], tag) > 0:
+                        return []
+            rows = self.db.execute(
+                "select namespace, lineage_id, repo_id, repo_name, tag, simhash_path, simhash_content,"
+                " simhash_algo, simhash_files, updated_at from repos"
+                " where simhash_path is not null and simhash_content is not null"
+                " order by updated_at desc"
+            ).fetchall()
+        seen = set()
+        out = []
+        for r in rows:
+            lineage = r["lineage_id"]
+            if not lineage or lineage in seen:
+                continue
+            seen.add(lineage)  # 同 lineage 只取 updated_at 最大的那行（SQL 已倒序）
+            if exclude_lineage and lineage == exclude_lineage:
+                continue
+            if (r["tag"] or "") != tag:
+                continue
+            if algo_s is not None and (r["simhash_algo"] or "") != algo_s:
+                continue
+            path_sim = hamming_similarity(query_path, r["simhash_path"])
+            content_sim = hamming_similarity(query_content, r["simhash_content"])
+            if path_sim is None or content_sim is None:
+                continue
+            sim = max(path_sim, content_sim)
+            if sim < threshold:
+                continue
+            out.append({
+                "lineage": lineage,
+                "namespace": r["namespace"],
+                "repoId": r["repo_id"],
+                "repoName": r["repo_name"],
+                "tag": r["tag"],
+                "similarity": round(sim, 4),
+                "pathSimilarity": round(path_sim, 4),
+                "contentSimilarity": round(content_sim, 4),
+                "distance": int(round((1.0 - sim) * 64)),
+                "algo": r["simhash_algo"],
+                "files": r["simhash_files"],
+                "updatedAt": int(r["updated_at"]),
+            })
+        out.sort(key=lambda x: (-x["similarity"], x["lineage"]))
+        return out[:limit]
+
+    def adopt_overlap(self, namespace, from_lineage, tag):
+        """目标 namespace 的 distinct chunk hash ∩ 候选 lineage 当前 tag vectors。
+
+        返回 `{hashes, overlap, matched, targetHashes, targetChunks}`；
+        `overlap = matched / targetHashes`（分母用 distinct hash：vectors 是按 hash 存的，
+        同内容多路径不该稀释比例；`targetChunks` 另给 chunk 行数，便于诊断）。
+        """
+        tag = "" if tag is None else str(tag)
+        empty = {"hashes": [], "overlap": 0.0, "matched": 0, "targetHashes": 0, "targetChunks": 0}
+        if not tag or not from_lineage or not namespace:
+            return empty
+        with self.lock:
+            row = self.db.execute(
+                "select count(*) as chunks, count(distinct hash) as hashes"
+                " from chunks where namespace = ?", (namespace,)
+            ).fetchone()
+            total_hashes = int(row["hashes"] or 0)
+            if not total_hashes:
+                return empty
+            rows = self.db.execute(
+                "select distinct c.hash from chunks c join vectors v"
+                " on v.lineage_id = ? and v.tag = ? and v.hash = c.hash"
+                " where c.namespace = ?",
+                (from_lineage, tag, namespace),
+            ).fetchall()
+        hashes = [r["hash"] for r in rows]
+        return {
+            "hashes": hashes,
+            "overlap": round(len(hashes) / total_hashes, 4),
+            "matched": len(hashes),
+            "targetHashes": total_hashes,
+            "targetChunks": int(row["chunks"] or 0),
+        }
+
+    def adopt_hashes(self, from_lineage, to_lineage, hashes, tag, namespace=None):
+        """只复制"目标确实拥有 + 候选 blobs/vectors 都有 + 当前 tag"的精确内容哈希。
+
+        - `namespace` 给定时再做一层防御：只允许该 namespace chunks 里确实存在的 hash；
+        - **绝不复制** chunks / repos / path：目标搜索永远只查自己的 namespace；
+        - `insert or ignore` 保证幂等；只有 blob 与当前 tag vector 同时在的 hash 才复制，
+          避免造出"有向量没正文"的块；
+        - 返回 `{blobs, vectors, hashes, truncated}`：blobs/vectors 是**实际新插入**行数，
+          hashes 是命中的精确 hash 数（>50000 会截断并置 truncated）。
+        """
+        tag = "" if tag is None else str(tag)
+        if not tag:
+            raise ValueError("adopt_hashes 需要当前 embedding tag")
+        if not from_lineage or not to_lineage or from_lineage == to_lineage:
+            return {"blobs": 0, "vectors": 0, "hashes": 0, "truncated": False}
+        wanted = []
+        seen = set()
+        for h in hashes or []:
+            h = "" if h is None else str(h)
+            if not h or h in seen:
+                continue
+            seen.add(h)
+            wanted.append(h)
+        truncated = len(wanted) > MAX_ADOPT_HASHES
+        wanted = wanted[:MAX_ADOPT_HASHES]
+        if not wanted:
+            return {"blobs": 0, "vectors": 0, "hashes": 0, "truncated": truncated}
+
+        now = int(time.time())
+        inserted_blobs = inserted_vectors = eligible_total = 0
+        with self.lock:
+            if namespace:
+                allowed = set()
+                for part in _chunked(wanted):
+                    q = ",".join("?" * len(part))
+                    rows = self.db.execute(
+                        f"select distinct hash from chunks where namespace = ? and lineage_id = ?"
+                        f" and hash in ({q})",
+                        [namespace, to_lineage, *part],
+                    ).fetchall()
+                    allowed.update(r["hash"] for r in rows)
+                wanted = [h for h in wanted if h in allowed]
+            for part in _chunked(wanted):
+                q = ",".join("?" * len(part))
+                bodies = {
+                    r["hash"]: r["body"]
+                    for r in self.db.execute(
+                        f"select hash, body from blobs where lineage_id = ? and hash in ({q})",
+                        [from_lineage, *part],
+                    ).fetchall()
+                }
+                vectors = {
+                    r["hash"]: r
+                    for r in self.db.execute(
+                        f"select tag, hash, dim, v from vectors"
+                        f" where lineage_id = ? and tag = ? and hash in ({q})",
+                        [from_lineage, tag, *part],
+                    ).fetchall()
+                }
+                for h in part:
+                    if h not in bodies or h not in vectors:
+                        continue
+                    eligible_total += 1
+                    cur = self.db.execute(
+                        "insert or ignore into blobs(lineage_id, hash, body, updated_at) values (?,?,?,?)",
+                        (to_lineage, h, bodies[h], now),
+                    )
+                    inserted_blobs += max(0, int(cur.rowcount or 0))
+                    vec = vectors[h]
+                    cur = self.db.execute(
+                        "insert or ignore into vectors(lineage_id, tag, hash, dim, v, updated_at)"
+                        " values (?,?,?,?,?,?)",
+                        (to_lineage, tag, h, vec["dim"], vec["v"], now),
+                    )
+                    inserted_vectors += max(0, int(cur.rowcount or 0))
+            self.db.commit()
+            self._invalidate()  # adopt 改了 data → 计数/体积缓存失效
+        return {"blobs": inserted_blobs, "vectors": inserted_vectors,
+                "hashes": eligible_total, "truncated": truncated}
+
+    def _maybe_adopt(self, namespace, lineage, tag, simhash):
+        """sync 内部的 best-effort adopt（候选 → overlap 门槛 → 精确 hash 复制）。
+
+        调用方负责 catch/rollback；这里只负责按阈值挑第一个合格候选。
+        返回 `{fromLineage, fromRepo, similarity, overlap, blobs, vectors}` 或 None。
+        """
+        if not simhash or not namespace or not lineage or not tag:
+            return None
+        target = self.repo(namespace)
+        if not target:
+            return None
+        candidates = self.similar_lineages(
+            simhash["path"], simhash["content"], lineage, tag,
+            limit=MAX_ADOPT_CANDIDATES, algo=simhash.get("algo"), target_namespace=namespace,
+        )
+        for cand in candidates:
+            overlap = self.adopt_overlap(namespace, cand["lineage"], tag)
+            if overlap["overlap"] < ADOPT_MIN_OVERLAP:
+                continue
+            copied = self.adopt_hashes(cand["lineage"], lineage, overlap["hashes"], tag, namespace=namespace)
+            if not copied["vectors"]:
+                continue
+            adopted = {
+                "fromLineage": cand["lineage"],
+                "fromRepo": cand.get("repoName") or cand.get("repoId") or cand.get("namespace"),
+                "fromNamespace": cand.get("namespace"),
+                "similarity": cand["similarity"],
+                "pathSimilarity": cand["pathSimilarity"],
+                "contentSimilarity": cand["contentSimilarity"],
+                "overlap": overlap["overlap"],
+                "blobs": copied["blobs"],
+                "vectors": copied["vectors"],
+                "hashes": copied["hashes"],
+            }
+            if copied.get("truncated"):
+                adopted["truncated"] = True
+            return adopted
+        return None
 
     def overview(self):
         with self.lock:

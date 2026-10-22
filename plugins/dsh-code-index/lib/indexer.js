@@ -17,6 +17,7 @@ import crypto from 'node:crypto'
 import { chunkFile, bodyForEmbedding } from './chunker.js'
 import { sha256 } from './hash.js'
 import { walkRepo, diffFiles, readForIndex, DEFAULT_INCLUDE, DEFAULT_EXCLUDE_DIRS, DEFAULT_MAX_FILE_BYTES } from './scan.js'
+import { computeSimhash } from './simhash.js'
 import { resolveChunkConfig } from './strategies.js'
 import { getParser } from './chunk-ast.js'
 import { detectMissingGrammars } from './parser-hints.js'
@@ -65,7 +66,14 @@ export function scanStatus(store, repoRoot, opts = {}) {
   const scanned = walkRepo(repoRoot, opts)
   const known = store.fileState()
   const { changed, unchanged, removed } = diffFiles(scanned, known)
-  return { scanned: scanned.length, changed: changed.length, unchanged: unchanged.length, removed: removed.length, stale: changed.length + removed.length > 0 }
+  return {
+    scanned: scanned.length,
+    changed: changed.length,
+    unchanged: unchanged.length,
+    removed: removed.length,
+    stale: changed.length + removed.length > 0,
+    scanStats: scanned.scanStats ?? null,
+  }
 }
 
 /**
@@ -227,6 +235,7 @@ export async function buildIndex({
         scope: remote.scope ?? null,
         noEmbed: !!remote.noEmbed,
         rateLimit: remote.rateLimit ?? null,
+        reuse: remote.reuse ?? 'off',
         fingerprint,
         changedFiles: remoteChanged,
         removed,
@@ -310,6 +319,7 @@ export async function buildIndex({
     /** 需要但没装的语法（给 code_index 的安装提示用） */
     parserMissing,
     scannedFiles: scanned.length,
+    scanStats: scanned.scanStats ?? null,
     /** 实际使用的切块策略 → 文件数；以及降级原因（最多 5 条去重） */
     strategies: Object.fromEntries(strategyFiles),
     chunkFallbacks: fallbackReasons,
@@ -370,6 +380,7 @@ export async function syncRemote({
   scope = null,
   noEmbed = false,
   rateLimit = null,
+  reuse = 'off',
   fingerprint,
   changedFiles,
   removed,
@@ -402,6 +413,10 @@ export async function syncRemote({
     // 指纹必须**连块数一起**交给服务端：只有指纹一致、块数也一致，才算"内容确实一样"。
     // 否则"本地早已建好、本轮 0 变更"的空清单会让服务端记下指纹却没有内容（实测踩过）。
     chunkCount: store.stats().chunks,
+    simhash: computeSimhash(
+      [...store.fileState().entries()].map(([p, v]) => ({ path: p, sha: v.sha, size: v.size })),
+    ),
+    reuse,
   }
 
   let res
@@ -472,6 +487,8 @@ export async function syncRemote({
     missingHashes: missing,
     uploaded,
     coverage: res.coverage ?? null,
+    adopted: res.adopted ?? null,
+    adoptCandidates: res.adoptCandidates ?? null,
     chunks: res.chunks ?? null,
     vectors: res.vectors ?? null,
   }
