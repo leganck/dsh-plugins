@@ -349,27 +349,37 @@ ADMIN_HTML = r"""<!doctype html>
   <section id="tab-keys" class="panel">
     <section class="card wide">
       <h2>API Key</h2>
-      <div class="toolbar">
+      <div class="stats" id="key-stats"></div>
+      <div class="toolbar" style="margin-top:14px">
         <input id="key-name" placeholder="名称，例如：本机插件 / review-service" style="min-width:200px">
         <select id="key-role">
-          <option value="index">index（只能用索引/检索）</option>
-          <option value="admin">admin（可进后台管理）</option>
+          <option value="index">index · 索引/检索服务</option>
+          <option value="admin">admin · 索引 + 控制台管理</option>
         </select>
         <button class="primary" id="btn-create-key">新建 Key</button>
         <span class="faint" style="font-size:12px">明文只显示一次；服务端只存 sha256</span>
       </div>
+      <div class="faint" id="key-role-hint" style="font-size:11.5px;margin:-4px 0 10px"></div>
       <div class="key-reveal" id="key-reveal">
-        <div style="margin-bottom:6px">新 Key（复制保存，关闭后不再显示）：</div>
+        <div style="margin-bottom:6px">新 Key（只显示这一次，请复制保存）：</div>
         <div class="mono" id="key-plain">—</div>
-        <div style="margin-top:8px"><button id="btn-copy-key" style="border-color:var(--ok);color:var(--ok)">复制</button></div>
+        <div class="toolbar" style="margin:8px 0 0">
+          <button id="btn-copy-key">复制</button>
+          <button class="primary" id="btn-test-key">测试访问索引服务</button>
+          <span id="key-test-out" class="faint" style="font-size:11.5px"></span>
+        </div>
+      </div>
+      <div class="toolbar" style="margin-top:12px">
+        <input id="key-filter" type="search" placeholder="筛选名称 / 前缀 / 角色…">
+        <span class="faint" id="key-filtered"></span>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>名称</th><th>前缀</th><th>角色</th><th>状态</th><th class="num">今日请求</th><th class="num">今日错误</th><th>最后使用</th><th>操作</th></tr></thead>
-          <tbody id="keys"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+          <thead><tr><th>名称</th><th>前缀</th><th>角色 / 权限</th><th>状态</th><th class="num">今日请求</th><th class="num">今日错误</th><th>最后使用</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody id="keys"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
-      <div class="faint" style="font-size:11.5px;margin-top:8px">环境变量 <span class="mono">API_KEY</span> 作为 legacy Key（id=0，admin 角色）始终有效，不可在页面删除。</div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">index Key 可调用索引/检索全部接口（sync / chunks / vectors / search / status / scopes）；admin Key 额外可调 <span class="mono">/v1/admin/*</span> 与控制台。<br>环境变量 <span class="mono">API_KEY</span> 是 legacy Key（id=0，admin 角色），始终有效、不可删除。</div>
     </section>
   </section>
 
@@ -435,6 +445,15 @@ ADMIN_HTML = r"""<!doctype html>
           <div><b>向量 tag</b>：模型指纹。热切换模型后 tag 变化，旧 tag 向量不会被检索，需要客户端重新同步。</div>
         </div>
       </details>
+    </section>
+    <section class="card wide" style="border-color:var(--bad)">
+      <h2 style="color:var(--bad)">危险操作：清空所有作用域</h2>
+      <div class="faint" style="font-size:12px;margin-bottom:10px">删除服务端全部作用域、块、向量与正文（API Key、调用统计、模型设置保留），随后 VACUUM 回收空间。清空后检索会暂时没有结果，客户端（插件 / review-service）下次同步会自动全量重建；本机已建索引的仓库可用重推脚本一次补齐。</div>
+      <div class="toolbar" style="margin:0">
+        <input id="reset-confirm" placeholder="输入 RESET 确认" style="min-width:200px">
+        <button class="danger" id="btn-reset-index">清空所有作用域</button>
+        <span class="faint" id="reset-out" style="font-size:11.5px"></span>
+      </div>
     </section>
   </section>
 
@@ -781,29 +800,60 @@ async function deactivateRerank() {
 // ---------------- API Key ----------------
 let KEYS = [];
 let LEGACY = false;
+let PLAIN_KEY = '';
+function updateRoleHint() {
+  const role = $('#key-role').value;
+  $('#key-role-hint').innerHTML = role === 'admin'
+    ? 'admin：可访问索引/检索全部接口，并可调用 <span class="mono">/v1/admin/*</span> 与控制台管理接口。'
+    : 'index：可访问索引/检索全部接口（sync / chunks / vectors / search / repo status / scopes 等），不能进控制台管理。';
+}
+function renderKeyStats() {
+  const rows = KEYS.slice();
+  const enabled = rows.filter((k) => k.enabled).length;
+  const req = rows.reduce((a, k) => a + ((k.today && k.today.requests) || 0), 0);
+  const err = rows.reduce((a, k) => a + ((k.today && k.today.errors) || 0), 0);
+  const cards = [
+    ['Key 总数', fmtNum(rows.length + (LEGACY ? 1 : 0))],
+    ['启用中', fmtNum(enabled + (LEGACY ? 1 : 0))],
+    ['今日请求', fmtNum(req)],
+    ['今日错误', fmtNum(err)],
+  ];
+  $('#key-stats').innerHTML = cards.map(([l, n]) => '<div class="stat"><div class="n">' + n + '</div><div class="l">' + l + '</div></div>').join('');
+}
 async function loadKeys() {
   const r = await api('/v1/admin/keys');
   if (r.status !== 200) return;
   KEYS = (r.body && r.body.keys) || [];
   LEGACY = !!(r.body && r.body.legacy);
+  renderKeyStats();
   renderKeys();
 }
 function renderKeys() {
+  const q = ($('#key-filter').value || '').trim().toLowerCase();
   const rows = [];
   if (LEGACY) rows.push({ id: 0, name: '环境变量 API_KEY', prefix: '（env）', role: 'admin', enabled: true, legacy: true, today: { requests: 0, errors: 0 } });
   rows.push(...KEYS);
-  if (!rows.length) { $('#keys').innerHTML = '<tr><td colspan="8" class="empty">还没有 Key。可在上方新建（新建后所有索引/检索请求都必须带 Key）。</td></tr>'; return; }
-  $('#keys').innerHTML = rows.map((k) => {
+  const shown = q ? rows.filter((k) => [k.name, k.prefix, k.role].some((v) => String(v || '').toLowerCase().includes(q))) : rows;
+  $('#key-filtered').textContent = q ? '匹配 ' + shown.length + ' / ' + rows.length : '';
+  if (!shown.length) {
+    $('#keys').innerHTML = '<tr><td colspan="9" class="empty">' + (rows.length ? '没有匹配的 Key' : '还没有 Key。在上方新建后，所有索引/检索请求都需要带 Key。') + '</td></tr>';
+    return;
+  }
+  $('#keys').innerHTML = shown.map((k) => {
+    const perm = k.role === 'admin'
+      ? '<span class="chip blue">admin</span> <span class="faint" style="font-size:11px">索引 + 控制台</span>'
+      : '<span class="chip">index</span> <span class="faint" style="font-size:11px">仅索引/检索</span>';
     const op = k.legacy ? '<span class="faint" style="font-size:11.5px">只读（env）</span>'
       : '<button data-toggle="' + k.id + '">' + (k.enabled ? '禁用' : '启用') + '</button> <button class="danger" data-del="' + k.id + '">删除</button>';
     return '<tr>'
       + '<td>' + escapeHtml(k.name || '—') + (k.legacy ? ' <span class="chip blue">legacy</span>' : '') + '</td>'
       + '<td class="mono">' + escapeHtml(k.prefix || '—') + '</td>'
-      + '<td>' + (k.role === 'admin' ? '<span class="chip blue">admin</span>' : '<span class="chip">index</span>') + '</td>'
+      + '<td>' + perm + '</td>'
       + '<td>' + (k.enabled ? '<span class="chip ok"><span class="dot"></span>启用</span>' : '<span class="chip bad"><span class="dot"></span>禁用</span>') + '</td>'
       + '<td class="num">' + fmtNum(k.today && k.today.requests) + '</td>'
       + '<td class="num">' + fmtNum(k.today && k.today.errors) + '</td>'
       + '<td title="' + absTime(k.lastUsedAt) + '">' + rel(k.lastUsedAt) + '</td>'
+      + '<td title="' + absTime(k.createdAt) + '">' + rel(k.createdAt) + '</td>'
       + '<td>' + op + '</td></tr>';
   }).join('');
   $$('[data-toggle]').forEach((b) => { b.onclick = () => toggleKey(Number(b.dataset.toggle)); });
@@ -816,10 +866,42 @@ async function createKey() {
   const r = await api('/v1/admin/keys', { method: 'POST', body: JSON.stringify({ name, role }) });
   if (r.status !== 200) { toast('创建失败：' + ((r.body && r.body.error) || r.status)); return; }
   $('#key-name').value = '';
-  $('#key-plain').textContent = r.body.key;
+  PLAIN_KEY = r.body.key;
+  $('#key-plain').textContent = PLAIN_KEY;
+  $('#key-test-out').textContent = '';
   $('#key-reveal').style.display = 'block';
-  toast('已创建 Key（明文只显示这一次）');
+  toast('已创建 Key（明文只显示这一次，建议先点「测试访问索引服务」）');
   loadKeys();
+}
+async function testKeyAccess() {
+  if (!PLAIN_KEY) { toast('先新建一个 Key（明文只显示一次）'); return; }
+  const out = $('#key-test-out');
+  out.textContent = '测试中…';
+  const headers = { Authorization: 'Bearer ' + PLAIN_KEY };
+  // credentials:'omit' 很关键：控制台本身有管理员会话 Cookie，带上 Cookie 测什么都是 200
+  const [idx, adm] = await Promise.all([
+    fetch('/v1/status', { headers, credentials: 'omit' }).then((r) => r.status).catch(() => 0),
+    fetch('/v1/admin/session', { headers, credentials: 'omit' }).then((r) => r.status).catch(() => 0),
+  ]);
+  const chipOf = (code, okText) => code === 200
+    ? '<span class="chip ok"><span class="dot"></span>' + okText + ' 200</span>'
+    : '<span class="chip ' + (code === 401 ? '' : 'bad') + '">' + (code || 'ERR') + '</span>';
+  out.innerHTML = '索引服务 ' + chipOf(idx, 'OK') + ' · 控制台管理 ' + chipOf(adm, 'OK');
+}
+function resetIndex() {
+  const phrase = ($('#reset-confirm').value || '').trim().toUpperCase();
+  if (phrase !== 'RESET') { toast('请输入 RESET 确认'); return; }
+  if (!confirm('确认清空服务端所有作用域、块、向量与正文？此操作不可撤销（API Key 与统计保留）。')) return;
+  const out = $('#reset-out');
+  out.textContent = '清空中…';
+  api('/v1/admin/reset-index', { method: 'POST', body: JSON.stringify({ confirm: phrase }) }).then((r) => {
+    if (r.status !== 200) { out.textContent = '失败：' + ((r.body && (r.body.error || r.body.hint)) || r.status); return; }
+    const d = (r.body && r.body.deleted) || {};
+    out.textContent = '已清空：chunks=' + fmtNum(d.chunks) + ' vectors=' + fmtNum(d.vectors) + ' repos=' + fmtNum(d.repos) + '（' + ((r.body && r.body.ms) || 0) + ' ms）';
+    toast('已清空所有作用域');
+    $('#reset-confirm').value = '';
+    refreshHealth();
+  });
 }
 async function toggleKey(id) {
   const cur = KEYS.find((k) => k.id === id);
@@ -889,6 +971,11 @@ $('#btn-purge-tags').onclick = purgeTags;
 $('#btn-test').onclick = searchTest;
 $('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
 $('#btn-create-key').onclick = createKey;
+$('#key-role').onchange = updateRoleHint;
+$('#key-filter').oninput = renderKeys;
+$('#btn-test-key').onclick = testKeyAccess;
+$('#btn-reset-index').onclick = resetIndex;
+updateRoleHint();
 $('#btn-setup').onclick = setupAdmin;
 $('#btn-logs').onclick = loadLogs;
 $('#filter').oninput = renderScopes;
@@ -1038,6 +1125,46 @@ def deactivate_rerank():
         state.update(rerank_ready=False, rerank_err="disabled by admin", rerank_info={})
         log("rerank disabled by admin")
         return {"ok": True, "rerank_ready": False}
+
+
+def reset_index(confirm: str):
+    """清空所有作用域/块/向量/正文（保留 API Key、统计与模型设置），然后 VACUUM。
+
+    这是破坏性操作：调用方必须传 confirm="RESET"。客户端（插件/review-service）下次同步会
+    自动全量重建；本函数只负责把服务端清干净。
+    """
+    if str(confirm or "") != "RESET":
+        raise ValueError('confirm 必须为 "RESET"')
+    t0 = time.time()
+    with MODEL_LOCK:  # 嵌入线程/热切换互斥
+        was_paused = bool(governor and governor.paused)
+        if governor:
+            governor.pause()
+            governor.wait_idle(30)
+        try:
+            with store.lock:
+                deleted = {}
+                for table in ("chunks", "vectors", "blobs", "repos", "lineages"):
+                    cur = store.db.execute(f"delete from {table}")
+                    deleted[table] = int(cur.rowcount or 0)
+                store.db.commit()
+                try:
+                    store.db.execute("VACUUM")
+                    store.db.commit()
+                    # WAL 模式下 VACUUM 的新页先写进 WAL，不做 checkpoint 的话主库文件不会缩小
+                    store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    log("reset-index: vacuum + checkpoint 完成")
+                except Exception as e:  # noqa: BLE001 —— VACUUM 失败不影响"已清空"这个事实
+                    log(f"reset-index: VACUUM 失败（忽略）{type(e).__name__}: {e}")
+            store._invalidate()
+            if knn:
+                knn.invalidate()
+            state["reset_at"] = time.time()
+            log(f"index reset: {deleted} in {(time.time() - t0) * 1000:.0f} ms")
+            return {"ok": True, "deleted": deleted, "ms": round((time.time() - t0) * 1000, 1)}
+        finally:
+            if governor and not was_paused:
+                governor.resume()
 
 
 def models_payload():
@@ -2184,6 +2311,12 @@ class Handler(BaseHTTPRequestHandler):
                             return self._send(404, {"error": "unknown key"})
                         return self._send(200, row)
                     return self._send(400, {"error": "bad key action", "hint": "enable | disable"})
+                if action == "reset-index":
+                    confirm = str(req.get("confirm") or "").upper()
+                    if confirm != "RESET":
+                        return self._send(400, {"error": "confirm-required",
+                                                "hint": '需要在 body 里传 {"confirm":"RESET"}'})
+                    return self._send(200, reset_index(confirm))
                 if action == "models/activate":
                     kind = str(req.get("kind") or "embed").strip().lower()
                     directory = req.get("dir")
