@@ -568,17 +568,27 @@ function renderOverview() {
   ]);
   $('#setup-box').style.display = auth.adminPasswordSet ? 'none' : 'block';
 }
+let REFRESH_INFLIGHT = null;
 async function refreshHealth() {
-  const h = await api('/health');
-  if (h.status !== 200 || !h.body) { $('#ready').className = 'chip bad'; $('#ready').innerHTML = '<span class="dot"></span>不可达'; return; }
-  HEALTH = h.body;
-  $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  if (HEALTH.admin && !HEALTH.admin.authRequired) banner('当前未强制 API Key：任何能访问此地址的人都能检索。建议到「API Key」页创建第一个 Key。', true);
-  else banner('');
-  renderOverview();
-  const s = await api('/v1/scopes');
-  ROWS = (s.body && s.body.scopes) || [];
-  renderScopes();
+  // 并发去重：初始化时 showTab() 与显式调用可能同时触发，旧实现会重复请求 /health 两次。
+  if (REFRESH_INFLIGHT) return REFRESH_INFLIGHT;
+  REFRESH_INFLIGHT = (async () => {
+    // 两个接口互不依赖 → 并行；串行时总耗时 = 两者之和
+    const [h, s] = await Promise.all([api('/health'), api('/v1/scopes')]);
+    if (h.status !== 200 || !h.body) {
+      $('#ready').className = 'chip bad';
+      $('#ready').innerHTML = '<span class="dot"></span>不可达';
+      return;
+    }
+    HEALTH = h.body;
+    $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    if (HEALTH.admin && !HEALTH.admin.authRequired) banner('当前未强制 API Key：任何能访问此地址的人都能检索。建议到「API Key」页创建第一个 Key。', true);
+    else banner('');
+    renderOverview();
+    ROWS = (s.body && s.body.scopes) || [];
+    renderScopes();
+  })().finally(() => { REFRESH_INFLIGHT = null; });
+  return REFRESH_INFLIGHT;
 }
 async function action(name) {
   const r = await api('/v1/admin/' + name, { method: 'POST', body: '{}' });
@@ -888,9 +898,12 @@ $('#btn-logout').onclick = async () => { await fetch('/admin/logout', { method: 
 $('#btn-copy-key').onclick = async () => { try { await navigator.clipboard.writeText($('#key-plain').textContent); toast('已复制'); } catch (e) { toast('复制失败（浏览器限制）'); } };
 $('#setup-pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') setupAdmin(); });
 window.addEventListener('hashchange', () => showTab((location.hash || '#overview').slice(1)));
-showTab((location.hash || '#overview').slice(1));
-refreshHealth();
-loadModels();
+// 初始化只触发一次刷新：showTab('overview'/'scopes') 内部会 refreshHealth；
+// 其它 tab 首屏也补一次（标题栏的 ready/tag 需要），但都走 REFRESH_INFLIGHT 去重。
+const INITIAL_TAB = (location.hash || '#overview').slice(1);
+showTab(INITIAL_TAB);
+if (INITIAL_TAB !== 'overview' && INITIAL_TAB !== 'scopes') refreshHealth();
+// 模型列表只在「模型」Tab 打开时拉取（冷启动指纹 ~1s，不再拖慢首页）
 setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && $('#auto').checked && (location.hash === '' || location.hash === '#overview' || location.hash === '#scopes')) refreshHealth(); }, 15000);
 </script>
 </body>
@@ -1165,6 +1178,28 @@ def _warmup():
             log(f"warmup: rerank {(_t.time() - t0) * 1000:.0f} ms")
         except Exception as e:
             log(f"warmup: rerank 失败（忽略）{type(e).__name__}: {e}")
+    # 预热 store 的重查询缓存：counts() 的 JOIN 在 16 万块上 ~0.4s/作用域，
+    # tag_stats()/total_bytes() 要扫全表；不预热的话"重启后第一次打开控制台"要等 5~10s。
+    try:
+        t0 = _t.time()
+        for _r in store.db.execute("select namespace from repos").fetchall():
+            try:
+                store.counts(_r["namespace"])
+            except Exception:  # noqa: BLE001
+                pass
+        store.tag_stats()
+        store.total_bytes()
+        log(f"warmup: store stats {(_t.time() - t0) * 1000:.0f} ms")
+    except Exception as e:  # noqa: BLE001
+        log(f"warmup: store stats 失败（忽略）{type(e).__name__}: {e}")
+    # 预热模型发现（指纹要读 195MB+556MB，冷启动 ~1s；后台"模型"页首次打开就快）
+    try:
+        t0 = _t.time()
+        models_admin.discover(roots=MODEL_ROOTS, active_embed_dir=ACTIVE["embed_dir"],
+                              active_rerank_dir=ACTIVE["rerank_dir"])
+        log(f"warmup: model discovery {(_t.time() - t0) * 1000:.0f} ms")
+    except Exception as e:  # noqa: BLE001
+        log(f"warmup: model discovery 失败（忽略）{type(e).__name__}: {e}")
     try:
         row = store.db.execute(
             "select r.namespace, r.tag, (select count(*) from chunks c where c.namespace = r.namespace) as n"

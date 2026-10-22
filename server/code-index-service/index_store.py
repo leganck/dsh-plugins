@@ -831,13 +831,22 @@ class IndexStore:
             return int(self.db.execute(sql, args).fetchone()["n"])
 
     def tag_stats(self):
-        """所有向量 tag 的条数与占用（换模型后旧 tag 会继续占空间，需要显式清理）。"""
+        """所有向量 tag 的条数与占用（换模型后旧 tag 会继续占空间，需要显式清理）。
+
+        **必须缓存**：`sum(length(v))` 要扫全表（16 万行 ≈ 3 s），而 `/health` 每次都会调；
+        不缓存会让后台首页每次刷新都卡 3 秒。写向量/清 tag 后 _invalidate() 自动失效。
+        """
+        hit = self._cache.get(("tagstats",))
+        if hit is not None:
+            return [dict(x) for x in hit]
         with self.lock:
             rows = self.db.execute(
                 "select tag, count(*) as vectors, coalesce(sum(length(v)),0) as bytes"
                 " from vectors group by tag order by vectors desc"
             ).fetchall()
-        return [{"tag": r["tag"], "vectors": int(r["vectors"]), "bytes": int(r["bytes"])} for r in rows]
+        out = [{"tag": r["tag"], "vectors": int(r["vectors"]), "bytes": int(r["bytes"])} for r in rows]
+        self._cache[("tagstats",)] = out
+        return [dict(x) for x in out]
 
     def purge_tag_vectors(self, keep_tag=None, drop_tag=None):
         """删指定 tag 的向量，或保留 keep_tag 删其余所有 tag；返回 {deleted}。"""
@@ -853,10 +862,16 @@ class IndexStore:
             return {"deleted": int(cur.rowcount or 0), "keptTag": keep_tag, "droppedTag": drop_tag}
 
     def total_bytes(self):
+        """全库正文+向量占用；同样要缓存（1.6GB 全扫），写操作后由 _invalidate() 失效。"""
+        hit = self._cache.get(("totalbytes",))
+        if hit is not None:
+            return int(hit)
         with self.lock:
             b = self.db.execute("select coalesce(sum(length(body)),0) as n from blobs").fetchone()["n"]
             v = self.db.execute("select coalesce(sum(length(v)),0) as n from vectors").fetchone()["n"]
-        return int(b) + int(v)
+        total = int(b) + int(v)
+        self._cache[("totalbytes",)] = total
+        return total
 
     def hashes_in_lineage(self, lineage, tag=None):
         sql = "select distinct hash from chunks where lineage_id = ?"
