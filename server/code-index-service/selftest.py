@@ -586,6 +586,9 @@ def main():
     check("/admin/ 同样可用", st == 200 and "code-index-service" in html_slash)
     check("页面不再内嵌 API-Key 输入逻辑（改走 HTTP Basic）",
           "dshAdminKey" not in html and "localStorage" not in html)
+    st, fav, fav_ctype = req_raw("/favicon.svg")
+    check("站点图标 /favicon.svg → 200 svg 且页面已声明",
+          st == 200 and "svg" in fav_ctype and "<svg" in fav and 'rel="icon"' in html, (st, fav_ctype))
 
     print("\n[25] API_KEY（Bearer）鉴权")
     old_key = server.API_KEY
