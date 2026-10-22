@@ -1,7 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-  <!-- 索引文档：三条长短不一的文本行 -->
-  <path d="M4 5h9M4 9h13M4 13h7" />
-  <!-- 检索放大镜 -->
-  <circle cx="15.5" cy="15.5" r="3.4" />
-  <path d="M18.2 18.2 21 21" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Code Index">
+  <defs>
+    <linearGradient id="codeIndexBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#codeIndexBg)"/>
+  <circle cx="28.5" cy="28.5" r="10.5" fill="none" stroke="#ffffff" stroke-width="4.5"/>
+  <line x1="36.5" y1="36.5" x2="45.5" y2="45.5" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M25.5 24.5 21.8 28.5l3.7 4" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M31.5 24.5l3.7 4-3.7 4" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
