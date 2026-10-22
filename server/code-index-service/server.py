@@ -404,6 +404,72 @@ ADMIN_HTML = r"""<!doctype html>
   .warn-item { display:flex; gap:8px; padding:9px 10px; border-radius:8px; background:var(--warn-bg); border:1px solid color-mix(in srgb,var(--warn) 30%,transparent); font-size:12.5px; }
   .warn-item.danger { background:var(--bad-bg); border-color:color-mix(in srgb,var(--bad) 35%,transparent); }
   .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+  /* ---------------- 2026-10 控制台样式统一 ---------------- */
+  .card { border-radius:14px; padding:16px 18px; box-shadow:0 1px 2px rgba(16,24,40,.045); }
+  button { font-weight:500; white-space:nowrap; }
+  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; box-shadow:0 1px 2px rgba(16,24,40,.08); }
+  button.primary:hover { filter:brightness(.95); border-color:var(--blue); }
+  button.primary:disabled { background:var(--line); border-color:var(--line); color:var(--faint); box-shadow:none; filter:none; }
+  button.danger { background:var(--bad); border-color:var(--bad); color:#fff; }
+  button.danger:hover { filter:brightness(.95); border-color:var(--bad); }
+  button.danger:disabled { background:var(--line); border-color:var(--line); color:var(--faint); }
+  button.ghost { border-color:transparent; background:transparent; color:var(--muted); }
+  button.ghost:hover { background:var(--bg); border-color:var(--line); color:var(--text); }
+  button.small { padding:4px 9px; font-size:12px; border-radius:6px; }
+  .runtime-pill { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border-radius:999px; background:var(--bg); border:1px solid var(--line); color:var(--muted); font-size:11.5px; }
+  .runtime-pill .dot { background:var(--ok); }
+  .runtime-pill.offline .dot { background:var(--warn); }
+  .model-page .card { padding:18px 20px; }
+  .model-page .card h2 { text-transform:none; letter-spacing:.15px; font-size:12.5px; color:var(--text); margin-bottom:12px; }
+  .model-page .card h2 .tail { color:var(--faint); }
+  .model-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .model-card { border:1px solid var(--line); border-radius:12px; background:var(--card); padding:14px 16px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+  .model-card.is-active { border-color:color-mix(in srgb,var(--blue) 28%,var(--line)); box-shadow:inset 3px 0 0 var(--blue); }
+  .model-card-head { display:flex; align-items:center; gap:10px; min-width:0; }
+  .model-icon { width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font:700 13px var(--mono); color:var(--blue); background:var(--blue-bg); flex:none; }
+  .model-icon.rerank { color:var(--purple); background:var(--purple-bg); }
+  .model-card-title { min-width:0; flex:1; display:flex; flex-direction:column; line-height:1.35; }
+  .model-card-title b { font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .model-card-title span { color:var(--faint); font-size:11.5px; }
+  .model-card-body { display:grid; gap:9px; min-width:0; }
+  .model-path { color:var(--muted); font:11.5px var(--mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .model-kv { display:grid; gap:6px; min-width:0; }
+  .model-kv .row { display:grid; grid-template-columns:74px minmax(0,1fr); gap:8px; align-items:center; font-size:12px; min-width:0; }
+  .model-kv .row > span:first-child { color:var(--muted); }
+  .model-kv code { font:11.5px var(--mono); background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:2px 6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; max-width:100%; vertical-align:middle; }
+  .model-card-foot { display:flex; justify-content:flex-end; gap:8px; border-top:1px solid var(--line); padding-top:10px; }
+  .empty-inline { color:var(--faint); font-size:12px; padding:7px 0 1px; }
+  .model-table .dir-text { font:11px var(--mono); color:var(--muted); max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle; }
+  .model-table .actions-cell { text-align:right; white-space:nowrap; }
+  .model-kind { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px; font:700 10px var(--mono); color:var(--blue); background:var(--blue-bg); vertical-align:middle; }
+  .model-kind.rerank { color:var(--purple); background:var(--purple-bg); }
+  .model-name-cell { display:flex; align-items:center; gap:7px; min-width:0; }
+  .model-name-cell b { font-weight:550; }
+  .tag-text { font:11.5px var(--mono); color:var(--muted); max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle; }
+  .section-note { color:var(--faint); font-size:11.5px; margin:10px 0 0; }
+  .download-list { display:grid; gap:10px; }
+  .download-item { border:1px solid var(--line); border-radius:12px; padding:13px 15px; background:var(--card); }
+  .download-item.is-downloading { border-color:color-mix(in srgb,var(--blue) 30%,var(--line)); }
+  .download-item.is-ready { background:color-mix(in srgb,var(--ok-bg) 35%,var(--card)); }
+  .download-head { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; }
+  .download-title { flex:1; min-width:200px; display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
+  .download-title b { font-size:13px; }
+  .download-label { color:var(--faint); font-size:11.5px; }
+  .download-actions { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .download-meta { display:flex; gap:12px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:11.5px; margin-top:8px; }
+  .download-item .progress-row { display:flex; align-items:center; gap:10px; margin-top:9px; }
+  .download-item .progress-row .bar { flex:1; width:auto; height:7px; }
+  .download-hint { color:var(--faint); font-size:11.5px; margin-top:7px; line-height:1.5; }
+  .download-hint.warn { color:var(--warn); }
+  .download-hint code { font-family:var(--mono); font-size:11px; }
+  .download-state { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:11.5px; }
+  @media (max-width:760px) {
+    main { padding:12px; }
+    .model-page .card { padding:14px; }
+    .download-actions { width:100%; }
+    .download-actions .primary, .download-actions .danger { flex:1; justify-content:center; }
+    .model-table .dir-text { max-width:130px; }
+  }
 </style>
 </head>
 <body>
@@ -465,25 +531,24 @@ ADMIN_HTML = r"""<!doctype html>
   </section>
 
   <!-- ============================ 模型 ============================ -->
-  <section id="tab-models" class="panel">
+  <section id="tab-models" class="panel model-page">
     <section class="card wide">
-      <h2>当前模型</h2>
-      <div class="faint" id="model-runtime" style="margin-bottom:10px">运行时加载中…</div>
-      <div class="grid2" id="active-models"></div>
+      <h2>当前模型 <span class="tail"><span id="model-runtime" class="runtime-pill">运行时加载中…</span></span></h2>
+      <div class="model-grid" id="active-models"></div>
     </section>
     <section class="card wide">
       <h2>已安装模型 <span class="tail faint" id="model-roots"></span></h2>
       <div class="table-wrap">
-        <table>
-          <thead><tr><th>用途</th><th>名称</th><th>向量 tag</th><th>目录</th><th class="num">大小</th><th>状态</th><th>操作</th></tr></thead>
+        <table class="model-table">
+          <thead><tr><th style="width:74px">用途</th><th>模型</th><th>向量 tag</th><th>目录</th><th class="num" style="width:84px">大小</th><th style="width:96px">状态</th><th style="width:140px;text-align:right">操作</th></tr></thead>
           <tbody id="installed"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
-      <div class="faint" style="font-size:11.5px;margin-top:8px">切换后：<b>/health.tag</b> 立即变化，旧 tag 向量保留但检索不到；插件下次同步会按新 tag 全量重嵌（覆盖率从 0 恢复）。失败会自动保留原模型。</div>
+      <p class="section-note">切换嵌入模型会改变向量 tag：旧向量保留但检索不到，客户端下次同步会按新 tag 全量重嵌（覆盖率从 0 恢复）。切换失败会自动保留原模型。</p>
     </section>
     <section class="card wide">
-      <h2>可下载模型</h2>
-      <div id="models" class="faint" style="font-size:12.5px">加载中…</div>
+      <h2>可下载模型 <span class="tail faint">白名单目录 · 下载完成后可热切换</span></h2>
+      <div id="models" class="download-list"><div class="faint">加载中…</div></div>
     </section>
   </section>
 
@@ -814,10 +879,12 @@ function renderSystem(sys) {
   }
   box.innerHTML = html;
   if ($('#model-runtime')) {
-    $('#model-runtime').innerHTML = '运行时：' + (rt.device === 'cuda' ? 'CUDA' : 'CPU')
+    const pill = $('#model-runtime');
+    pill.className = 'runtime-pill' + (rt.device === 'cuda' ? '' : ' offline');
+    pill.innerHTML = '<span class="dot"></span>' + (rt.device === 'cuda' ? 'CUDA' : 'CPU')
       + (rt.gpuName ? ' · ' + escapeHtml(rt.gpuName) : '')
       + (rt.vramFreeBytes ? ' · 显存 ' + fmtBytes(rt.vramFreeBytes) + ' 可用' : '')
-      + ' · providers ' + (rt.activeProviders || []).map(escapeHtml).join(', ');
+      + ' · ' + (rt.activeProviders || []).map(escapeHtml).join(', ');
   }
 }
 async function loadRuntime() {
@@ -961,55 +1028,107 @@ async function searchTest() {
 // ---------------- 模型 ----------------
 let MODEL_DATA = null;
 let MODEL_TIMER = null;
-function modelStatusChip(status, ready, installedElsewhere) {
-  if (installedElsewhere && !ready) {
-    return '<span class="chip blue"><span class="dot"></span>已安装</span>';
-  }
-  if (ready) return '<span class="chip ok"><span class="dot"></span>已就绪</span>';
-  const label = { idle: '未下载', downloading: '下载中', done: '已下载', failed: '失败', cancelled: '已取消' }[status] || status;
-  const cls = { failed: 'chip bad', downloading: 'chip warn', cancelled: 'chip warn', done: 'chip ok' }[status] || 'chip';
-  return '<span class="' + cls + '"><span class="dot"></span>' + label + '</span>';
+function normModelPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+function modelKindOf(m) {
+  if (m && m.kind) return m.kind === 'rerank' ? 'rerank' : 'embed';
+  return (m && m.enable && m.enable.RERANK_MODEL_DIR) ? 'rerank' : 'embed';
+}
+function activeModelDir(kind) {
+  return normModelPath((((MODEL_DATA || {}).active || {})[kind] || {}).dir);
+}
+function isActiveModel(kind, dir) {
+  const d = normModelPath(dir);
+  return !!d && d === activeModelDir(kind);
+}
+function bindTagCopy(root) {
+  (root || document).querySelectorAll('[data-copy-tag]').forEach((b) => {
+    b.onclick = async () => {
+      try { await navigator.clipboard.writeText(b.dataset.copyTag); toast('已复制向量 tag'); }
+      catch (e) { toast('复制失败（浏览器限制）'); }
+    };
+  });
 }
 function renderActiveModels() {
   const a = (MODEL_DATA && MODEL_DATA.active) || {};
   const e = a.embed || {}, r = a.rerank || {};
-  const box = (title, body) => '<div class="model-box"><div class="head">' + title + '</div>' + body + '</div>';
-  $('#active-models').innerHTML =
-    box('<b>嵌入（embed）</b> <span class="chip ok"><span class="dot"></span>active</span>' + '<span class="spacer"></span><span class="faint" style="font-size:11.5px">' + escapeHtml(e.dir || '') + '</span>',
-        '<div class="kv" style="margin-top:8px"><div class="k">名称</div><div class="v">' + escapeHtml(e.name || '—') + '</div>'
-        + '<div class="k">tag</div><div class="v mono">' + escapeHtml(e.tag || '—') + '</div>'
-        + '<div class="k">模型文件</div><div class="v mono">' + escapeHtml(e.model || '—') + '</div></div>')
-    + box('<b>重排（rerank）</b> ' + (r.ready ? '<span class="chip ok"><span class="dot"></span>active</span>' : '<span class="chip warn"><span class="dot"></span>off</span>') + '<span class="spacer"></span><span class="faint" style="font-size:11.5px">' + escapeHtml(r.dir || '') + '</span>',
-        '<div class="kv" style="margin-top:8px"><div class="k">tag</div><div class="v mono">' + escapeHtml(r.tag || '—') + '</div>'
-        + '<div class="k">模型文件</div><div class="v mono">' + escapeHtml(r.model || '—') + '</div>'
-        + '<div class="k">操作</div><div class="v">' + (r.ready ? '<button data-rerank-off="1">关闭重排</button>' : '<span class="faint">未启用（客户端自动跳过重排）</span>') + '</div></div>');
-  const off = document.querySelector('[data-rerank-off]');
-  if (off) off.onclick = deactivateRerank;
+  const card = (kind, info) => {
+    const enabled = kind === 'embed' ? !!info.dir : !!info.ready;
+    const title = info.name || (kind === 'embed' ? '嵌入模型' : '重排模型');
+    const subtitle = kind === 'embed' ? 'bi-encoder · 向量检索' : 'cross-encoder · 结果重排';
+    const tag = info.tag || '—';
+    const dir = info.dir || '—';
+    const model = info.model || '';
+    return '<div class="model-card ' + (enabled ? 'is-active' : '') + '">'
+      + '<div class="model-card-head">'
+      + '<span class="model-icon ' + kind + '">' + (kind === 'embed' ? 'E' : 'R') + '</span>'
+      + '<div class="model-card-title"><b>' + escapeHtml(title) + '</b><span>' + subtitle + '</span></div>'
+      + '<span class="chip ' + (enabled ? 'ok' : 'warn') + '"><span class="dot"></span>' + (enabled ? '使用中' : '未启用') + '</span>'
+      + '</div>'
+      + '<div class="model-card-body">'
+      + '<div class="model-path" title="' + escapeHtml(dir) + '">' + escapeHtml(dir) + '</div>'
+      + (enabled
+        ? '<div class="model-kv">'
+          + '<div class="row"><span>向量 tag</span><span><code title="' + escapeHtml(tag) + '">' + escapeHtml(tag) + '</code> <button class="copy" data-copy-tag="' + escapeHtml(tag) + '" title="复制向量 tag">⧉</button></span></div>'
+          + (model ? '<div class="row"><span>模型文件</span><span><code title="' + escapeHtml(model) + '">' + escapeHtml(model) + '</code></span></div>' : '')
+          + '</div>'
+        : '<div class="empty-inline">' + (kind === 'rerank'
+          ? '重排未启用；检索仍可用，只是跳过重排。可在下方「已安装模型」中启用。'
+          : '嵌入模型尚未加载，请检查启动日志。') + '</div>')
+      + '</div>'
+      + (kind === 'rerank' && enabled ? '<div class="model-card-foot"><button class="ghost small" data-rerank-off="1">关闭重排</button></div>' : '')
+      + '</div>';
+  };
+  $('#active-models').innerHTML = card('embed', e) + card('rerank', r);
+  bindTagCopy($('#active-models'));
+  $$('[data-rerank-off]').forEach((b) => { b.onclick = deactivateRerank; });
 }
 function renderInstalled() {
   const inst = (MODEL_DATA && MODEL_DATA.installed) || {};
   const rows = [];
   (inst.embed || []).forEach((m) => rows.push({ kind: 'embed', m }));
   (inst.rerank || []).forEach((m) => rows.push({ kind: 'rerank', m }));
-  $('#model-roots').textContent = ((MODEL_DATA && MODEL_DATA.roots) || []).join(' · ');
-  if (!rows.length) { $('#installed').innerHTML = '<tr><td colspan="7" class="empty">没有发现可用模型目录</td></tr>'; return; }
+  const roots = (MODEL_DATA && MODEL_DATA.roots) || [];
+  $('#model-roots').textContent = roots.length ? '根目录：' + roots.join(' · ') : '';
+  if (!rows.length) {
+    $('#installed').innerHTML = '<tr><td colspan="7" class="empty">没有发现可用模型目录</td></tr>';
+    return;
+  }
   $('#installed').innerHTML = rows.map(({ kind, m }) => {
     const active = !!m.active;
-    const op = kind === 'embed'
-      ? (active ? '<span class="chip ok">当前</span>' : '<button class="primary" data-switch-embed="' + escapeHtml(m.dir) + '">切换为嵌入</button>')
-      : (active ? '<button data-rerank-off="1">关闭</button>' : '<button class="primary" data-switch-rerank="' + escapeHtml(m.dir) + '">启用重排</button>');
+    const ready = !!m.ready;
+    const isEmbed = kind === 'embed';
+    const kindText = isEmbed ? '嵌入' : '重排';
+    const status = active
+      ? '<span class="chip ok"><span class="dot"></span>当前使用</span>'
+      : ready
+        ? '<span class="chip"><span class="dot"></span>可用</span>'
+        : '<span class="chip bad"><span class="dot"></span>不完整</span>';
+    let op;
+    if (isEmbed) {
+      op = active ? '<span class="faint">—</span>'
+        : ready ? '<button class="primary small" data-switch-embed="' + escapeHtml(m.dir) + '">切换</button>'
+          : '<button class="small" disabled>不可用</button>';
+    } else if (active) {
+      op = '<button class="ghost small" data-rerank-off="1">关闭重排</button>';
+    } else {
+      op = ready ? '<button class="primary small" data-switch-rerank="' + escapeHtml(m.dir) + '">启用</button>'
+        : '<button class="small" disabled>不可用</button>';
+    }
     const dups = m.alsoDirs || [];
     const dirTitle = [m.dir].concat(dups).join('\n');
-    const dirCell = '<span class="mono faint" style="font-size:11px" title="' + escapeHtml(dirTitle) + '">' + escapeHtml(m.dir) + '</span>'
-      + (dups.length ? ' <span class="chip warn" title="' + escapeHtml(dups.join('\n')) + '">另有 ' + dups.length + ' 份副本</span>' : '');
-    return '<tr>'
-      + '<td>' + (kind === 'embed' ? '嵌入' : '重排') + '</td>'
-      + '<td>' + escapeHtml(m.name) + '</td>'
-      + '<td class="mono" style="font-size:11.5px">' + escapeHtml(m.tag || '—') + '</td>'
+    const dirCell = '<span class="dir-text" title="' + escapeHtml(dirTitle) + '">' + escapeHtml(m.dir) + '</span>'
+      + (dups.length ? ' <span class="chip warn" title="' + escapeHtml(dups.join('\n')) + '">另有 ' + dups.length + ' 份</span>' : '');
+    const tag = m.tag || '—';
+    return '<tr' + (active ? ' style="background:color-mix(in srgb,var(--blue-bg) 26%,transparent)"' : '') + '>'
+      + '<td><span class="model-kind ' + kind + '">' + (isEmbed ? 'E' : 'R') + '</span> <span class="faint">' + kindText + '</span></td>'
+      + '<td><div class="model-name-cell"><b>' + escapeHtml(m.name || '—') + '</b></div></td>'
+      + '<td><span class="tag-text" title="' + escapeHtml(tag) + '">' + escapeHtml(tag) + '</span></td>'
       + '<td>' + dirCell + '</td>'
-      + '<td class="num">' + fmtBytes(m.size_bytes || m.model_bytes) + '</td>'
-      + '<td>' + (active ? '<span class="chip ok">active</span>' : (m.ready ? '<span class="chip">ready</span>' : '<span class="chip bad">incomplete</span>')) + '</td>'
-      + '<td>' + op + '</td></tr>';
+      + '<td class="num">' + fmtBytes(m.size_bytes || m.model_bytes || 0) + '</td>'
+      + '<td>' + status + '</td>'
+      + '<td class="actions-cell">' + op + '</td></tr>';
   }).join('');
   $$('[data-switch-embed]').forEach((b) => { b.onclick = () => switchModel('embed', b.dataset.switchEmbed); });
   $$('[data-switch-rerank]').forEach((b) => { b.onclick = () => switchModel('rerank', b.dataset.switchRerank); });
@@ -1018,44 +1137,78 @@ function renderInstalled() {
 function renderDownloads() {
   const box = $('#models');
   const list = (MODEL_DATA && MODEL_DATA.models) || [];
-  if (!list.length) { box.innerHTML = '<span class="faint">没有可下载的模型</span>'; return; }
+  if (!list.length) { box.innerHTML = '<div class="empty">没有可下载的模型</div>'; return; }
   box.innerHTML = list.map((m) => {
+    const kind = modelKindOf(m);
     const ready = !!m.ready;
-    const pct = ready ? 100 : (m.bytesTotal ? Math.min(100, Math.round(m.bytesDone * 100 / m.bytesTotal)) : 0);
-    const cls = m.status === 'failed' ? 'bad' : (m.status === 'downloading' ? 'warn' : '');
+    const downloading = m.status === 'downloading' || m.status === 'verifying';
+    const failed = m.status === 'failed';
+    const cancelled = m.status === 'cancelled';
     const elsewhere = m.installedElsewhere;
     const blocked = !!(elsewhere && !ready);
-    const size = blocked
-      ? '—'
-      : (ready
-        ? fmtBytes(m.diskBytes || m.bytesTotal || 0)
-        : (fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?')));
-    const speed = (m.status === 'downloading' && m.speedBps) ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
-    const btn = m.status === 'downloading'
-      ? '<button data-cancel="' + escapeHtml(m.name) + '">取消</button>'
-      : '<button data-start="' + escapeHtml(m.name) + '"' + (ready || blocked ? ' disabled' : '') + '>'
-        + (ready ? '已就绪' : (blocked ? '已安装' : ((m.status === 'failed' || m.status === 'cancelled') ? '重试' : '下载'))) + '</button>'
-        + '<button data-force="' + escapeHtml(m.name) + '" title="删掉已下载文件，从头再下">重传</button>';
-    const hint = ready
-      ? '已就绪 · 目标目录 <span class="mono">' + escapeHtml(m.target) + '</span> · 到「已安装模型」里点切换即可热加载（无需重启）'
-      : escapeHtml(m.error || m.message || '');
-    let extra = '';
-    if (elsewhere && ready) {
-      extra = '<div style="font-size:11.5px;margin-top:4px;color:var(--warn)">同 tag 已安装在 <span class="mono">' + escapeHtml(elsewhere.dir) + '</span>，这个目录是副本（可手动删除，不影响切换）</div>';
-    } else if (elsewhere && !ready) {
-      extra = '<div style="font-size:11.5px;margin-top:4px;color:var(--warn)">本机已有同款：<span class="mono">' + escapeHtml(elsewhere.dir) + '</span>' + (elsewhere.tag ? '（tag ' + escapeHtml(elsewhere.tag) + '）' : '') + '，一般无需再下载；确需副本可用「重传」</div>';
+    const useDir = ready ? m.target : (elsewhere && elsewhere.dir);
+    const active = isActiveModel(kind, useDir);
+    const pct = ready ? 100 : (m.bytesTotal ? Math.min(100, Math.round((m.bytesDone || 0) * 100 / m.bytesTotal)) : 0);
+    const barCls = failed ? 'bad' : (downloading ? 'warn' : (ready ? 'ok' : ''));
+    const size = downloading
+      ? (fmtBytes(m.bytesDone || 0) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?'))
+      : (ready ? fmtBytes(m.diskBytes || m.bytesTotal || 0) : (m.bytesTotal ? fmtBytes(m.bytesTotal) : '—'));
+    const speed = downloading && m.speedBps ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
+    const actions = [];
+    if (downloading) {
+      actions.push('<button class="danger small" data-cancel="' + escapeHtml(m.name) + '">取消下载</button>');
+    } else if (blocked) {
+      if (active) actions.push('<span class="chip ok"><span class="dot"></span>当前使用</span>');
+      else actions.push('<button class="primary small" data-use-kind="' + kind + '" data-use-dir="' + escapeHtml(useDir) + '">使用已有</button>');
+      actions.push('<button class="ghost small" data-force="' + escapeHtml(m.name) + '" title="本机已有同款，仍下载一份副本">仍要下载副本</button>');
+    } else if (ready) {
+      if (active) actions.push('<span class="chip ok"><span class="dot"></span>当前使用</span>');
+      else actions.push('<button class="primary small" data-use-kind="' + kind + '" data-use-dir="' + escapeHtml(useDir) + '">切换使用</button>');
+      if (!active) actions.push('<button class="ghost small" data-force="' + escapeHtml(m.name) + '" title="删除已下载文件并从头重新下载">重新下载</button>');
+    } else if (failed || cancelled) {
+      actions.push('<button class="primary small" data-start="' + escapeHtml(m.name) + '">重试下载</button>');
+    } else {
+      actions.push('<button class="primary small" data-start="' + escapeHtml(m.name) + '">下载</button>');
     }
-    const note = m.note ? '<div class="faint" style="font-size:11.5px;margin-top:2px">' + escapeHtml(m.note) + '</div>' : '';
-    return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
-      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>' + escapeHtml(m.name) + '</b> ' + modelStatusChip(m.status, ready, blocked)
-      + '<span class="faint">' + escapeHtml(m.label || '') + '</span><span class="spacer"></span>' + btn + '</div>'
-      + (blocked ? '' : '<div class="cov" style="margin-top:8px"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span>'
-        + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>')
-      + '<div class="faint" style="font-size:11.5px;margin-top:6px">' + hint + '</div>' + extra + note + '</div>';
+    let chip;
+    if (downloading) chip = '<span class="chip blue"><span class="dot"></span>下载中</span>';
+    else if (ready && active) chip = '<span class="chip ok"><span class="dot"></span>已启用</span>';
+    else if (ready) chip = '<span class="chip ok"><span class="dot"></span>已下载</span>';
+    else if (blocked) chip = '<span class="chip blue"><span class="dot"></span>本机已有</span>';
+    else if (failed) chip = '<span class="chip bad"><span class="dot"></span>下载失败</span>';
+    else if (cancelled) chip = '<span class="chip warn"><span class="dot"></span>已取消</span>';
+    else chip = '<span class="chip"><span class="dot"></span>未下载</span>';
+    let hint;
+    if (downloading) hint = escapeHtml(m.message || '正在下载，页面会自动刷新进度');
+    else if (blocked && active) hint = '本机已有同款并在使用中；下载副本不会影响当前模型。';
+    else if (blocked) hint = '本机已有同款：<code>' + escapeHtml(elsewhere.dir) + '</code>，优先使用已有副本，避免重复占用空间。';
+    else if (ready) hint = active
+      ? '当前正在使用此模型。'
+      : '下载完成，点击「切换使用」即可热加载，无需重启服务。';
+    else if (failed) hint = escapeHtml(m.error || '下载失败，可重试；已下载的完整文件会被校验复用。');
+    else if (cancelled) hint = '下载已取消；再次下载会从断点继续。';
+    else hint = '下载后可在本页直接切换使用；已下载的完整文件会按 sha256 复用。';
+    const extra = (ready && elsewhere && !active)
+      ? '<div class="download-hint">同 tag 也存在于 <code>' + escapeHtml(elsewhere.dir) + '</code>；当前目录是副本，可手动清理。</div>'
+      : '';
+    const note = (!ready && !blocked && m.note) ? '<div class="download-hint">' + escapeHtml(m.note) + '</div>' : '';
+    return '<div class="download-item ' + (downloading ? 'is-downloading' : '') + (ready ? ' is-ready' : '') + '">'
+      + '<div class="download-head"><div class="download-title"><b>' + escapeHtml(m.label || m.name) + '</b>'
+      + '<span class="download-label mono">' + escapeHtml(m.name) + '</span>' + chip + '</div>'
+      + '<div class="download-actions">' + actions.join('') + '</div></div>'
+      + '<div class="download-meta"><span>大小 <b>' + size + '</b>' + speed + '</span>'
+      + '<span class="download-state">' + (blocked || ready ? '模型文件已存在' : '下载到 <code>' + escapeHtml(m.target || '') + '</code>') + '</span></div>'
+      + (downloading ? '<div class="progress-row"><span class="bar ' + barCls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div>' : '')
+      + '<div class="download-hint ' + (blocked && !active ? 'warn' : '') + '">' + hint + '</div>' + extra + note + '</div>';
   }).join('');
   $$('[data-start]').forEach((b) => { b.onclick = () => startModel(b.dataset.start, false); });
-  $$('[data-force]').forEach((b) => { b.onclick = () => { if (confirm('删掉已下载文件，从头重新下载？')) startModel(b.dataset.force, true); }; });
+  $$('[data-force]').forEach((b) => {
+    b.onclick = () => {
+      if (confirm('删除已下载文件并从头重新下载？用于修复损坏或需要重新校验的模型。')) startModel(b.dataset.force, true);
+    };
+  });
   $$('[data-cancel]').forEach((b) => { b.onclick = () => cancelModel(b.dataset.cancel); });
+  $$('[data-use-dir]').forEach((b) => { b.onclick = () => switchModel(b.dataset.useKind, b.dataset.useDir); });
 }
 async function loadModels() {
   const r = await api('/v1/admin/models');

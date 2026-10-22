@@ -790,7 +790,7 @@ def main():
     check("/v1/admin/models 列出 bge / rerank / jina 三个模型",
           st5 == 200 and {"bge-base-zh", "bge-reranker-base", "jina-v2-base-code"} <= set(ids), ids)
     page = req_raw("/admin")[1]
-    check("后台页面包含「可下载模型」与「重传」", "可下载模型" in page and "重传" in page)
+    check("后台页面包含「可下载模型」与「重新下载」", "可下载模型" in page and "重新下载" in page)
     check("后台页面初始化会加载模型列表（不会停在加载中）", "loadModels();" in page)
     check("API Key 页含权限说明与测试按钮", "测试访问索引服务" in page and "index · 索引/检索服务" in page)
     check("新建 Key 只有 index 选项（无 admin option）", 'value="admin"' not in page)
