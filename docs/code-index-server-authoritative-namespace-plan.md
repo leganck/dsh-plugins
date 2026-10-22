@@ -1,6 +1,6 @@
 # code-index：服务端权威 namespace + 运行时可观测性（0.14.0）
 
-状态：已实现（2026-10-22）。关联破坏性变更：服务端 `server-v0.14.0`、插件 `code-index-v0.14.0`、review-service 同步升级。
+状态：已实现（2026-10-22）。关联破坏性变更：服务端 `server-v0.14.1`、插件 `code-index-v0.14.0`、review-service 同步升级。
 
 ## 1. 为什么改
 
