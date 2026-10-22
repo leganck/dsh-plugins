@@ -103,8 +103,8 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 设置页保存时不会清空这些未展示字段。
 
 索引目录不是远端检索的必填项：留空时每个仓库用自己的 `.dsh-index/index.db`；改它只影响
-本地 SQLite 的位置，远端向量/重排仍走 `remote.url`。设置页保存后如果 `roots` 或索引目录变了，
-重新运行一次 `code_index` 重建本地索引。
+本地 SQLite 的位置，远端向量/重排仍走 `remote.url`。**设置页保存后需要重启 DSH 才会应用新配置**；
+如果 `roots` 或索引目录变了，重启后再重新运行一次 `code_index` 重建本地索引。
 
 ```yaml
 - id: code-index
