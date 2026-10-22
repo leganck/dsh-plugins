@@ -93,7 +93,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 
 ### 在 DSH 里配置（0.11.5+）
 
-装好插件并重启 DSH 后，打开 **插件 → 内置插件配置 → 代码索引**，可以直接改：
+装好插件并重启 DSH 后，打开 **插件 → 已安装 → 代码索引 → 配置**，可以直接改：
 
 - **主设置**：远端地址 `remote.url`、API Key `remote.apiKey`（只写，不回显）
 - **高级设置**：向量模式 `vectors`、重排模式 `rerank`、本地索引目录 `advanced.indexDirBase`
