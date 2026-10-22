@@ -32,6 +32,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch } from './lib/repo.js'
 import { canonicalNamespace, normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
+import z from '@deepseek-ai/schemastery'
 
 /** 0.10.0 remote-only：本地只保留 parser（切块）依赖组，embed 组不再安装 */
 const PARSER_GROUPS = GROUP_NAMES.filter((g) => g.startsWith('parser'))
@@ -156,6 +157,59 @@ const USER_DEFAULTS = {
     remoteRateLimit: null,
   },
 }
+/**
+ * DSH 设置页的配置 schema。
+ *
+ * 只把设置页真正开放的五项标成 `.volatile()`：远端地址 / API Key、
+ * 向量模式、重排模式、本地索引目录。其余字段仍参与 Loader 校验和默认值，
+ * 但不进入设置页；这样 `roots`、限速、超时等高级配置继续只走 YAML。
+ *
+ * `remote.apiKey` 声明 secret：设置接口只会告诉页面"是否已配置"，不会回传明文。
+ */
+const nullableString = () => z.union([z.string(), z.const(null)]).default(null)
+const nullableNumber = () => z.union([z.number(), z.const(null)]).default(null)
+export const Config = z.object({
+  roots: z.array(z.string()).default([]),
+  vectors: z.union(['auto', 'remote', 'off']).default('auto').volatile(),
+  rerank: z.union(['off', 'fast', 'quality']).default('off').volatile(),
+  exclude: z.array(z.string()).default([]),
+  remote: z.object({
+    url: nullableString().volatile(),
+    apiKey: nullableString().role('secret').volatile(),
+    namespace: nullableString(),
+    scope: z.any().default('auto'),
+    readScopes: z.array(z.string()).default([]),
+  }).default({}),
+  advanced: z.object({
+    indexDirBase: nullableString().volatile(),
+    maxFileBytes: z.number().default(2 * 1024 * 1024),
+    windowLines: z.number().default(40),
+    depsDir: nullableString(),
+    chunking: z.object({
+      strategy: z.union(['auto', 'ast', 'heuristic', 'window']).default('auto'),
+      byExt: z.dict(z.any()).default({}),
+    }).default({}),
+    sync: z.object({
+      watch: z.boolean().default(false),
+      debounceMs: z.number().default(30000),
+    }).default({}),
+    remoteTimeoutMs: z.number().default(8000),
+    remoteRateLimit: nullableNumber(),
+  }).default({}),
+}).description('代码索引：远端检索服务与本地索引行为')
+
+/** 递归解包 volatile 配置引用（config.foo.get()），让现有显式校验继续看到普通值。 */
+function unwrapConfig(value) {
+  if (value && typeof value === 'object' && typeof value.get === 'function') return unwrapConfig(value.get())
+  if (Array.isArray(value)) return value.map(unwrapConfig)
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const [key, child] of Object.entries(value)) out[key] = unwrapConfig(child)
+    return out
+  }
+  return value
+}
+
 const USER_TOP_KEYS = Object.keys(USER_DEFAULTS)
 /** remote 下允许用户写的键（0.11.0 新增 namespace / scope / readScopes，见 docs/scope-tier3.md §6） */
 const USER_REMOTE_KEYS = ['url', 'apiKey', 'namespace', 'scope', 'readScopes']
@@ -611,6 +665,7 @@ function formatEpoch(value) {
 }
 
 export function apply(ctx, rawConfig = {}) {
+  rawConfig = unwrapConfig(rawConfig)
   bootLog('apply-entered', { configKeys: Object.keys(rawConfig ?? {}) })
   try {
     const r = applyInner(ctx, rawConfig)
