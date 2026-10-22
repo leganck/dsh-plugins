@@ -494,6 +494,7 @@ node test.mjs                                   # 125 项（Windows）/ 119 项�
 node test-ignore.mjs                            # 20 项：gitignore / cursorignore / docs / 禁用模块 / 二进制
 node test-auto-sync.mjs                         # 12 项：registry / 锁 / dirty 合并 / 退避
 node test-simhash.mjs                           # 10 项：确定性 / 相似距离 / 两种变体
+node test-workspace-roots.mjs                    # 17 项：workspace/cwd/.dshworkspace.json 自动推导
 node test-plugin.mjs                            # 83 项：契约与接口、五个工具真实调用、Config schema
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 

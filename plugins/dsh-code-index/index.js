@@ -772,16 +772,22 @@ export function apply(ctx, rawConfig = {}) {
 function applyInner(ctx, rawConfig = {}) {
   const config = normalizeConfig(rawConfig)
 
-  const workspaceRootFromCtx = () => {
+  const workspaceRootFromCtx = (exec) => {
     try {
       const policy = typeof ctx.get === 'function' ? ctx.get('sandboxPolicy') : ctx.sandboxPolicy
-      return policy?.workspaceRoot ?? null
+      if (!policy) return null
+      // DSH 的 sandboxPolicy 是按 session 解析的；apply 时没有 session，退回默认 workspaceRoot。
+      if (typeof policy.resolve === 'function' && exec?.agent?.session) {
+        const resolved = policy.resolve({ session: exec.agent.session })
+        return resolved?.workspaceRoot ?? policy.workspaceRoot ?? null
+      }
+      return policy.workspaceRoot ?? null
     } catch {
       return null
     }
   }
   const initialWorkspace = resolveAllowedRoots({
-    workspaceRoot: workspaceRootFromCtx(),
+    workspaceRoot: workspaceRootFromCtx(null),
     sessionCwd: process.cwd(),
   })
   for (const warning of config.deprecations ?? []) {
@@ -816,7 +822,7 @@ function applyInner(ctx, rawConfig = {}) {
             vectors: config.vectors,
             vectorsMode: config.vectorsMode,
             indexDirBase: config.indexDirBase,
-            workspaceRoot: workspaceRootFromCtx(),
+            workspaceRoot: workspaceRootFromCtx(null),
             workspaceRoots: initialWorkspace.roots,
             workspaceSources: initialWorkspace.sources,
             // 远端只记**地址与开关**，绝不记 apiKey（标记文件是明文的，会被归档/分享）
@@ -930,7 +936,7 @@ let reconcileTimer = null
 
   function allowedRootsFor(exec) {
     return resolveAllowedRoots({
-      workspaceRoot: workspaceRootFromCtx(),
+      workspaceRoot: workspaceRootFromCtx(exec),
       sessionCwd: exec?.agent?.session?.cwd ?? exec?.cwd ?? process.cwd(),
     })
   }
