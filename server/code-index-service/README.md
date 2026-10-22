@@ -84,6 +84,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
 | `GET /v1/admin/models`、`POST /v1/admin/models/{name}/download` `/cancel` | **模型下载**：进度/速度、取消、失败重试、强制重传、断点续传、sha256 校验 |
 | `POST /v1/admin/models/activate`、`POST /v1/admin/models/deactivate` | **模型热切换**：`{kind:'embed'|'rerank', dir|name}` 动态加载，无需重启（见下文） |
+| `POST /v1/admin/reset-index` | **清空索引**：`{confirm:'RESET'}` 删除全部作用域/块/向量/正文并 VACUUM（Key/统计保留）；客户端下次同步自动全量重建 |
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
 | `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按端点（请求、错误、embed 文本、search/rerank 次数、延迟） |
 | `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
@@ -104,8 +105,12 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 
 - 控制台打开 `https://<host>/admin`：未登录显示登录页（不再弹浏览器 Basic 框）；登录后进入控制台，
   右上角「退出」清 Cookie。
-- **Key 管理**：控制台「API Key」页新建/禁用/删除。明文只在创建时显示一次；服务端只存 `sha256(key)`，
-  列表只显示前 6 位。`index` 角色的 Key **不能**进后台管理接口。
+- **Key 管理**：控制台「API Key」页新建/禁用/删除、按名称/前缀筛选。明文只在创建时显示一次；
+  服务端只存 `sha256(key)`，列表只显示前 6 位。两种角色：
+  - `index`：可调**索引/检索全部接口**（`sync`/`chunks`/`vectors`/`search`/`repos/.../status`/`scopes` 等），
+    **不能**进后台管理；
+  - `admin`：索引/检索 + `/v1/admin/*` + 控制台管理。
+  新建后可直接点「测试访问索引服务」验证（会分别测 `/v1/status` 与 `/v1/admin/session`，前者 200、后者对 index Key 为 401）。
 - **强制策略**：只要存在任一 Key（env `API_KEY` 或控制台创建），所有索引/检索接口都必须带 Bearer；
   一个都没有时为开放模式（仅建议隔离内网），控制台顶部会红字提示。
 - 免鉴权只剩 `GET /health`（无人认领时只返回 `ready/tag/providers/...`，不含 `spaces`/`limits`）。
@@ -146,6 +151,20 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 > 每个模型自带 profile（query 前缀 / 池化 / SEP / PAD），bge 与 jina 自动使用各自参数；
 > 自定义目录名不在内置 profile 里时沿用环境变量默认（`QUERY_PREFIX` 等）。
 > 目录白名单由 `MODEL_ROOTS`（默认 `/models,/data/models`）与 `MODEL_EXTRA_DIRS` 控制。
+
+### 清空索引并重建
+
+控制台「作用域」页底部有危险操作：输入 `RESET` 后点「清空所有作用域」（或
+`POST /v1/admin/reset-index {"confirm":"RESET"}`）。行为：
+
+1. 暂停嵌入并等当前批次结束；
+2. `DELETE` 掉 `chunks / vectors / blobs / repos / lineages`（**API Key、调用统计、模型设置保留**）；
+3. `VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)` 回收空间（实测 1.5 GB → 60 KB）；
+4. 清 kNN 缓存、恢复 governor。
+
+清空后检索暂时为空，客户端（插件 / review-service）下次同步会自动全量重建；若想立刻补回，
+可让本机插件重新跑一次 `code_index`。重建时服务端按 `EMBED_RATE` 后台嵌入，可临时
+`POST /v1/admin/rate {rate:40}` 加速，完成后记得调回。
 
 ### 换模型后还是同一个数据库吗？
 
