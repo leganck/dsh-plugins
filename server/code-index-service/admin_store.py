@@ -43,6 +43,18 @@ LEGACY_KEY_NAME = "legacy/env"
 FLUSH_EVENTS = 200
 # last_used_at 的落库节流：lookup 命中只改内存并打脏标记，最多这么频繁写一次库
 LAST_USED_WRITE = 60.0
+# 延迟分位用固定上界桶（毫秒）：record 只多做一次字典加法，flush 时按天 upsert。
+# P50/P95 取所在桶的上界（近似值，页面标注 "≤"），避免为分位保存每条请求的延迟。
+LATENCY_EDGES = (5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
+
+
+def _latency_bucket(latency_ms):
+    """延迟 → 桶下标；len(LATENCY_EDGES) 表示超过最后一档。"""
+    ms = float(latency_ms or 0.0)
+    for i, edge in enumerate(LATENCY_EDGES):
+        if ms <= edge:
+            return i
+    return len(LATENCY_EDGES)
 PBKDF2_ITER = 200_000
 SESSION_SECRET_KEY = "session_secret"
 ADMIN_PASSWORD_KEY = "admin_password"
@@ -83,6 +95,12 @@ create table if not exists usage_endpoint(
   errors integer not null default 0,
   latency_sum real not null default 0,
   primary key(key_id, day, endpoint)
+);
+create table if not exists usage_latency(
+  day text not null,
+  bucket integer not null,
+  requests integer not null default 0,
+  primary key(day, bucket)
 );
 """
 
@@ -143,6 +161,8 @@ class AdminStore:
         # (key_id, day, endpoint) -> [requests, errors, embed_texts, search_calls, rerank_calls,
         #                              latency_sum, latency_max]；flush 前全部累加在内存
         self._pending = {}
+        # (day, bucket) -> 次数；与 _pending 一起 flush / 失败回滚
+        self._latency = {}
         self._events = 0
         # key_id -> 最近一次 lookup 时间（内存里立即生效，落库节流）
         self._last_used = {}
@@ -344,6 +364,8 @@ class AdminStore:
             slot[5] += latency
             if latency > slot[6]:
                 slot[6] = latency
+            bucket = _latency_bucket(latency)
+            self._latency[(day, bucket)] = self._latency.get((day, bucket), 0) + 1
             self._events += 1
             need_flush = self._events >= FLUSH_EVENTS
         # 落盘放在锁外：200 条聚合后是一次小事务，不要占着锁做 IO
@@ -365,9 +387,10 @@ class AdminStore:
             # last_used_at 节流：最多每 LAST_USED_WRITE 秒写一次库；close() 时 force=True 兜底
             used_due = force or (now - self._last_used_write) >= LAST_USED_WRITE
             used_items = list(self._last_used.items()) if used_due else []
-            if not self._pending and not used_items and not purge_due:
+            if not self._pending and not used_items and not purge_due and not self._latency:
                 return
             pending, self._pending = self._pending, {}
+            latency_pending, self._latency = self._latency, {}
             events, self._events = self._events, 0
             try:
                 for (key_id, day, endpoint), v in pending.items():
@@ -394,6 +417,12 @@ class AdminStore:
                         " latency_sum = latency_sum + excluded.latency_sum",
                         (key_id, day, endpoint, v[0], v[1], v[5]),
                     )
+                for (day, bucket), count in latency_pending.items():
+                    self.db.execute(
+                        "insert into usage_latency(day, bucket, requests) values (?,?,?)"
+                        " on conflict(day, bucket) do update set requests = requests + excluded.requests",
+                        (day, int(bucket), int(count)),
+                    )
                 for key_id, last_used in used_items:
                     self.db.execute(
                         "update api_keys set last_used_at = ? where id = ?", (float(last_used), int(key_id))
@@ -404,6 +433,7 @@ class AdminStore:
                     )
                     self.db.execute("delete from usage_daily where day < ?", (cutoff,))
                     self.db.execute("delete from usage_endpoint where day < ?", (cutoff,))
+                    self.db.execute("delete from usage_latency where day < ?", (cutoff,))
                 self.db.commit()
             except Exception:
                 # 写失败不能丢数据：回滚后把这一轮缓冲/脏标记并回去，等下一轮重试
@@ -421,6 +451,8 @@ class AdminStore:
                                 current[i] = max(current[i], value[i])
                             else:
                                 current[i] += value[i]
+                for key, count in latency_pending.items():
+                    self._latency[key] = self._latency.get(key, 0) + count
                 self._events += events
                 return
             # 提交成功后才清脏标记（提交前清会让失败那轮丢掉 last_used 更新）
@@ -460,10 +492,27 @@ class AdminStore:
                 (day_from, day_to),
             ).fetchall()
             key_meta = {
-                int(r["id"]): {"name": r["name"] or "", "prefix": r["prefix"] or "", "role": r["role"] or "index"}
-                for r in self.db.execute("select id, name, prefix, role from api_keys").fetchall()
+                int(r["id"]): {"name": r["name"] or "", "prefix": r["prefix"] or "", "role": r["role"] or "index",
+                               "lastUsedAt": r["last_used_at"]}
+                for r in self.db.execute("select id, name, prefix, role, last_used_at from api_keys").fetchall()
             }
             pending = list(self._pending.items())
+            mem_last_used = dict(self._last_used)  # lookup 后最多 60s 才落库，看板要立即可见
+            latency_rows = self.db.execute(
+                "select bucket, coalesce(sum(requests), 0) as requests from usage_latency"
+                " where day >= ? and day <= ? group by bucket",
+                (day_from, day_to),
+            ).fetchall()
+            latency_pending = list(self._latency.items())
+            prev_to = (start - datetime.timedelta(days=1)).isoformat()
+            prev_from = (start - datetime.timedelta(days=days)).isoformat()
+            prev_row = self.db.execute(
+                "select coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(embed_texts),0) as embed_texts, coalesce(sum(search_calls),0) as search_calls,"
+                " coalesce(sum(rerank_calls),0) as rerank_calls, coalesce(sum(latency_sum),0) as latency_sum"
+                " from usage_daily where day >= ? and day <= ?",
+                (prev_from, prev_to),
+            ).fetchone()
 
         for r in rows:
             day = r["day"]
@@ -496,6 +545,15 @@ class AdminStore:
             ep["errors"] += v[1]
             ep["latencySum"] += v[5]
 
+        # 延迟分桶（已落库 + 未落盘缓冲）
+        latency_counts = {}
+        for r in latency_rows:
+            latency_counts[int(r["bucket"])] = latency_counts.get(int(r["bucket"]), 0) + int(r["requests"])
+        for (day, bucket), count in latency_pending:
+            if day < day_from or day > day_to:
+                continue
+            latency_counts[int(bucket)] = latency_counts.get(int(bucket), 0) + int(count)
+
         def totals_out(acc):
             return {
                 "requests": acc["requests"],
@@ -516,12 +574,13 @@ class AdminStore:
         keys_out = []
         for key_id, acc in sorted(by_key.items(), key=lambda item: (-item[1]["requests"], item[0])):
             if key_id == LEGACY_KEY_ID:
-                meta = {"name": LEGACY_KEY_NAME, "prefix": "", "role": "legacy"}
+                meta = {"name": LEGACY_KEY_NAME, "prefix": "", "role": "legacy", "lastUsedAt": None}
             elif key_id in key_meta:
                 meta = key_meta[key_id]
             else:
                 # key 已删除，但历史统计还在保留期内 —— 给个不误导的名字
-                meta = {"name": f"key#{key_id}", "prefix": "", "role": "deleted"}
+                meta = {"name": f"key#{key_id}", "prefix": "", "role": "deleted", "lastUsedAt": None}
+            last_used = max(float(meta.get("lastUsedAt") or 0.0), float(mem_last_used.get(key_id) or 0.0))
             keys_out.append(
                 {
                     "keyId": key_id,
@@ -533,6 +592,9 @@ class AdminStore:
                     "embedTexts": acc["embedTexts"],
                     "searchCalls": acc["searchCalls"],
                     "rerankCalls": acc["rerankCalls"],
+                    "latencyAvg": _avg(acc["latencySum"], acc["requests"]),
+                    "latencyMax": round(acc["latencyMax"], 6),
+                    "lastUsedAt": last_used or None,
                 }
             )
 
@@ -546,14 +608,55 @@ class AdminStore:
             for endpoint, acc in sorted(by_endpoint.items(), key=lambda item: (-item[1]["requests"], item[0]))
         ]
 
+        # 延迟分位（桶上界近似）：P50/P95 只是"≤X ms"，用于判断大体水位，不做精确分位
+        lat_total = sum(latency_counts.values())
+        buckets_out = []
+        cumulative = 0
+        p50 = p50_ms = p95 = p95_ms = None
+        for i in range(len(LATENCY_EDGES) + 1):
+            count = latency_counts.get(i, 0)
+            if i < len(LATENCY_EDGES):
+                le = LATENCY_EDGES[i]
+                label = "≤%d ms" % le
+                upper = le
+            else:
+                le = None
+                label = ">%d ms" % LATENCY_EDGES[-1]
+                upper = LATENCY_EDGES[-1]
+            buckets_out.append({"le": le, "label": label, "count": count})
+            cumulative += count
+            if lat_total and p50 is None and cumulative >= lat_total * 0.5:
+                p50, p50_ms = label, upper
+            if lat_total and p95 is None and cumulative >= lat_total * 0.95:
+                p95, p95_ms = label, upper
+        latency_out = {
+            "count": lat_total,
+            "buckets": buckets_out,
+            "p50": p50,
+            "p95": p95,
+            "p50Ms": p50_ms,
+            "p95Ms": p95_ms,
+        }
+        prev_totals = {
+            "requests": int(prev_row["requests"]),
+            "errors": int(prev_row["errors"]),
+            "embedTexts": int(prev_row["embed_texts"]),
+            "searchCalls": int(prev_row["search_calls"]),
+            "rerankCalls": int(prev_row["rerank_calls"]),
+            "latencyAvg": _avg(prev_row["latency_sum"], prev_row["requests"]),
+            "latencyMax": 0.0,
+        }
+
         return {
             "days": days,
             "from": day_from,
             "to": day_to,
             "totals": totals_out(totals),
+            "prevTotals": prev_totals,
             "byDay": days_out,
             "byKey": keys_out,
             "byEndpoint": endpoints_out,
+            "latency": latency_out,
         }
 
     # ---------------------------------------------------------------- settings
