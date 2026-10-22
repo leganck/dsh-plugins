@@ -347,20 +347,18 @@ window.__ModuleLoader__.load({
 			ctx.effect(
 				() =>
 					ctx.configForms.whileServed(["code-index"], () =>
-						ctx.slots.inject("plugins.item", () =>
-							ctx.slots.register(
-								{
-									name: "plugins.item",
-									id: "code-index",
-									order: 40,
-									label: () => t("title"),
-									locale: NS,
-									inject: () => ({ configForm: ctx.configForms.get("code-index") }),
-								},
-								CodeIndexCard,
-							),
+					ctx.slots.inject("plugins.bundle.config", () =>
+						ctx.slots.register(
+							{
+								name: "plugins.bundle.config",
+								key: "@local/dsh-code-index",
+								locale: NS,
+								inject: () => ({ configForm: ctx.configForms.get("code-index"), t }),
+							},
+							CodeIndexCard,
 						),
 					),
+				),
 				"dsh-code-index: settings page",
 			);
 		}
