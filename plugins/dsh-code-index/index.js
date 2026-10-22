@@ -30,7 +30,7 @@ import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch } from './lib/repo.js'
-import { canonicalNamespace, normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
+import { normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
 import { RepoRegistry } from './lib/repo-registry.js'
 import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
@@ -968,13 +968,7 @@ let reconcileTimer = null
   }
   /**
    * 命名空间优先级（档 3 §6）：
-   *   `remote.namespace`（显式覆盖，最高）
-   *   > `remote.scope` 按规范推导（lib/scope.js 的 canonicalNamespace）
-   *   > 旧默认 `<repoId>@<chunkFp>`（0.10.x 行为，向后兼容：不配新键就一切照旧）
-   *
-   * 单独拆出 `resolveNamespace(repoRoot, chunkFp)`：**切块指纹只有在建库扫描之后才知道**
-   * （它是切块配置 + 本仓库实际可用语法的哈希），所以建库路径必须把「按 fp 算」的回调传进去，
-   * 不能提前用 default 算一个值 —— 否则首次建库会写进 `repo@default#...`，下次又换一个空间。
+   * namespace 由服务端计算；客户端只缓存 sync 响应，不再维护 canonical 算法。
    */
   /** `remote.scope: "auto"`：按当前 git 分支推导；无 git 时返回 null（退回 legacy 命名空间） */
   const autoScopeFor = (repoRoot) => {
@@ -986,15 +980,14 @@ let reconcileTimer = null
   }
   const effectiveScopeFor = (repoRoot) =>
     config.remote.scope === 'auto' ? autoScopeFor(repoRoot) : config.remote.scope
-  const resolveNamespace = (repoRoot, chunkFp) => {
-    if (config.remote.namespace) return config.remote.namespace
-    const repoId = repoIdOf(repoRoot, config.remote.repoId)
-    const scope = effectiveScopeFor(repoRoot) || { kind: 'main', ref: 'default' }
-    return canonicalNamespace(repoId, chunkFp, scope.kind, scope.ref)
-  }
-  const namespaceFor = (repoRoot, store) => resolveNamespace(repoRoot, store.getMeta('chunk_fingerprint') ?? 'default')
+  // namespace 的唯一权威是服务端：本地只缓存 sync 响应里的 remote_namespace。
+  // 显式 remote.namespace 是逃生口；不再在客户端拼 canonical 字符串。
+  const namespaceFor = (repoRoot, store) => config.remote.namespace ?? store.getMeta('remote_namespace') ?? null
   /** 一次检索要读的全部作用域：写作用域在前 + readScopes，去重保序 */
-  const namespacesFor = (writeNamespace) => [...new Set([writeNamespace, ...config.remote.readScopes])]
+  const namespacesFor = (writeNamespace) => [...new Set([
+    ...(writeNamespace ? [writeNamespace] : []),
+    ...config.remote.readScopes,
+  ])]
   /**
    * 当前仓库的作用域信息（写作用域 / 要读的列表 / 来源 / TTL）。
    * 工具输出的 structuredContent 与文本行都从它派生，避免两处口径漂移。
@@ -1020,11 +1013,14 @@ let reconcileTimer = null
   const renderScopeLine = (info) => {
     if (!info.scope && !info.readScopes.length && info.source !== 'namespace') return null
     const ttl = info.scope?.ttlDays ? `，TTL ${info.scope.ttlDays} 天` : ''
-    const write = info.scope
-      ? `写作用域 ${describeScope(info.scope)}（${info.namespace}${ttl}）`
-      : `写作用域 ${info.namespace}`
+    const write = info.namespace
+      ? (info.scope
+        ? `写作用域 ${describeScope(info.scope)}（${info.namespace}${ttl}）`
+        : `写作用域 ${info.namespace}`)
+      : (info.scope ? `写作用域 ${describeScope(info.scope)}（待服务端计算 namespace）` : null)
+    if (!write && !info.readScopes.length) return null
     return info.readScopes.length
-      ? `作用域：${write}；只读 ${info.readScopes.length} 个：${info.readScopes.join(', ')}`
+      ? `作用域：${write || '写作用域待服务端计算'}；只读 ${info.readScopes.length} 个：${info.readScopes.join(', ')}`
       : `作用域：${write}`
   }
 
@@ -1149,11 +1145,9 @@ let reconcileTimer = null
                 repoId: repoIdOf(repoRoot, config.remote.repoId),
                 url: gitOriginUrl(repoRoot),
                 lineage: config.remote.lineage,
-                // 档 3：写作用域由**本轮确定的切块指纹**推导（namespace 优先级见 resolveNamespace）；
-                // 传回调而不是现成字符串，避免首次建库时用 default 指纹算错空间。
-                namespaceFor: (chunkFp) => resolveNamespace(repoRoot, chunkFp),
-                // 显式 namespace 优先于 scope：两者同时给时**不发 scope**，否则服务端会按 scope
-                // 重新推导 canonical 命名空间，把用户的显式覆盖顶掉（契约 §6 的优先级）。
+                // 服务端是 canonical namespace 的唯一实现：客户端不再传本地推导的 namespace。
+                // 只有显式 remote.namespace 才作为输入；否则传 repoId/chunkFp/scope，由服务端计算。
+                namespace: config.remote.namespace ?? null,
                 scope: config.remote.namespace ? null : effectiveScopeFor(repoRoot),
                 rateLimit: config.remote.rateLimit,
                 reuse: config.remote.reuse,
@@ -1605,7 +1599,7 @@ let reconcileTimer = null
           remoteMode
             ? s.chunks === 0
               ? `  向量位置：远端 ${config.remote.url}（本机只保留 BM25；命名空间在建库后由切块指纹确定）`
-              : `  向量位置：远端 ${config.remote.url}（命名空间 ${scopeInfo.namespace}；本机只保留 BM25）`
+              : `  向量位置：远端 ${config.remote.url}（命名空间 ${scopeInfo.namespace || '待服务端 sync 返回'}；本机只保留 BM25）`
             : `  模式：纯关键词（本地 FTS5；vectors=${config.vectorsMode}${config.vectorsMode === 'auto' ? ' → 未配 remote.url' : ''}）`,
           // 作用域说明：scope 配置了 TTL 就展示；本机还没建库时命名空间还没定（chunkFp=default）
           scopeLine && s.chunks > 0 ? scopeLine : null,
@@ -1623,7 +1617,9 @@ let reconcileTimer = null
           // 但**本机还没建库时命名空间是 `@default`（没有 chunkFp）**，去问服务端必然 404 ——
           // 那不是"远端坏了"，而是"还没开始"。直接给出下一步，别报错吓人。
           if (s.chunks === 0) {
-            lines.push('  远端索引：本机尚未建库（先跑 code_index，命名空间由切块配置的指纹决定）')
+            lines.push('  远端索引：本机尚未建库（先跑 code_index，命名空间由服务端 sync 计算）')
+          } else if (!scopeInfo.namespace) {
+            lines.push('  远端索引：尚未同步到远端（先跑 code_index，服务端会返回 canonical namespace）')
           } else if (!remoteGateOpen()) {
             lines.push(`  ${remoteCooldownNote()}`)
           } else try {

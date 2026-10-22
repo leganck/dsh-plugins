@@ -90,9 +90,9 @@ POST /v1/admin/sweep
 
 ### 4.2 扩展
 
-- `POST /v1/repos/{ns}/sync`：可选 `scope:{kind, ref, commit?, ttlDays?}`。新建 `repos` 行时 `register_scope`；已存在则只更新 `commit_sha`、`updated_at`，**不覆盖** `pinned/expires_at`（除非 `ttlDays` 显式给出）。创建新行前查 `count_scopes()`，超过 `MAX_SCOPES`（默认 200）返回 `507 {error:'scope-cap', count, limit}`。
+- `POST /v1/namespaces/sync`：可选 `scope:{kind, ref, commit?, ttlDays?}`。新建 `repos` 行时 `register_scope`；已存在则只更新 `commit_sha`、`updated_at`，**不覆盖** `pinned/expires_at`（除非 `ttlDays` 显式给出）。创建新行前查 `count_scopes()`，超过 `MAX_SCOPES`（默认 200）返回 `507 {error:'scope-cap', count, limit}`。
 - `POST /v1/search`：新增可选 `namespaces:[{namespace, weight?}]`；保留 `namespace` 字符串（等价于单元素）。`len(namespaces) > MAX_SEARCH_SCOPES`（默认 4）→ `400 {error:'too-many-namespaces'}`。
-- `GET /v1/repos/{ns}/status`：响应增加 `scope:{kind, ref, commit, createdAt, expiresAt, pinned}`。
+- `GET /v1/namespaces/{ns}/status`：响应增加 `scope:{kind, ref, commit, createdAt, expiresAt, pinned}`。
 - `GET /health`：`spaces[]` 每项加 scope 字段；顶层加 `scopes:{total, byKind:{...}}`。
 
 ### 4.3 多作用域检索语义

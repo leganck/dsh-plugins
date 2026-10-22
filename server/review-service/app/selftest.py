@@ -585,22 +585,22 @@ class FakeIndexServer:
                             "byScope": [{"namespace": outer.hits[0].get("namespace"), "hits": len(outer.hits)}],
                         },
                     )
-                if path.startswith("/v1/repos/"):
+                if path == "/v1/namespaces/sync":
+                    namespace = outer.sync_namespace or payload.get("namespace") or outer.namespace_for(payload) or "r7@fp#main:default"
+                    return self._send(
+                        200,
+                        {
+                            "revision": 1,
+                            "unchanged": False,
+                            "missing": [],
+                            "chunks": 0,
+                            "vectors": 0,
+                            "namespace": namespace,
+                        },
+                    )
+                if path.startswith("/v1/namespaces/"):
                     parts = path.strip("/").split("/")
                     action = parts[-1]
-                    if action == "sync":
-                        namespace = urllib.parse.unquote(parts[2]) if len(parts) >= 3 else ""
-                        return self._send(
-                            200,
-                            {
-                                "revision": 1,
-                                "unchanged": False,
-                                "missing": [],
-                                "chunks": 0,
-                                "vectors": 0,
-                                "namespace": outer.sync_namespace or namespace,
-                            },
-                        )
                     if action == "chunks":
                         return self._send(200, {"accepted": 0})
                     if action == "embed":
@@ -751,14 +751,14 @@ def test_scope_sync() -> None:
             scope={"kind": "branch", "ref": "main"},
         )
         call = srv.last_call("/sync")
-        check("sync payload 带 scope:{kind,ref}", call is not None and call[2].get("scope") == {"kind": "branch", "ref": "main"}, str(call and call[2].get("scope")))
-        check("sync 路径使用服务端 resolve 的 namespace", urllib.parse.unquote(call[1].split("/")[3]) == "r7@fp#branch:local-abc", call[1])
-        check("sync 以响应 namespace 为准（覆盖请求路径）", res.namespace == "r7@fp#branch:server-side-xyz", res.namespace)
+        check("显式 namespace 随 sync body 发送", call is not None and call[2].get("namespace") == "r7@fp#branch:local-abc", str(call and call[2].get("namespace")))
+        check("显式 namespace 时仍携带 scope 元数据（TTL 等）", call is not None and call[2].get("scope") == {"kind": "branch", "ref": "main"}, str(call and call[2].get("scope")))
+        check("sync 以响应 namespace 为准", res.namespace == "r7@fp#branch:server-side-xyz", res.namespace)
 
         srv.sync_namespace = ""
         legacy = sync.sync_worktree(wt, repo_id="r7", chunk_fp="fp")
         legacy_call = srv.last_call("/sync")
-        check("repo 模式 payload 不带 scope（旧服务端零感知）", "scope" not in legacy_call[2] and legacy.namespace == "r7@fp", str(legacy_call[2].keys()))
+        check("无显式 namespace 时发 main:default 给服务端计算", legacy_call[2].get("scope", {}).get("kind") == "main" and legacy.namespace == "r7@fp#main:default", str((legacy_call[2].get("scope"), legacy.namespace)))
 
         # 多作用域检索：请求体 / 新字段 / 单值兼容 / 旧服务端回退
         cli = IndexClient(srv.url, timeout=5)
@@ -830,7 +830,7 @@ def test_scope_sync() -> None:
             got = worker._maybe_sync_index("7", "release/1.0", wt_base, {}, notes, plan=plan, head_worktree=wt_head, iid=123)
             check("worker 返回 base+head 两个作用域 namespace", got == ["ns-base", "ns-head"], str(got))
             resolve_calls = srv2.calls_matching("/v1/scopes/resolve")
-            check("worker 用服务端 resolve 的 namespace 做 sync 路径", [urllib.parse.unquote(c[1].split("/")[3]) for c in srv2.calls_matching("/sync")] == ["ns-base", "ns-head"], str([c[1] for c in srv2.calls_matching("/sync")]))
+            check("worker 用服务端 resolve 的 namespace 做 sync body", [c[2].get("namespace") for c in srv2.calls_matching("/sync")] == ["ns-base", "ns-head"], str([c[2].get("namespace") for c in srv2.calls_matching("/sync")]))
             sync_payloads = [c[2] for c in srv2.calls_matching("/sync")]
             check("base sync 带 branch scope", sync_payloads[0].get("scope") == {"kind": "branch", "ref": "release/1.0"}, str(sync_payloads[0].get("scope")))
             check("head sync 带 pr scope + ttlDays", sync_payloads[1].get("scope") == {"kind": "pr", "ref": "123", "ttlDays": 7}, str(sync_payloads[1].get("scope")))

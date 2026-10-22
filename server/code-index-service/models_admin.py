@@ -20,6 +20,7 @@
 `embedder.DEFAULT_PROFILE`（即环境变量那套默认值）。
 """
 import hashlib
+import json
 import os
 import threading
 
@@ -242,6 +243,27 @@ def _size_bytes(directory, model_file):
     return int(total)
 
 
+def model_dim(directory):
+    """从 config.json / profile 推断向量维度；不加载 ONNX。"""
+    prof = profile_for_dir(directory)
+    if prof.get("dim"):
+        try:
+            return int(prof["dim"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        with open(os.path.join(directory, "config.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+        hidden = raw.get("hidden_size")
+        if hidden is None:
+            hidden = (raw.get("text_config") or {}).get("hidden_size")
+        if hidden is not None:
+            return int(hidden)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return None
+
+
 def _validated_item(directory, roots, model_files, extra_files):
     real = _check_dir(directory, roots)
     model_file, missing = _missing_files(real, model_files, extra_files)
@@ -258,6 +280,7 @@ def _validated_item(directory, roots, model_files, extra_files):
         "model_bytes": info["model_bytes"],
         "size_bytes": _size_bytes(real, info["model_file"]),
         "profile": profile_for_dir(real),
+        "dim": model_dim(real),
     }
 
 

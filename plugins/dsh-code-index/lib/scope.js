@@ -32,15 +32,6 @@ export const SCOPE_KINDS = ['main', 'branch', 'pr', 'worktree']
 /** 用户可写的作用域配置键 */
 export const SCOPE_CONFIG_KEYS = ['kind', 'ref', 'ttlDays']
 
-/** repoId / chunkFp 允许的字符集（与服务端 `^[A-Za-z0-9._-]+$` 一致） */
-const ID_RE = /^[A-Za-z0-9._-]+$/
-
-/**
- * kind → 命名空间里的那一段。只有 worktree 缩写：`#wt:`（夹具要求，见文件头）。
- * 其余 kind 直接同名，避免两套词表带来第三种叫法。
- */
-const NS_KIND = { main: 'main', branch: 'branch', pr: 'pr', worktree: 'wt' }
-
 /** ref 里的合法字符（其余连续字符压成 "-"） */
 const REF_SAFE_RE = /[^A-Za-z0-9._-]+/g
 
@@ -123,37 +114,6 @@ export function refToken(kind, ref) {
   if (kind === 'branch') return `${safeRef(text)}-${sha1Hex(text).slice(0, 6)}`
   if (kind === 'worktree') return sha1Hex(text).slice(0, 8)
   return String(Number(text))
-}
-
-/**
- * 规范命名空间：`<repoId>@<chunkFp>#<nsKind>:<refToken>`（worktree 的 nsKind 是 `wt`）。
- *
- * repoId / chunkFp 只允许 `[A-Za-z0-9._-]`：它们会原样出现在 URL 路径与 SQL 键里，
- * 放开字符集等于把转义/注入的坑留给每一层调用方。
- * @param {string} repoId 血统 id（见 lib/repo.js）
- * @param {string} chunkFp 切块指纹（store.meta.chunk_fingerprint；未建库时为 "default"）
- * @param {string} kind main|branch|pr|worktree
- * @param {unknown} ref 分支名 / PR 号 / 工作树标识（main 忽略）
- * @returns {string}
- */
-export function canonicalNamespace(repoId, chunkFp, kind, ref) {
-  const repo = String(repoId ?? '')
-  if (!ID_RE.test(repo)) {
-    throw new ScopeError(`repoId 非法（只允许字母/数字/._-）：${JSON.stringify(repo)}`, {
-      reason: 'invalid-repo-id',
-      kind,
-      ref,
-    })
-  }
-  const fp = String(chunkFp ?? '')
-  if (!ID_RE.test(fp)) {
-    throw new ScopeError(`chunkFp 非法（只允许字母/数字/._-）：${JSON.stringify(fp)}`, {
-      reason: 'invalid-chunk-fp',
-      kind,
-      ref,
-    })
-  }
-  return `${repo}@${fp}#${NS_KIND[kind]}:${refToken(kind, ref)}`
 }
 
 /** legacy 命名空间 = 不含 `#` 的旧格式（`repo@fp`），原样保留、不做规范化 */

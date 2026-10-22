@@ -97,23 +97,10 @@ const store = Store.open(dbPath)
 // 夹具是 JS 与 Python 两端共同的唯一真相（server/code-index-service/scope_format.json）。
 console.log('[0] 作用域规范')
 {
-  const { canonicalNamespace, normalizeNamespace, safeRef, refToken, validateScope } = await import('./lib/scope.js')
+  const { normalizeNamespace, safeRef, refToken, validateScope } = await import('./lib/scope.js')
   const fixture = JSON.parse(fs.readFileSync(new URL('../../server/code-index-service/scope_format.json', import.meta.url), 'utf8'))
-  for (const c of fixture.cases) {
-    const got = canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref)
-    check(`夹具 ${c.kind} ${JSON.stringify(c.ref)} → ${c.expect}`, got === c.expect, `实际 ${got}`)
-  }
   for (const c of fixture.legacy_cases) {
     check('legacy 命名空间原样保留（不重新规范化）', normalizeNamespace(c.namespace) === c.expect)
-  }
-  for (const c of fixture.invalid_cases) {
-    let err = null
-    try {
-      canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref)
-    } catch (e) {
-      err = e
-    }
-    check(`非法输入按 reason 拒绝：${c.reason}`, err?.reason === c.reason, String(err?.reason ?? err))
   }
   check('safeRef 把非法字符压成 -、空结果用 x', safeRef('feat/x') === 'feat-x' && safeRef('中文分支') === 'x')
   check('main 的 ref 被忽略（固定 default）', refToken('main', 'dev') === 'default')
@@ -471,9 +458,10 @@ console.log('\n[11a] 远端作用域同步（syncRemote）')
   const scStore = Store.open(path.join(tmpSc, 'index.db'))
   const mkClient = (resp = {}) => ({
     calls: [],
-    async sync(ns, payload) {
-      this.calls.push({ ns, payload })
-      return { revision: 7, chunks: 1, missing: [], unchanged: false, coverage: 1, ...resp }
+    async sync(payload) {
+      this.calls.push({ payload })
+      const ns = payload.namespace || `r1@fp-test#${payload.scope?.kind || 'main'}:${payload.scope?.ref === 'feat/x' ? 'feat-x-d6e256' : 'default'}`
+      return { revision: 7, chunks: 1, missing: [], unchanged: false, coverage: 1, namespace: ns, ...resp }
     },
     async uploadChunks() {
       return { accepted: 0 }
@@ -496,13 +484,9 @@ console.log('\n[11a] 远端作用域同步（syncRemote）')
     changedFiles: [],
     removed: [],
   })
-  check('使用传入的写作用域命名空间', client.calls[0]?.ns === 'r1@fp-test#branch:feat-x-d6e256', client.calls[0]?.ns)
-  check(
-    'sync payload 带 scope（kind/ref/ttlDays）',
-    client.calls[0]?.payload?.scope?.kind === 'branch' && client.calls[0]?.payload?.scope?.ttlDays === 14,
-    JSON.stringify(client.calls[0]?.payload?.scope),
-  )
-  check('服务端没回 namespace 时用本地推导值', r.namespace === 'r1@fp-test#branch:feat-x-d6e256', r.namespace)
+  check('不再把本地 namespace 拼进 sync URL，字段随 body 发送', client.calls[0]?.payload?.namespace === 'r1@fp-test#branch:feat-x-d6e256', JSON.stringify(client.calls[0]?.payload))
+  check('显式 namespace 时不带 scope', !('scope' in (client.calls[0]?.payload ?? {})), JSON.stringify(Object.keys(client.calls[0]?.payload ?? {})))
+  check('服务端返回 namespace 时以服务端为准', r.namespace === 'r1@fp-test#branch:feat-x-d6e256', r.namespace)
 
   const client2 = mkClient({ namespace: 'server-side-ns' })
   const r2 = await syncRemote({ store: scStore, client: client2, repoId: 'r1', url: '', tag: null, fingerprint: 'fp-test', namespace: 'local-ns', changedFiles: [], removed: [] })
@@ -510,9 +494,8 @@ console.log('\n[11a] 远端作用域同步（syncRemote）')
 
   const client3 = mkClient()
   const r3 = await syncRemote({ store: scStore, client: client3, repoId: 'r1', url: '', tag: null, fingerprint: 'fp-test', changedFiles: [], removed: [] })
-  check('旧默认命名空间 = repoId@fingerprint', client3.calls[0]?.ns === 'r1@fp-test', client3.calls[0]?.ns)
-  check('无 scope 配置时 payload 不带 scope 字段', !('scope' in (client3.calls[0]?.payload ?? {})), JSON.stringify(Object.keys(client3.calls[0]?.payload ?? {})))
-  check('无 namespace 返回时退回本地推导值', r3.namespace === 'r1@fp-test', r3.namespace)
+  check('无显式 namespace 时只发 repoId/chunkFp/scope，由服务端计算', client3.calls[0]?.payload?.repoId === 'r1' && client3.calls[0]?.payload?.chunkFp === 'fp-test' && client3.calls[0]?.payload?.scope?.kind === 'main', JSON.stringify(client3.calls[0]?.payload))
+  check('服务端返回 namespace 后落库', r3.namespace.startsWith('r1@fp-test#main:default') && scStore.getMeta('remote_namespace') === r3.namespace, r3.namespace)
 }
 
 // ---------- 11b. 语言扩展开装提示（parser hints） ----------

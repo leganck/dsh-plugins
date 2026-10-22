@@ -86,7 +86,7 @@ USER 10001:10001
 # ---------------------------------------------------------------- 应用层
 # 只有这层随业务代码变化：COPY 几个 .py（<1 MB），依赖层全缓存
 FROM deps AS base
-COPY --chown=10001:10001 server.py index_store.py knn.py governor.py embedder.py reranker.py model_downloader.py admin_store.py models_admin.py selftest.py bench_knn_modes.py scope_format.json favicon.svg /app/
+COPY --chown=10001:10001 server.py index_store.py knn.py governor.py embedder.py reranker.py model_downloader.py admin_store.py models_admin.py runtime_metrics.py runtime_preflight.py selftest.py bench_knn_modes.py scope_format.json favicon.svg /app/
 COPY --chown=10001:10001 docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod 0755 /app/docker-entrypoint.sh
 USER 10001:10001

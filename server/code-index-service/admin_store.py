@@ -28,6 +28,7 @@ import base64
 import datetime
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -36,6 +37,28 @@ import time
 
 DAY_FMT = "%Y-%m-%d"
 ROLES = ("index", "admin")
+
+
+def _parse_repo_ids(raw):
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(x).strip() for x in value if str(x).strip()]
+
+
+def _normalize_repo_ids(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [x for x in raw.replace(",", " ").split() if x]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("repoIds 必须是数组或逗号分隔字符串")
+    return [str(x).strip() for x in raw if str(x).strip()]
 LEGACY_KEY_ID = 0
 # id=0：控制台会话/管理请求（以及历史环境变量 API_KEY 的调用）；
 # 环境变量 Key 在 2026-10-22 已从本部署移除，这里保留中性名字避免看板误导。
@@ -75,7 +98,8 @@ create table if not exists api_keys(
   enabled integer not null default 1,
   created_at real not null,
   last_used_at real,
-  note text
+  note text,
+  repo_ids text
 );
 create table if not exists usage_daily(
   key_id integer not null,
@@ -169,6 +193,14 @@ class AdminStore:
         self.db.execute("pragma synchronous = normal")
         self.db.executescript(SCHEMA)
         self.db.commit()
+        # 幂等迁移：旧库没有 repo_ids 列。
+        try:
+            cols = {r["name"] for r in self.db.execute("pragma table_info(api_keys)").fetchall()}
+            if "repo_ids" not in cols:
+                self.db.execute("alter table api_keys add column repo_ids text")
+                self.db.commit()
+        except Exception:
+            pass
         # sha256(key) -> {id,name,role,enabled,key_hash}；lookup 走这里，命中时零 SQL
         self._keys = {}
         # (key_id, day, endpoint) -> [requests, errors, embed_texts, search_calls, rerank_calls,
@@ -177,7 +209,7 @@ class AdminStore:
         # (day, bucket) -> 次数；与 _pending 一起 flush / 失败回滚
         self._latency = {}
         # (day, namespace) -> [requests, errors, search_calls, embed_texts, rerank_calls, latency_sum]
-        # 只对带作用域的请求（/v1/search、/v1/repos/<ns>/*）累加
+        # 只对带作用域的请求（/v1/search、/v1/namespaces/<ns>/*）累加
         self._scope_pending = {}
         self._events = 0
         # key_id -> 最近一次 lookup 时间（内存里立即生效，落库节流）
@@ -196,7 +228,7 @@ class AdminStore:
     def _load_keys(self):
         """启动时把 key 表全量读进内存（key 是"个位数~几十"级别，常驻代价可忽略）。"""
         with self._lock:
-            rows = self.db.execute("select id, name, key_hash, role, enabled from api_keys").fetchall()
+            rows = self.db.execute("select id, name, key_hash, role, enabled, repo_ids from api_keys").fetchall()
             self._keys = {
                 r["key_hash"]: {
                     "id": int(r["id"]),
@@ -204,6 +236,7 @@ class AdminStore:
                     "role": r["role"] or "index",
                     "enabled": bool(r["enabled"]),
                     "key_hash": r["key_hash"],
+                    "repoIds": _parse_repo_ids(r["repo_ids"]),
                 }
                 for r in rows
             }
@@ -227,22 +260,23 @@ class AdminStore:
         with self._lock:
             return int(self.db.execute("select count(*) as n from api_keys").fetchone()["n"])
 
-    def create_key(self, name, role="index", note=""):
+    def create_key(self, name, role="index", note="", repo_ids=None):
         """新建 key；**明文只在本次返回值里出现**，库里只留 sha256。"""
         role = str(role or "index")
         if role not in ROLES:
             raise ValueError(f"role 只能是 {'|'.join(ROLES)}：{role!r}")
         name = str(name or "").strip()
         note = str(note or "")
+        repo_ids = _normalize_repo_ids(repo_ids)
         now = time.time()
         token = secrets.token_urlsafe(32)  # 32B 随机 → 43 字符，不可猜
         key_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         prefix = token[:6]
         with self._lock:
             cur = self.db.execute(
-                "insert into api_keys(name, key_hash, prefix, role, enabled, created_at, last_used_at, note)"
-                " values (?,?,?,?,1,?,null,?)",
-                (name, key_hash, prefix, role, now, note),
+                "insert into api_keys(name, key_hash, prefix, role, enabled, created_at, last_used_at, note, repo_ids)"
+                " values (?,?,?,?,1,?,null,?,?)",
+                (name, key_hash, prefix, role, now, note, json.dumps(repo_ids) if repo_ids else None),
             )
             self.db.commit()
             key_id = int(cur.lastrowid)
@@ -252,8 +286,10 @@ class AdminStore:
                 "role": role,
                 "enabled": True,
                 "key_hash": key_hash,
+                "repoIds": repo_ids,
             }
-        return {"id": key_id, "key": token, "prefix": prefix, "name": name, "role": role, "createdAt": now}
+        return {"id": key_id, "key": token, "prefix": prefix, "name": name, "role": role,
+                "repoIds": repo_ids, "createdAt": now}
 
     def list_keys(self):
         """列表：绝不返回明文或哈希；today 是"今天"的请求/错误数（含尚未落库的缓冲）。"""
@@ -315,7 +351,7 @@ class AdminStore:
                 return None
             # last_used_at 只改内存（列表立刻能看到），落库交给 flush（最多 60s 一次）
             self._last_used[hit["id"]] = now
-            return {"id": hit["id"], "name": hit["name"], "role": hit["role"], "enabled": hit["enabled"]}
+            return {"id": hit["id"], "name": hit["name"], "role": hit["role"], "enabled": hit["enabled"], "repoIds": hit.get("repoIds") or []}
 
     # ---------------------------------------------------------------- 内部：展示用行
     def _public_key(self, row, today_counts):
@@ -331,6 +367,7 @@ class AdminStore:
             "name": row["name"] or "",
             "prefix": row["prefix"] or "",
             "role": row["role"] or "index",
+            "repoIds": _parse_repo_ids(row["repo_ids"]),
             "enabled": bool(row["enabled"]),
             "createdAt": float(row["created_at"]),
             "lastUsedAt": db_last,
