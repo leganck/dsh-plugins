@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.11.5",
+  "version": "0.11.6",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional remote vectors/index/rerank (no local models). Exposes code_index / code_search / code_map / code_index_status / code_index_deps. 0.10.0: remote-only config surface. 0.11.5: DSH settings page (dsh.client); 0.11.0: snapshot scopes (main/branch/pr/worktree) + multi-scope search with legacy-server fallback.",
