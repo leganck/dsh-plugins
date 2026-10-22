@@ -883,8 +883,7 @@ function renderSystem(sys) {
     pill.className = 'runtime-pill' + (rt.device === 'cuda' ? '' : ' offline');
     pill.innerHTML = '<span class="dot"></span>' + (rt.device === 'cuda' ? 'CUDA' : 'CPU')
       + (rt.gpuName ? ' · ' + escapeHtml(rt.gpuName) : '')
-      + (rt.vramFreeBytes ? ' · 显存 ' + fmtBytes(rt.vramFreeBytes) + ' 可用' : '')
-      + ' · ' + (rt.activeProviders || []).map(escapeHtml).join(', ');
+      + (rt.vramFreeBytes ? ' · 显存 ' + fmtBytes(rt.vramFreeBytes) + ' 可用' : '');
   }
 }
 async function loadRuntime() {
@@ -1152,7 +1151,9 @@ function renderDownloads() {
     const barCls = failed ? 'bad' : (downloading ? 'warn' : (ready ? 'ok' : ''));
     const size = downloading
       ? (fmtBytes(m.bytesDone || 0) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?'))
-      : (ready ? fmtBytes(m.diskBytes || m.bytesTotal || 0) : (m.bytesTotal ? fmtBytes(m.bytesTotal) : '—'));
+      : (ready ? fmtBytes(m.diskBytes || m.bytesTotal || 0)
+        : (blocked && elsewhere && elsewhere.size_bytes ? fmtBytes(elsewhere.size_bytes)
+          : (m.bytesTotal ? fmtBytes(m.bytesTotal) : '—')));
     const speed = downloading && m.speedBps ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
     const actions = [];
     if (downloading) {
@@ -1888,7 +1889,19 @@ def _annotate_download_models(out, installed):
             except Exception:
                 hit = None
         if hit is None:
+            # 目标还没下载时也算不出 tag；按目录名 / 目录声明的 MODEL_NAME 找已安装同款，
+            # 避免把镜像内置的模型又下载一份（UI 会显示「使用已有」）。
             hit = by_base.get(os.path.basename(target.rstrip("/\\")))
+        if hit is None:
+            want_name = str((m.get("enable") or {}).get("MODEL_NAME") or "").strip()
+            if want_name:
+                for items in (installed or {}).values():
+                    for it in items:
+                        if str(it.get("name") or "") == want_name:
+                            hit = it
+                            break
+                    if hit is not None:
+                        break
         if hit is None:
             continue
         try:
@@ -1897,7 +1910,8 @@ def _annotate_download_models(out, installed):
         except Exception:
             continue
         m["installedElsewhere"] = {"dir": hit.get("dir"), "tag": hit.get("tag"),
-                                   "active": bool(hit.get("active"))}
+                                   "active": bool(hit.get("active")),
+                                   "size_bytes": hit.get("size_bytes") or hit.get("model_bytes")}
 
 
 def models_payload():
