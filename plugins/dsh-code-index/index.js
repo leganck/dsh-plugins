@@ -1234,6 +1234,27 @@ let reconcileTimer = null
 
   function hydrateWatchers() {
     if (!config.sync.watch) return
+    // 升级前已经建好的库不在 registry 里：从 indexDirBase 反向发现，避免必须重跑一次 code_index。
+    try {
+      const base = expandPath(config.indexDirBase)
+      if (base && fs.existsSync(base)) {
+        for (const name of fs.readdirSync(base)) {
+          const dbPath = path.join(base, name, 'index.db')
+          if (!fs.existsSync(dbPath)) continue
+          try {
+            const store = Store.open(dbPath)
+            const root = store.getMeta('repo_root')
+            if (root && fs.existsSync(root)) {
+              repoRegistry.upsert(root, { dbPath, lastIndexedAt: Number(store.getMeta('last_build_at')) || Date.now() })
+            }
+          } catch {
+            /* 单个库损坏不影响其它仓库 */
+          }
+        }
+      }
+    } catch (e) {
+      ctx.logger?.warn?.(`dsh-code-index: 发现已有索引失败：${e?.message ?? e}`)
+    }
     for (const item of repoRegistry.prune()) {
       if (item.watch === false) continue
       try {
