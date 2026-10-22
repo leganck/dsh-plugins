@@ -16,7 +16,7 @@
 
 ## 规划
 
-- [code-index 与 Cursor 对齐计划](docs/code-index-cursor-alignment-plan.md)（已实施 P0–P3，发布验证中）
+- [code-index 与 Cursor 对齐计划](docs/code-index-cursor-alignment-plan.md)（已实施并发布 0.12.2）
 
 ## 为什么这些放一起
 
