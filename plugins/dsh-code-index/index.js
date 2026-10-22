@@ -1165,6 +1165,7 @@ function applyInner(ctx, rawConfig = {}) {
           return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。索引位于 ${dbPath}`)
         }
         const tier = RERANK_TIERS[config.rerank]
+        const searchMode = args.mode ?? 'auto'
         // 「当前文件锚定」（对应 Cursor 请求里的 CurrentFileInfo）：
         // 片段参与查询向量 + 默认排除自身 + 同目录加权。cf 为 null 时三个参数都不生效。
         const cf = resolveCurrentFile(repoRoot, args.current_file)
@@ -1180,14 +1181,18 @@ function applyInner(ctx, rawConfig = {}) {
           // 一次检索多个作用域：写作用域 + readScopes（去重保序）。单作用域时 remote.js
           // 仍发旧协议 `{namespace}`，旧服务端零回归。
           const namespaces = scopeInfo.namespaces
-          const remoteRerank = tier && config.rerankBackend === 'remote' ? tier.candidates : 0
+          // mode=fts 时明确不走向量：不请求远端、也不做远端重排。
+          const skipRemote = searchMode === 'fts'
+          const remoteRerank = !skipRemote && tier && config.rerankBackend === 'remote' ? tier.candidates : 0
           let remoteHits = []
           let remoteMeta = null
           let remoteError = null
           let scopeFallback = null
           const t0 = Date.now()
           const queryOpts = { k: 40, rerankCandidates: remoteRerank, embedText }
-          if (!remoteGateOpen()) {
+          if (skipRemote) {
+            // 显式 mode=fts：不调用远端，纯本地 FTS5。
+          } else if (!remoteGateOpen()) {
             // 冷却期内直接跳过：省掉必然超时的等待
             remoteError = remoteCooldownNote()
           } else try {
@@ -1237,14 +1242,25 @@ function applyInner(ctx, rawConfig = {}) {
           const localReranker = tier && config.rerankBackend === 'local' ? await getReranker() : null
           r = await searchFusedRemote(store, args.query, {
             topK: args.top_k ?? DEFAULT_TOP_K,
+            mode: searchMode,
             remoteHits,
             remoteMeta,
             reranker: localReranker,
-            rerankCandidates: tier?.candidates ?? 0,
+            rerankCandidates: skipRemote ? 0 : (tier?.candidates ?? 0),
             excludePaths,
             boostPrefix,
           })
-          if (remoteError) r.note = [r.note, `远端不可用，已退化为纯关键词：${remoteError}`].filter(Boolean).join('；')
+          if (skipRemote) r.note = ['mode=fts：强制关键词，未调用远端向量通道', r.note].filter(Boolean).join('；')
+          if (remoteError) {
+            r.note = [
+              r.note,
+              searchMode === 'vector'
+                ? `mode=vector 强制向量；远端不可用，未退回关键词：${remoteError}`
+                : `远端不可用，已退化为纯关键词：${remoteError}`,
+            ]
+              .filter(Boolean)
+              .join('；')
+          }
           if (scopeFallback) r.note = [r.note, scopeFallback].filter(Boolean).join('；')
           // 命中项带来源（§6）：远端命中按内容哈希映射回本地块，给结果补 scope。
           // 只映射**远端命中**——纯本地 BM25 命中不属于任何远端快照，不硬塞来源。
