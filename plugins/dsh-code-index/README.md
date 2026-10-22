@@ -145,7 +145,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 5. **远端失败有冷却**。连接失败后 60 s 内不再重试（避免每次查询都等满超时），冷却后自动恢复。
 6. **本地零重依赖**。本地不需要 onnxruntime / transformers / 模型文件；`ignore` 是纯 JS 扫描依赖（无构建脚本），parser 组是可选增强（AST 切块，实测展开 60.7 MB）。
 7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录；不配则退回 `<repo>/.dsh-index/`（记得加进 `.gitignore`）。
-8. **roots 白名单**。不在白名单内的路径直接拒绝，**且在创建索引库之前校验**。
+8. **工作空间边界（0.13+）**。允许索引的路径从 DSH workspace / 当前会话 cwd / `.dshworkspace.json` 自动推导，**不再需要 roots 配置**；边界检查在创建索引库之前完成。没有 workspace 信息时只允许 cwd，不会退化为任意路径。
 
 ## 配置
 
@@ -157,19 +157,18 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 - **高级设置**：向量模式 `vectors`、重排模式 `rerank`、本地索引目录 `advanced.indexDirBase`
 
 远端地址 + API Key 是接远端服务的全部必填项：`vectors` 默认 `auto`，有地址就自动走远端。
-`roots` 白名单、限速、超时、`exclude`、`chunking`、`sync` 等仍只通过下面的 YAML 配置；
-设置页保存时不会清空这些未展示字段。
+允许索引的路径自动从 DSH workspace / 会话 cwd / `.dshworkspace.json` 推导；`exclude`、`chunking`、`sync` 等仍只通过下面的 YAML 配置；设置页保存时不会清空这些未展示字段。
 
 索引目录不是远端检索的必填项：留空时每个仓库用自己的 `.dsh-index/index.db`；改它只影响
 本地 SQLite 的位置，远端向量/重排仍走 `remote.url`。**设置页保存后需要重启 DSH 才会应用新配置**；
-如果 `roots` 或索引目录变了，重启后再重新运行一次 `code_index` 重建本地索引。
+如果索引目录变了，重启后再重新运行一次 `code_index` 重建本地索引。
 
 ```yaml
 - id: code-index
   name: "@local/dsh-code-index"          # 插件源 / install_bundle 安装后，模块名 = 包名
   config:
     # —— 用户只需要这几个 ——
-    roots: ["D:/Code"]                    # 安全白名单；空 = 允许任意路径
+    # 允许路径自动从 DSH workspace / 会话 cwd / .dshworkspace.json 推导，不再配置 roots
     remote:
       url: "https://dsh-embed.example.com"   # 向量服务（/embed + /v1 索引 + /rerank）
       apiKey: null                        # 服务端设了 API_KEY 才需要
@@ -207,6 +206,31 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 > **0.11.0（档 3）**：新增可选的 `remote.namespace` / `remote.scope` / `remote.readScopes`，
 > 让 main / 分支 / PR / worktree 各写各的快照（见下节）。**不配这些键时行为与 0.10.x 完全一致**，
 > 命名空间仍是 `<repoId>@<切块指纹>`，旧服务端/旧配置零迁移。
+
+### 多根工作空间（0.13+）
+
+不再配置 `roots`。允许路径按以下来源自动推导：
+
+1. DSH `sandboxPolicy.workspaceRoot`；
+2. 当前会话 cwd；
+3. 从 cwd 向上找到的 `.dshworkspace.json`。
+
+多根声明与 dsh-multiroot 插件共用同一份文件：
+
+```json
+// D:/Projects/.dshworkspace.json
+{
+  "version": 1,
+  "roots": [
+    { "id": "projects", "path": "." },
+    { "id": "oss", "path": "D:/oss" }
+  ],
+  "primary": "projects"
+}
+```
+
+这样 `D:/Projects` 和 `D:/oss` 都能索引，但不需要在 code-index 的 profile 配置里重复路径。
+没有 workspace/多根信息时只允许当前 cwd，不会退化为任意路径。
 
 ### 作用域（0.11.0）：main / 分支 / PR / worktree 各写各的快照
 

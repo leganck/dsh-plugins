@@ -291,7 +291,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   apply(a.ctx, cfgOf({ remote: { url: stub.url, scope: { kind: 'branch', ref: 'feat/x', ttlDays: 14 }, readScopes: ['r-main@fp#main:default'] } }))
   const indexTool = a.registry.get('code_index')
   const searchTool = a.registry.get('code_search')
-  const built = await indexTool.execute({ path: repo }, {})
+  const built = await indexTool.execute({ path: repo }, { cwd: repo })
   const builtText = built.content[0].text
   check('code_index 成功', /索引完成/.test(builtText), builtText.slice(0, 100))
   const sync1 = stub.state.syncCalls.at(-1)
@@ -310,7 +310,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   check('code_index structuredContent 带 scope.namespaces（写 + 读）', built.structuredContent?.scope?.namespaces?.length === 2, JSON.stringify(built.structuredContent?.scope))
 
   // ---- 4b. 旧服务端 400 → 回退单作用域（只重试一次） ----
-  const found = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5 }, {})
+  const found = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5 }, { cwd: repo })
   const foundText = found.content[0].text
   check('旧服务端上检索仍成功（本地 BM25 不受影响）', /命中 \d+ 条/.test(foundText), foundText.slice(0, 120))
   const calls400 = stub.state.searchCalls
@@ -331,7 +331,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   stub.state.hits = [
     { hash: chunkHash, score: 0.9, namespace: 'r-main@fp#main:default', scope: { kind: 'main', ref: 'default' } },
   ]
-  const found2 = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5 }, {})
+  const found2 = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5 }, { cwd: repo })
   const found2Text = found2.content[0].text
   check('新服务端：一次请求发 2 个作用域（写 + 读）', stub.state.searchCalls[0]?.body?.namespaces?.length === 2, JSON.stringify(stub.state.searchCalls[0]?.body?.namespaces))
   check('code_search 头部提示多作用域', /只读 1 个/.test(found2Text) && /作用域：写作用域 branch:feat\/x/.test(found2Text), found2Text.slice(0, 240))
@@ -344,13 +344,13 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
 
   // ---- 4c2. 远端开启时按次选择通道：mode=fts 不请求远端，mode=vector 不混本地关键词 ----
   stub.state.searchCalls.length = 0
-  const ftsOnly = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5, mode: 'fts' }, {})
+  const ftsOnly = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5, mode: 'fts' }, { cwd: repo })
   const ftsOnlyText = ftsOnly.content[0].text
   check('mode=fts 不请求远端（即使 vectors=remote）', stub.state.searchCalls.length === 0, `calls=${stub.state.searchCalls.length}`)
   check('mode=fts 输出通道为 fts，并说明跳过远端', /通道 fts/.test(ftsOnlyText) && /mode=fts/.test(ftsOnlyText), ftsOnlyText.slice(0, 240))
 
   stub.state.searchCalls.length = 0
-  const vectorOnly = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5, mode: 'vector' }, {})
+  const vectorOnly = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5, mode: 'vector' }, { cwd: repo })
   const vectorOnlyText = vectorOnly.content[0].text
   check('mode=vector 请求远端', stub.state.searchCalls.length === 1, `calls=${stub.state.searchCalls.length}`)
   check('mode=vector 输出通道为 vector-remote', /通道 vector-remote/.test(vectorOnlyText), vectorOnlyText.slice(0, 240))
@@ -363,7 +363,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   // ---- 4d. 旧服务端 404 同样回退 ----
   stub.state.mode = 'legacy404'
   stub.state.searchCalls.length = 0
-  const found3 = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5 }, {})
+  const found3 = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5 }, { cwd: repo })
   check(
     '404 回退：同样只重试一次并如实报告',
     /旧服务端不支持多作用域/.test(found3.content[0].text) && stub.state.searchCalls.length === 2,
@@ -374,7 +374,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   stub.state.syncCalls.length = 0
   const b = fakeCtx()
   apply(b.ctx, cfgOf({ remote: { url: stub.url, namespace: 'explicit-ns', scope: { kind: 'branch', ref: 'other' } } }))
-  await b.registry.get('code_index').execute({ path: repo }, {})
+  await b.registry.get('code_index').execute({ path: repo }, { cwd: repo })
   check('remote.namespace 显式覆盖优先于 scope 推导', stub.state.syncCalls.at(-1).namespace === 'explicit-ns', stub.state.syncCalls.at(-1).namespace)
   check(
     '显式 namespace 时不发 scope（否则服务端会按 scope 重新推导、顶掉覆盖）',
@@ -385,7 +385,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   stub.state.syncCalls.length = 0
   const c = fakeCtx()
   apply(c.ctx, cfgOf({ remote: { url: stub.url } }))
-  await c.registry.get('code_index').execute({ path: repo }, {})
+  await c.registry.get('code_index').execute({ path: repo }, { cwd: repo })
   const defaultNs = stub.state.syncCalls.at(-1).namespace
   check('默认（未配 scope）自动落到 #main:default，不再产生 legacy 命名空间',
     /^[0-9a-f]{12}@[0-9a-f]{64}#main:default$/.test(defaultNs), defaultNs)
