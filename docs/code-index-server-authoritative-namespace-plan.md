@@ -1,6 +1,6 @@
-# code-index：服务端权威 namespace + 运行时可观测性（0.14.0）
+# code-index：服务端权威 namespace + 运行时可观测性（0.14.x）
 
-状态：已实现（2026-10-22）。关联破坏性变更：服务端 `server-v0.14.1`、插件 `code-index-v0.14.0`、review-service 同步升级。
+状态：已实现（2026-10-22）。关联破坏性变更：服务端 `server-v0.14.5`、插件 `code-index-v0.14.0`、review-service 同步升级。
 
 ## 1. 为什么改
 
@@ -60,3 +60,12 @@ pnpm --filter @local/dsh-code-index test
 cd server/review-service && python -m app.selftest
 python tests/test_sync.py && python tests/test_report.py
 ```
+
+## 6. 模型控制台 UX（0.14.5）
+
+- **当前模型**：两张卡片分别展示 embed / rerank；模型名、目录、tag（可复制）、模型文件；当前设备/显存用 header 旁的 pill 展示。
+- **已安装模型**：表格按「用途 / 模型 / tag / 目录 / 大小 / 状态 / 操作」排列；当前模型显示「当前使用」，不可重复切换；重排当前项提供「关闭重排」。
+- **下载**：每个模型一张卡，状态为未下载 / 下载中 / 已下载 / 本机已有 / 失败；下载中显示进度条、字节数与速度，提供「取消下载」；失败提供「重试下载」。
+- **切换**：已下载模型直接提供「切换使用」；本机已有同款但目标目录未下载时提供「使用已有」，避免重复占用空间；切换到当前模型不提供按钮。
+- **安全动作**：「重新下载」「仍要下载副本」使用二次确认；切换前复用 `/v1/admin/models/check` 的预检弹窗。
+
