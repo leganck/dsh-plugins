@@ -200,7 +200,7 @@ class ModelDownloader:
             ok = False
             if size > 0:
                 try:
-                    ok = _sha256(path) == sha
+                    ok = _sha256_cached(path) == sha
                 except OSError:
                     ok = False
             out.append({"name": fname, "sha256": sha, "size": size, "ok": ok})
@@ -300,6 +300,23 @@ class ModelDownloader:
 
 class _Cancelled(Exception):
     pass
+
+
+_SHA_CACHE = {}  # path -> ((size, mtime_ns), sha256)
+
+
+def _sha256_cached(path: str) -> str:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    sig = (st.st_size, st.st_mtime_ns)
+    hit = _SHA_CACHE.get(path)
+    if hit and hit[0] == sig:
+        return hit[1]
+    val = _sha256(path)
+    _SHA_CACHE[path] = (sig, val)
+    return val
 
 
 def _sha256(path: str) -> str:

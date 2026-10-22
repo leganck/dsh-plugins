@@ -130,6 +130,18 @@ def req_auth(path, auth=None, method="GET", body=None, headers=None):
         return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
 
 
+def req_form(path, fields):
+    """application/x-www-form-urlencoded 请求（模拟浏览器原生表单提交，页面 JS 没跑起来时）。"""
+    data = urllib.parse.urlencode(fields).encode()
+    r = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=data, method="POST")
+    r.add_header("content-type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
+
+
 def sync(ns, payload, gz=False):
     return req("POST", f"/v1/repos/{ns}/sync", payload, gz=gz)
 
@@ -790,6 +802,11 @@ def main():
         check("登出 → 200（清 Cookie）", st == 200, st)
         st, _, page = req_auth("/admin")
         check("登出后 /admin 回到登录页", st == 200 and "请输入管理员账号" in page, st)
+        # 浏览器原生表单兜底（JS 没跑起来时，_body 必须能解析 urlencoded，而不是 500）
+        st, hdrs, _ = req_form("/admin/login", {"username": "admin", "password": "admin-pw"})
+        cookie_h = {k.lower(): v for k, v in hdrs.items()}
+        check("表单兜底登录 → 200 + 会话 Cookie",
+              st == 200 and "dsh_admin=" in (cookie_h.get("set-cookie") or ""), st)
     finally:
         server.ADMIN_PASSWORD = old_admin_pw
 
