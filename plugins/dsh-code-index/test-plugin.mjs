@@ -129,6 +129,10 @@ check('补丁的 name 用包名（而非 file:// 路径）', patchText.includes(
 
 check('exports 暴露 package.json 与 locale', Boolean(pkg.exports?.['./package.json'] && pkg.exports?.['./locale/*.json']))
 check('files 白名单含 cordis.patch.yml 与 locale', (pkg.files ?? []).includes('cordis.patch.yml') && (pkg.files ?? []).includes('locale/*.json'))
+check('dsh.client 声明 web 客户端与 ./client 导出', pkg.dsh?.client?.platform === 'web' && Boolean(pkg.exports?.['./client']), JSON.stringify(pkg.dsh?.client))
+const clientText = fs.readFileSync(path.join(pkgDir, 'lib/client.js'), 'utf8')
+check('client factory id 等于包名', clientText.includes(`id: "${pkg.name}"`), String(pkg.name))
+check('client 不 require DSH 私有 UI 包', !clientText.includes('dsh-client-ui-primitives'))
 
 const zh = JSON.parse(fs.readFileSync(path.join(pkgDir, 'locale/zh.json'), 'utf8'))
 const en = JSON.parse(fs.readFileSync(path.join(pkgDir, 'locale/en.json'), 'utf8'))
@@ -138,12 +142,17 @@ check('icon 存在且 ≤ 256 KiB', icon.size > 0 && icon.size <= 256 * 1024, `$
 
 // dsh-ops 的硬教训：宿主这一半不能 import 任何 @deepseek-ai/* 值——
 // 那些名字由 profile 加载器提供，每多一个就多一条加载期失败的路。
+// 例外：schemastery 是 package.json dependencies 里声明的配置 schema 依赖，
+// 不是宿主注入的服务；DSH 插件导出 Config 时必须用它。
 const SOURCE_FILES = ['index.js', ...fs.readdirSync(path.join(pkgDir, 'lib')).filter((f) => f.endsWith('.js')).map((f) => `lib/${f}`)]
+const ALLOWED_DSH_IMPORTS = new Set(['@deepseek-ai/schemastery'])
 const dshImports = SOURCE_FILES.flatMap((rel) => {
   const text = fs.readFileSync(path.join(pkgDir, rel), 'utf8')
-  return [...text.matchAll(/from\s+['"](@deepseek-ai\/[^'"]+)['"]/g)].map((m) => `${rel}: ${m[1]}`)
+  return [...text.matchAll(/from\s+['"](@deepseek-ai\/[^'"]+)['"]/g)]
+    .map((m) => `${rel}: ${m[1]}`)
+    .filter((entry) => !ALLOWED_DSH_IMPORTS.has(entry.slice(entry.indexOf(': ') + 2)))
 })
-check('源码不 import 任何 @deepseek-ai/* 值', dshImports.length === 0, dshImports.join(', '))
+check('源码除 schemastery 外不 import 任何 @deepseek-ai/* 值', dshImports.length === 0, dshImports.join(', '))
 
 check('注册落在 ctx.effect 里', effects.length >= 1, `${effects.length} 个 effect`)
 check('effect 带可读标签', effects.every((e) => typeof e.label === 'string' && e.label.startsWith('dsh-code-index')), effects.map((e) => e.label).join(','))
@@ -191,6 +200,28 @@ const readMarker = () => JSON.parse(fs.readFileSync(path.join(process.env.DSH_HO
   const marker = readMarker()
   check('vectors=remote → 标记记录远端地址（且不记 apiKey）', marker.config?.vectors === 'remote' && marker.config?.remote?.url === 'https://h.example', JSON.stringify(marker.config))
   check('标记不记录 apiKey 原文', !JSON.stringify(marker.config ?? {}).includes('secret'), JSON.stringify(marker.config))
+}
+// DSH 设置页依赖：导出 schemastery Config，并把 volatile 引用解包后再走显式校验
+{
+  check('导出 Schemastery Config', typeof plugin.Config?.toJSON === 'function')
+  const parsed = plugin.Config({
+    roots: [repo],
+    vectors: 'off',
+    rerank: 'off',
+    remote: { url: null, apiKey: null },
+    advanced: { indexDirBase: null },
+  })
+  check('Config 把设置字段生成为 volatile 引用', typeof parsed.vectors?.get === 'function' && typeof parsed.remote?.url?.get === 'function',
+    JSON.stringify(Object.keys(parsed.remote ?? {})))
+  let schemaError = ''
+  try {
+    const fake = cordisLikeCtx(plugin)
+    plugin.apply(fake.ctx, parsed)
+    check('volatile Config 传入 apply 时能解包并完成注册', fake.registry.size === 5, `${fake.registry.size} 个工具`)
+  } catch (e) {
+    schemaError = String(e.message)
+  }
+  check('volatile Config 传入 apply 不抛错', schemaError === '', schemaError.slice(0, 120))
 }
 
 // ---------- 注册面 ----------
