@@ -268,6 +268,24 @@ ADMIN_HTML = r"""<!doctype html>
   .seg button { border:0; border-radius:0; background:var(--card); padding:5px 10px; font-size:12px; color:var(--muted); }
   .seg button.active { background:var(--blue-bg); color:var(--blue); font-weight:600; }
   .login-hint { color:var(--muted); font-size:12px; }
+  .chart { display:flex; align-items:flex-end; gap:2px; height:150px; padding:4px 2px 0; border-bottom:1px solid var(--line); }
+  .chart .col { flex:1; height:100%; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:2px; min-width:0; }
+  .chart .bars { flex:1; width:100%; display:flex; align-items:flex-end; justify-content:center; gap:1px; min-height:0; }
+  .chart .bars i { display:block; width:44%; border-radius:2px 2px 0 0; background:var(--blue); min-height:1px; }
+  .chart .bars i.err { background:var(--bad); }
+  .chart .bars i.lat { width:70%; background:var(--purple); }
+  .chart .x { font-size:9.5px; color:var(--faint); white-space:nowrap; line-height:1.2; }
+  .chart .col:hover .bars i { opacity:.8; }
+  .legend { display:flex; align-items:center; gap:10px; margin-top:6px; font-size:11px; color:var(--muted); flex-wrap:wrap; }
+  .legend .lg { width:9px; height:9px; border-radius:2px; display:inline-block; background:var(--blue); }
+  .legend .lg.err { background:var(--bad); } .legend .lg.lat { background:var(--purple); }
+  .mix { display:grid; gap:8px; }
+  .mix .row { display:grid; grid-template-columns:78px 1fr 120px; align-items:center; gap:10px; font-size:12px; }
+  .mix .bar { width:100%; }
+  .mix .num { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .delta { font-size:11px; margin-left:4px; color:var(--muted); }
+  .delta.up { color:var(--bad); } .delta.down { color:var(--ok); }
+  .stat .sub { color:var(--faint); font-size:11px; margin-left:3px; }
 </style>
 </head>
 <body>
@@ -354,7 +372,6 @@ ADMIN_HTML = r"""<!doctype html>
         <input id="key-name" placeholder="名称，例如：本机插件 / review-service" style="min-width:200px">
         <select id="key-role">
           <option value="index">index · 索引/检索服务</option>
-          <option value="admin">admin · 索引 + 控制台管理</option>
         </select>
         <button class="primary" id="btn-create-key">新建 Key</button>
         <span class="faint" style="font-size:12px">明文只显示一次；服务端只存 sha256</span>
@@ -379,32 +396,66 @@ ADMIN_HTML = r"""<!doctype html>
           <tbody id="keys"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
-      <div class="faint" style="font-size:11.5px;margin-top:8px">index Key 可调用索引/检索全部接口（sync / chunks / vectors / search / status / scopes）；admin Key 额外可调 <span class="mono">/v1/admin/*</span> 与控制台。<br>环境变量 <span class="mono">API_KEY</span> 是 legacy Key（id=0，admin 角色），始终有效、不可删除。</div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">index Key 可调用索引/检索全部接口（sync / chunks / vectors / search / status / scopes），不能进控制台管理。<br>新建 Key 固定为 index 角色；admin 角色仅保留给环境变量 legacy <span class="mono">API_KEY</span>（id=0）和既有 Key，不再从页面新建。</div>
     </section>
   </section>
 
   <!-- ============================ 统计 ============================ -->
   <section id="tab-stats" class="panel">
     <section class="card wide">
-      <h2>调用统计 <span class="tail"><span class="seg"><button data-days="7" class="active">近 7 天</button><button data-days="30">近 30 天</button></span></span></h2>
+      <h2>调用统计 <span class="tail">
+        <span class="seg" id="stats-range">
+          <button data-days="1">今日</button>
+          <button data-days="7" class="active">近 7 天</button>
+          <button data-days="30">近 30 天</button>
+        </span>
+        <label><input id="stats-auto" type="checkbox" checked> 自动刷新</label>
+        <button id="btn-stats-refresh">刷新</button>
+        <button id="btn-stats-export">导出 CSV</button>
+      </span></h2>
+      <div class="faint" id="stats-meta" style="font-size:11.5px;margin-bottom:10px">加载中…</div>
       <div class="stats" id="stat-cards"></div>
-      <div style="margin-top:14px">
-        <div class="faint" style="font-size:11.5px;margin-bottom:4px">按天请求数</div>
-        <div class="spark" id="stat-spark"></div>
+    </section>
+    <section class="card wide">
+      <h2>趋势 <span class="tail faint" id="stat-range-label"></span></h2>
+      <div class="grid2">
+        <div>
+          <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日请求 / 错误</div>
+          <div class="chart" id="stat-trend"></div>
+          <div class="legend"><span class="lg req"></span>请求 <span class="lg err"></span>错误</div>
+        </div>
+        <div>
+          <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日平均延迟</div>
+          <div class="chart" id="stat-latency"></div>
+          <div class="legend"><span class="lg lat"></span>平均延迟（悬停看当日最大）</div>
+        </div>
+      </div>
+      <div style="margin-top:16px">
+        <div class="faint" style="font-size:11.5px;margin-bottom:6px">请求构成（相对请求总数）</div>
+        <div class="mix" id="stat-mix"></div>
       </div>
     </section>
     <section class="card wide">
-      <h2>按 Key</h2>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Key</th><th>前缀</th><th>角色</th><th class="num">请求</th><th class="num">错误</th><th class="num">embed 文本</th><th class="num">search</th><th class="num">rerank</th></tr></thead>
-        <tbody id="stat-keys"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
-      </table></div>
+      <h2>运行状态 <span class="tail faint" id="stat-runtime-at"></span></h2>
+      <div class="stats" id="stat-runtime"></div>
+      <div class="toolbar" style="margin:12px 0 0">
+        <button data-goto="models">模型页</button>
+        <button data-goto="scopes">作用域页</button>
+        <span class="faint" style="font-size:11.5px">嵌入积压 = Σ(作用域块数 − 已嵌向量数)，由服务端后台限速嵌入</span>
+      </div>
     </section>
     <section class="card wide">
       <h2>按端点</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>端点</th><th class="num">请求</th><th class="num">错误</th><th class="num">平均延迟</th></tr></thead>
-        <tbody id="stat-endpoints"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+        <thead><tr><th>端点</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">错误率</th><th class="num">平均延迟</th></tr></thead>
+        <tbody id="stat-endpoints"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      </table></div>
+    </section>
+    <section class="card wide">
+      <h2>按 Key</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Key</th><th>角色</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">embed</th><th class="num">search</th><th class="num">rerank</th><th class="num">平均延迟</th><th>最后使用</th></tr></thead>
+        <tbody id="stat-keys"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
       </table></div>
     </section>
   </section>
@@ -528,7 +579,7 @@ function showTab(name) {
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'models') loadModels();
   if (name === 'keys') loadKeys();
-  if (name === 'stats') loadStats(STATS_DAYS);
+  if (name === 'stats') { loadStats(STATS_DAYS); startStatsTimer(); } else { stopStatsTimer(); }
   if (name === 'logs') loadLogs();
   if (name === 'overview' || name === 'scopes') refreshHealth();
   location.hash = name;
@@ -802,10 +853,7 @@ let KEYS = [];
 let LEGACY = false;
 let PLAIN_KEY = '';
 function updateRoleHint() {
-  const role = $('#key-role').value;
-  $('#key-role-hint').innerHTML = role === 'admin'
-    ? 'admin：可访问索引/检索全部接口，并可调用 <span class="mono">/v1/admin/*</span> 与控制台管理接口。'
-    : 'index：可访问索引/检索全部接口（sync / chunks / vectors / search / repo status / scopes 等），不能进控制台管理。';
+  $('#key-role-hint').innerHTML = 'index：可访问索引/检索全部接口（sync / chunks / vectors / search / repo status / scopes 等），不能进控制台管理。';
 }
 function renderKeyStats() {
   const rows = KEYS.slice();
@@ -861,7 +909,7 @@ function renderKeys() {
 }
 async function createKey() {
   const name = $('#key-name').value.trim();
-  const role = $('#key-role').value;
+  const role = 'index'; // 页面不再提供 admin 角色；admin 仅保留给 env/既有 Key
   if (!name) { toast('先填一个名称'); return; }
   const r = await api('/v1/admin/keys', { method: 'POST', body: JSON.stringify({ name, role }) });
   if (r.status !== 200) { toast('创建失败：' + ((r.body && r.body.error) || r.status)); return; }
@@ -920,39 +968,179 @@ async function deleteKey(id) {
 
 // ---------------- 统计 ----------------
 let STATS_DAYS = 7;
-function statTotal(d) {
-  const t = (d && d.totals) || {};
-  return [
-    ['请求总数', fmtNum(t.requests)], ['错误', fmtNum(t.errors)],
-    ['embed 文本', fmtNum(t.embedTexts)], ['search', fmtNum(t.searchCalls)],
-    ['rerank', fmtNum(t.rerankCalls)], ['平均延迟', (t.latencyAvg ? Math.round(t.latencyAvg) + ' ms' : '—')],
-    ['最大延迟', (t.latencyMax ? Math.round(t.latencyMax) + ' ms' : '—')],
-  ];
+let STATS = null;
+let STATS_TIMER = null;
+function fmtMs(v) { const n = Number(v || 0); return n > 0 ? Math.round(n) + ' ms' : '—'; }
+function ratePct(errors, requests) { return requests ? (Number(errors || 0) / Number(requests)) * 100 : 0; }
+function rateText(errors, requests) { const r = ratePct(errors, requests); return (requests ? r.toFixed(1) : '0.0') + '%'; }
+function deltaTag(cur, prev, lowerBetter) {
+  cur = Number(cur || 0); prev = Number(prev || 0);
+  if (!prev) return cur > 0 ? '<span class="delta up">新增</span>' : '';
+  const diff = (cur - prev) / prev * 100;
+  if (Math.abs(diff) < 0.5) return '<span class="delta">持平</span>';
+  const good = lowerBetter ? diff < 0 : diff > 0;
+  return '<span class="delta ' + (good ? 'down' : 'up') + '">' + (diff > 0 ? '+' : '') + diff.toFixed(1) + '%</span>';
+}
+function statCard(label, value, sub) {
+  return '<div class="stat"><div class="n">' + value + '</div><div class="l">' + label + (sub ? ' ' + sub : '') + '</div></div>';
+}
+function renderStatCards() {
+  const d = STATS || {}; const t = d.totals || {}; const p = d.prevTotals || {}; const lat = d.latency || {};
+  $('#stat-cards').innerHTML = [
+    statCard('请求总数', fmtNum(t.requests), deltaTag(t.requests, p.requests, false)),
+    statCard('错误 / 错误率', fmtNum(t.errors) + ' <span class="sub">' + rateText(t.errors, t.requests) + '</span>', deltaTag(t.errors, p.errors, true)),
+    statCard('平均延迟', fmtMs(t.latencyAvg), deltaTag(t.latencyAvg, p.latencyAvg, true)),
+    statCard('P95 延迟', lat.p95 || '—', lat.count ? '<span class="sub">' + fmtNum(lat.count) + ' 次采样</span>' : '<span class="sub">本次部署后开始累计</span>'),
+    statCard('embed 文本', fmtNum(t.embedTexts), ''),
+    statCard('search', fmtNum(t.searchCalls), ''),
+    statCard('rerank', fmtNum(t.rerankCalls), ''),
+    statCard('活跃 Key', fmtNum((d.byKey || []).length), '<span class="sub">' + (d.days === 1 ? '今日' : '区间内') + ' 有调用</span>'),
+  ].join('');
+}
+function chartCol(x, bars, label) {
+  return '<div class="col" title="' + escapeHtml(x.day) + '"><div class="bars">' + bars + '</div><span class="x">' + escapeHtml(label) + '</span></div>';
+}
+function renderTrend() {
+  const rows = (STATS && STATS.byDay) || [];
+  const el = $('#stat-trend');
+  if (!rows.length) { el.innerHTML = '<div class="empty">没有数据</div>'; return; }
+  const max = Math.max(1, ...rows.map((x) => Number(x.requests || 0)));
+  const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
+  el.innerHTML = rows.map((x, i) => {
+    const rh = Math.max(1, Math.round((Number(x.requests || 0) / max) * 100));
+    const eh = Number(x.errors || 0) ? Math.max(1, Math.round((Number(x.errors) / max) * 100)) : 0;
+    const bars = '<i style="height:' + rh + '%"></i>' + (eh ? '<i class="err" style="height:' + eh + '%"></i>' : '');
+    return chartCol(x, bars, i % step === 0 ? String(x.day || '').slice(5) : '');
+  }).join('');
+}
+function renderLatencyTrend() {
+  const rows = (STATS && STATS.byDay) || [];
+  const el = $('#stat-latency');
+  if (!rows.length) { el.innerHTML = '<div class="empty">没有数据</div>'; return; }
+  const max = Math.max(1, ...rows.map((x) => Number(x.latencyAvg || 0)));
+  const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
+  el.innerHTML = rows.map((x, i) => {
+    const h = Math.max(1, Math.round((Number(x.latencyAvg || 0) / max) * 100));
+    const bars = '<i class="lat" style="height:' + h + '%"></i>';
+    return chartCol(x, bars, i % step === 0 ? String(x.day || '').slice(5) : '');
+  }).join('');
+  // 悬停 title 里补上最大延迟
+  $$('#stat-latency .col').forEach((col, i) => {
+    const x = rows[i] || {};
+    col.title = String(x.day || '') + '：平均 ' + fmtMs(x.latencyAvg) + ' · 最大 ' + fmtMs(x.latencyMax) + ' · 请求 ' + fmtNum(x.requests);
+  });
+}
+function renderMix() {
+  const t = (STATS && STATS.totals) || {};
+  const items = [['embed', Number(t.embedTexts || 0)], ['search', Number(t.searchCalls || 0)], ['rerank', Number(t.rerankCalls || 0)]];
+  const max = Math.max(1, ...items.map((x) => x[1]));
+  $('#stat-mix').innerHTML = items.map(([label, count]) => {
+    const w = Math.max(1, Math.round((count / max) * 100));
+    const share = t.requests ? (count / t.requests) * 100 : 0;
+    return '<div class="row"><span class="faint">' + label + '</span><span class="bar blue"><i style="width:' + w + '%"></i></span><span class="num">' + fmtNum(count) + ' · ' + share.toFixed(1) + '%</span></div>';
+  }).join('');
+}
+function renderRuntime(health, scopesBody) {
+  const sc = (scopesBody && scopesBody.scopes) || [];
+  let chunks = 0, vectors = 0;
+  for (const s of sc) { chunks += Number(s.chunks || 0); vectors += Number(s.vectors || 0); }
+  const backlog = Math.max(0, chunks - vectors);
+  const coverage = chunks ? (vectors / chunks) * 100 : 0;
+  let cards;
+  if (!health) {
+    cards = [statCard('运行状态', '<span class="chip bad">不可用</span>', ''), statCard('作用域', fmtNum(sc.length), '')];
+  } else {
+    const g = health.governor || {};
+    cards = [
+      statCard('服务', '<span class="chip ' + (health.ready ? 'ok' : 'bad') + '"><span class="dot"></span>' + (health.ready ? 'ready' : '未就绪') + '</span>', ''),
+      statCard('当前模型', '<span class="mono" style="font-size:11px">' + escapeHtml(health.tag || '—') + '</span>', ''),
+      statCard('嵌入限速', (g.paused ? '已暂停' : '运行中') + ' · ' + fmtNum(g.rate) + '/s · batch ' + fmtNum(g.batch), ''),
+      statCard('作用域', fmtNum(sc.length), '<span class="sub">平均覆盖 ' + coverage.toFixed(1) + '%</span>'),
+      statCard('块 / 向量', fmtNum(chunks) + ' / ' + fmtNum(vectors), ''),
+      statCard('嵌入积压', backlog > 0 ? fmtNum(backlog) + ' 块' : '0', backlog > 0 ? '<span class="sub">后台嵌入中</span>' : '<span class="sub">已全部完成</span>'),
+    ];
+  }
+  $('#stat-runtime').innerHTML = cards.join('');
+  $('#stat-runtime-at').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+function renderStatTables() {
+  const eps = (STATS && STATS.byEndpoint) || [];
+  const epMax = Math.max(1, ...eps.map((e) => Number(e.requests || 0)));
+  $('#stat-endpoints').innerHTML = eps.length ? eps.map((e) => {
+    const share = epMax ? (Number(e.requests || 0) / epMax) * 100 : 0;
+    const er = ratePct(e.errors, e.requests);
+    const cls = er > 10 ? 'bad' : (er > 1 ? 'warn' : 'blue');
+    return '<tr><td class="mono">' + escapeHtml(e.endpoint) + '</td><td class="num">' + fmtNum(e.requests) + '</td>'
+      + '<td><div class="cov"><span class="bar ' + cls + '" style="width:110px"><i style="width:' + share.toFixed(1) + '%"></i></span><span class="faint">' + share.toFixed(0) + '%</span></div></td>'
+      + '<td class="num">' + fmtNum(e.errors) + '</td><td class="num">' + (e.requests ? er.toFixed(1) + '%' : '—') + '</td>'
+      + '<td class="num">' + fmtMs(e.latencyAvg) + '</td></tr>';
+  }).join('') : '<tr><td colspan="6" class="empty">没有数据</td></tr>';
+  const keys = (STATS && STATS.byKey) || [];
+  const totalReq = Number((STATS && STATS.totals && STATS.totals.requests) || 0);
+  $('#stat-keys').innerHTML = keys.length ? keys.map((k) => {
+    const share = totalReq ? (Number(k.requests || 0) / totalReq) * 100 : 0;
+    const name = escapeHtml(k.name || ('#' + k.keyId)) + (k.role === 'legacy' ? ' <span class="chip blue">legacy</span>' : '') + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(k.prefix || '') + '</span>';
+    return '<tr><td>' + name + '</td><td>' + escapeHtml(k.role || '—') + '</td><td class="num">' + fmtNum(k.requests) + '</td>'
+      + '<td><div class="cov"><span class="bar blue" style="width:100px"><i style="width:' + share.toFixed(1) + '%"></i></span><span class="faint">' + share.toFixed(1) + '%</span></div></td>'
+      + '<td class="num">' + fmtNum(k.errors) + '</td><td class="num">' + fmtNum(k.embedTexts) + '</td><td class="num">' + fmtNum(k.searchCalls) + '</td><td class="num">' + fmtNum(k.rerankCalls) + '</td>'
+      + '<td class="num">' + fmtMs(k.latencyAvg) + '</td><td title="' + absTime(k.lastUsedAt) + '">' + rel(k.lastUsedAt) + '</td></tr>';
+  }).join('') : '<tr><td colspan="10" class="empty">没有数据</td></tr>';
+}
+function stopStatsTimer() { if (STATS_TIMER) { clearInterval(STATS_TIMER); STATS_TIMER = null; } }
+function startStatsTimer() {
+  stopStatsTimer();
+  if ($('#stats-auto') && !$('#stats-auto').checked) return;
+  STATS_TIMER = setInterval(() => {
+    if (document.visibilityState === 'visible' && location.hash === '#stats') loadStats(STATS_DAYS);
+  }, 30000);
 }
 async function loadStats(days) {
   STATS_DAYS = Number(days) || 7;
   $$('[data-days]').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === STATS_DAYS));
-  const r = await api('/v1/admin/stats?days=' + STATS_DAYS);
-  if (r.status !== 200) return;
-  const d = r.body;
-  $('#stat-cards').innerHTML = statTotal(d).map(([l, n]) => '<div class="stat"><div class="n">' + n + '</div><div class="l">' + l + '</div></div>').join('');
-  const byDay = d.byDay || [];
-  const max = Math.max(1, ...byDay.map((x) => x.requests || 0));
-  $('#stat-spark').innerHTML = byDay.map((x) => {
-    const h = Math.max(2, Math.round((x.requests || 0) / max * 78));
-    return '<div class="col" title="' + escapeHtml(x.day) + '：请求 ' + fmtNum(x.requests) + ' · 错误 ' + fmtNum(x.errors) + ' · embed ' + fmtNum(x.embedTexts) + '"><i style="height:' + h + 'px"></i><span>' + escapeHtml(String(x.day || '').slice(5)) + '</span></div>';
-  }).join('') || '<span class="faint">没有数据</span>';
-  const keys = d.byKey || [];
-  $('#stat-keys').innerHTML = keys.length ? keys.map((k) => '<tr><td>' + escapeHtml(k.name || ('#' + k.keyId)) + (k.keyId === 0 ? ' <span class="chip blue">legacy</span>' : '') + '</td>'
-    + '<td class="mono">' + escapeHtml(k.prefix || '—') + '</td><td>' + escapeHtml(k.role || '—') + '</td>'
-    + '<td class="num">' + fmtNum(k.requests) + '</td><td class="num">' + fmtNum(k.errors) + '</td>'
-    + '<td class="num">' + fmtNum(k.embedTexts) + '</td><td class="num">' + fmtNum(k.searchCalls) + '</td><td class="num">' + fmtNum(k.rerankCalls) + '</td></tr>').join('')
-    : '<tr><td colspan="8" class="empty">没有数据</td></tr>';
-  const eps = d.byEndpoint || [];
-  $('#stat-endpoints').innerHTML = eps.length ? eps.map((e) => '<tr><td class="mono">' + escapeHtml(e.endpoint) + '</td>'
-    + '<td class="num">' + fmtNum(e.requests) + '</td><td class="num">' + fmtNum(e.errors) + '</td>'
-    + '<td class="num">' + (e.latencyAvg ? Math.round(e.latencyAvg) + ' ms' : '—') + '</td></tr>').join('')
-    : '<tr><td colspan="4" class="empty">没有数据</td></tr>';
+  const meta = $('#stats-meta'); if (meta) meta.textContent = '加载中…';
+  const [r, h, s] = await Promise.all([api('/v1/admin/stats?days=' + STATS_DAYS), api('/health'), api('/v1/scopes')]);
+  if (r.status !== 200 || !r.body) {
+    $('#stat-cards').innerHTML = '<div class="empty">统计加载失败（' + r.status + '）</div>';
+    if (meta) meta.textContent = '统计加载失败：' + r.status;
+    return;
+  }
+  STATS = r.body;
+  if (meta) meta.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' · ' + STATS.from + ' ~ ' + STATS.to + ' · 含未落盘缓冲（最多约 30 秒延迟）';
+  $('#stat-range-label').textContent = STATS.days === 1 ? '今日' : ('近 ' + STATS.days + ' 天');
+  renderStatCards();
+  renderTrend();
+  renderLatencyTrend();
+  renderMix();
+  renderRuntime(h.status === 200 ? h.body : null, s.status === 200 ? s.body : null);
+  renderStatTables();
+  if (location.hash === '#stats') startStatsTimer();
+}
+function csvCell(v) { const s = String(v === undefined || v === null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function exportStatsCsv() {
+  if (!STATS) { toast('统计还没加载完'); return; }
+  const t = STATS.totals || {}; const lat = STATS.latency || {};
+  const lines = [];
+  lines.push('区间,' + STATS.from + ' ~ ' + STATS.to + ',天数,' + STATS.days);
+  lines.push('');
+  lines.push('汇总,请求,错误,错误率,平均延迟ms,最大延迟ms,embed,search,rerank,P50,P95');
+  lines.push(['合计', t.requests, t.errors, rateText(t.errors, t.requests), Number(t.latencyAvg || 0).toFixed(1), Number(t.latencyMax || 0).toFixed(1), t.embedTexts, t.searchCalls, t.rerankCalls, lat.p50 || '', lat.p95 || ''].join(','));
+  lines.push('');
+  lines.push('日期,请求,错误,错误率,平均延迟ms,最大延迟ms,embed,search,rerank');
+  for (const d of STATS.byDay || []) lines.push([d.day, d.requests, d.errors, rateText(d.errors, d.requests), Number(d.latencyAvg || 0).toFixed(1), Number(d.latencyMax || 0).toFixed(1), d.embedTexts, d.searchCalls, d.rerankCalls].join(','));
+  lines.push('');
+  lines.push('端点,请求,错误,平均延迟ms');
+  for (const e of STATS.byEndpoint || []) lines.push([csvCell(e.endpoint), e.requests, e.errors, Number(e.latencyAvg || 0).toFixed(1)].join(','));
+  lines.push('');
+  lines.push('Key,角色,请求,错误,embed,search,rerank,平均延迟ms,最后使用');
+  for (const k of STATS.byKey || []) lines.push([csvCell(k.name || ('#' + k.keyId)), k.role, k.requests, k.errors, k.embedTexts, k.searchCalls, k.rerankCalls, Number(k.latencyAvg || 0).toFixed(1), k.lastUsedAt ? new Date(k.lastUsedAt * 1000).toISOString() : ''].join(','));
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'code-index-stats-' + STATS.days + 'd-' + STATS.to + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  // 不要立刻移除/回收：部分浏览器（含 headless）会在 anchor 被移除时取消 blob 下载
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(a.href); }, 3000);
 }
 
 // ---------------- 日志 ----------------
@@ -980,6 +1168,10 @@ $('#btn-setup').onclick = setupAdmin;
 $('#btn-logs').onclick = loadLogs;
 $('#filter').oninput = renderScopes;
 $$('[data-days]').forEach((b) => { b.onclick = () => loadStats(b.dataset.days); });
+$('#btn-stats-refresh').onclick = () => loadStats(STATS_DAYS);
+$('#btn-stats-export').onclick = exportStatsCsv;
+$('#stats-auto').onchange = () => { if (location.hash === '#stats') startStatsTimer(); };
+$$('[data-goto]').forEach((b) => { b.onclick = () => { location.hash = '#' + b.dataset.goto; }; });
 $$('nav.tabs button').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
 $('#btn-logout').onclick = async () => { await fetch('/admin/logout', { method: 'POST' }); location.replace('/admin'); };
 $('#btn-copy-key').onclick = async () => { try { await navigator.clipboard.writeText($('#key-plain').textContent); toast('已复制'); } catch (e) { toast('复制失败（浏览器限制）'); } };

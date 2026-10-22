@@ -775,6 +775,9 @@ def main():
     check("后台页面包含「可下载模型」与「重传」", "可下载模型" in page and "重传" in page)
     check("后台页面初始化会加载模型列表（不会停在加载中）", "loadModels();" in page)
     check("API Key 页含权限说明与测试按钮", "测试访问索引服务" in page and "index · 索引/检索服务" in page)
+    check("新建 Key 只有 index 选项（无 admin option）", 'value="admin"' not in page)
+    check("统计页含趋势图/导出/运行状态", all(k in page for k in (
+        "stat-trend", "stat-latency", "stat-mix", "stat-runtime", "btn-stats-export", "btn-stats-refresh")))
     check("作用域页含清空索引危险操作", "清空所有作用域" in page and "输入 RESET 确认" in page)
 
     # ================================================================
@@ -877,6 +880,19 @@ def main():
         check("统计按端点分组（search/embed）", eps.get("search", {}).get("requests", 0) >= 3
               and eps.get("embed", {}).get("requests", 0) >= 1, list(eps))
         check("统计按天序列存在", len(stats.get("byDay") or []) >= 1, len(stats.get("byDay") or []))
+        check("byDay 含延迟字段", all("latencyAvg" in d and "latencyMax" in d for d in (stats.get("byDay") or [])))
+        check("按 Key 含平均延迟", kid2 in by_key and "latencyAvg" in by_key[kid2], by_key.get(kid2))
+        check("上期对比 prevTotals 存在", isinstance(stats.get("prevTotals"), dict)
+              and "requests" in (stats.get("prevTotals") or {}), stats.get("prevTotals"))
+        lat = stats.get("latency") or {}
+        check("延迟分桶存在且 P50/P95 已算出",
+              lat.get("count", 0) >= 5 and bool(lat.get("p95")) and len(lat.get("buckets") or []) == 11,
+              {"count": lat.get("count"), "p50": lat.get("p50"), "p95": lat.get("p95")})
+        check("usage_latency 表已建",
+              server.adm.db.execute("select name from sqlite_master where type='table' and name='usage_latency'").fetchone() is not None)
+        st1, body1 = req("GET", "/v1/admin/stats?days=1", headers=admin_auth)
+        check("days=1 只返回今日一天", st1 == 200 and len((body1 or {}).get("byDay") or []) == 1,
+              len((body1 or {}).get("byDay") or []))
         server.adm.flush()
         check("flush 后可读（stats 持久化入口）", True, "")
         req("DELETE", f"/v1/admin/keys/{kid2}", headers=admin_auth)

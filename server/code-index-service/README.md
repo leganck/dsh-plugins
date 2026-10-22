@@ -86,7 +86,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/admin/models/activate`、`POST /v1/admin/models/deactivate` | **模型热切换**：`{kind:'embed'|'rerank', dir|name}` 动态加载，无需重启（见下文） |
 | `POST /v1/admin/reset-index` | **清空索引**：`{confirm:'RESET'}` 删除全部作用域/块/向量/正文并 VACUUM（Key/统计保留）；客户端下次同步自动全量重建 |
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
-| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按端点（请求、错误、embed 文本、search/rerank 次数、延迟） |
+| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按端点（请求、错误、embed/search/rerank、延迟、**P50/P95**、**上期对比**）；`days=1/7/30` |
 | `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用 |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
@@ -106,10 +106,10 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - 控制台打开 `https://<host>/admin`：未登录显示登录页（不再弹浏览器 Basic 框）；登录后进入控制台，
   右上角「退出」清 Cookie。
 - **Key 管理**：控制台「API Key」页新建/禁用/删除、按名称/前缀筛选。明文只在创建时显示一次；
-  服务端只存 `sha256(key)`，列表只显示前 6 位。两种角色：
-  - `index`：可调**索引/检索全部接口**（`sync`/`chunks`/`vectors`/`search`/`repos/.../status`/`scopes` 等），
-    **不能**进后台管理；
-  - `admin`：索引/检索 + `/v1/admin/*` + 控制台管理。
+  服务端只存 `sha256(key)`，列表只显示前 6 位。
+  - **页面新建固定为 `index` 角色**（可调索引/检索全部接口：`sync`/`chunks`/`vectors`/`search`/`repos/.../status`/`scopes` 等，不能进后台管理）；
+  - `admin` 角色仅保留给环境变量 legacy `API_KEY`（`id=0`）和既有 Key，页面不再提供该选项；
+    后端 `POST /v1/admin/keys` 仍兼容 `role=admin`（给脚本/自动化用，普通用户不需要）。
   新建后可直接点「测试访问索引服务」验证（会分别测 `/v1/status` 与 `/v1/admin/session`，前者 200、后者对 index Key 为 401）。
 - **强制策略**：只要存在任一 Key（env `API_KEY` 或控制台创建），所有索引/检索接口都必须带 Bearer；
   一个都没有时为开放模式（仅建议隔离内网），控制台顶部会红字提示。
@@ -123,9 +123,11 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - **概览**：运行时 / 治理 / 存储限额 / 向量标签 / 鉴权状态；暂停/恢复嵌入、立即清扫、清理旧 tag。
 - **模型**：当前嵌入/重排、已安装模型（本机 `/models` 与 `/data/models` 自动发现）、一键**热切换**、
   可下载模型（进度/取消/重试/重传）、重排启用/关闭。
-- **API Key**：新建（index/admin 角色）、启用/禁用、删除、一次性明文展示。
-- **统计**：近 7/30 天请求数、错误、embed 文本数、search/rerank 次数、平均/最大延迟；
-  按天柱状图、按 Key、按端点三张表。
+- **API Key**：新建（固定 index 角色）、启用/禁用、删除、一次性明文展示、一键测试访问索引服务。
+- **统计**：今日 / 近 7 天 / 近 30 天；8 个 KPI（请求、错误率、平均延迟、P95、embed/search/rerank、活跃 Key，带环比）；
+  每日请求/错误柱状图、每日延迟趋势、请求构成；按端点与按 Key 明细（占比条、错误率、每 Key 平均延迟、最后使用）；
+  运行状态卡（模型、限速、作用域覆盖率、**嵌入积压**）；自动刷新与 CSV 导出。
+  延迟分位为桶上界近似（`usage_latency` 表按天累加，最多保留 90 天，即"≤X ms"）。
 - **作用域**：快照表（块/向量/覆盖率/占用/TTL/命名空间）+ 检索测试。
 - **日志**：服务日志尾部。
 
