@@ -779,6 +779,9 @@ def main():
     check("统计页含趋势图/导出/运行状态", all(k in page for k in (
         "stat-trend", "stat-latency", "stat-mix", "stat-runtime", "btn-stats-export", "btn-stats-refresh")))
     check("作用域页含清空索引危险操作", "清空所有作用域" in page and "输入 RESET 确认" in page)
+    with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/admin", timeout=10) as _resp:
+        _cc = _resp.headers.get("Cache-Control") or ""
+    check("控制台 HTML 禁止缓存（避免浏览器继续用旧内联 JS）", "no-store" in _cc, _cc)
 
     # ================================================================
     print("\n[30] 入口内容协商 / 会话登录")

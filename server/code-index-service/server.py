@@ -742,7 +742,10 @@ async function searchTest() {
 // ---------------- 模型 ----------------
 let MODEL_DATA = null;
 let MODEL_TIMER = null;
-function modelStatusChip(status, ready) {
+function modelStatusChip(status, ready, installedElsewhere) {
+  if (installedElsewhere && !ready) {
+    return '<span class="chip blue"><span class="dot"></span>已安装</span>';
+  }
   if (ready) return '<span class="chip ok"><span class="dot"></span>已就绪</span>';
   const label = { idle: '未下载', downloading: '下载中', done: '已下载', failed: '失败', cancelled: '已取消' }[status] || status;
   const cls = { failed: 'chip bad', downloading: 'chip warn', cancelled: 'chip warn', done: 'chip ok' }[status] || 'chip';
@@ -801,12 +804,14 @@ function renderDownloads() {
     const ready = !!m.ready;
     const pct = ready ? 100 : (m.bytesTotal ? Math.min(100, Math.round(m.bytesDone * 100 / m.bytesTotal)) : 0);
     const cls = m.status === 'failed' ? 'bad' : (m.status === 'downloading' ? 'warn' : '');
-    const size = ready
-      ? fmtBytes(m.diskBytes || m.bytesTotal || 0)
-      : (fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?'));
-    const speed = (m.status === 'downloading' && m.speedBps) ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
     const elsewhere = m.installedElsewhere;
     const blocked = !!(elsewhere && !ready);
+    const size = blocked
+      ? '—'
+      : (ready
+        ? fmtBytes(m.diskBytes || m.bytesTotal || 0)
+        : (fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?')));
+    const speed = (m.status === 'downloading' && m.speedBps) ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
     const btn = m.status === 'downloading'
       ? '<button data-cancel="' + escapeHtml(m.name) + '">取消</button>'
       : '<button data-start="' + escapeHtml(m.name) + '"' + (ready || blocked ? ' disabled' : '') + '>'
@@ -823,10 +828,10 @@ function renderDownloads() {
     }
     const note = m.note ? '<div class="faint" style="font-size:11.5px;margin-top:2px">' + escapeHtml(m.note) + '</div>' : '';
     return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
-      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>' + escapeHtml(m.name) + '</b> ' + modelStatusChip(m.status, ready)
+      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>' + escapeHtml(m.name) + '</b> ' + modelStatusChip(m.status, ready, blocked)
       + '<span class="faint">' + escapeHtml(m.label || '') + '</span><span class="spacer"></span>' + btn + '</div>'
-      + '<div class="cov" style="margin-top:8px"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span>'
-      + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>'
+      + (blocked ? '' : '<div class="cov" style="margin-top:8px"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span>'
+        + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>')
       + '<div class="faint" style="font-size:11.5px;margin-top:6px">' + hint + '</div>' + extra + note + '</div>';
   }).join('');
   $$('[data-start]').forEach((b) => { b.onclick = () => startModel(b.dataset.start, false); });
@@ -2194,9 +2199,11 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path.rstrip("/") or "/"
         if path in ("/admin", "/admin/", "/admin/login"):
             # 未登录 → 登录页（不再弹浏览器 Basic 框）；登录后 → 控制台
+            # 控制台是单文件内联 JS：绝不能让浏览器按启发式缓存旧 HTML，否则界面会"半新半旧"
+            no_store = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
             if not self._admin_ok():
-                return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
-            return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
+                return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8", headers=no_store)
+            return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8", headers=no_store)
         if path in ("/favicon.svg", "/favicon.ico"):
             return self._send(200, FAVICON_SVG, ctype="image/svg+xml",
                               headers={"Cache-Control": "public, max-age=86400"})
