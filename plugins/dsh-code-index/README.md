@@ -46,6 +46,53 @@ DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 
 工具在检测到纯中文 query 时也会在结果里提示这一点；如果翻译质量不够，再考虑换多语言 embedding 模型（如 bge-m3），代价是全部 scope 重嵌。
 
+## 扫描边界（0.12+）
+
+索引层按 **workspace 文件 + ignore 规则**工作，不解析 `settings.gradle` / `pom.xml`，因此“模块未启用”不等于“不索引”：
+
+- 默认读取 `.gitignore`、`.cursorignore`、`.cursorindexingignore`；
+- 默认支持嵌套 `.gitignore`；嵌套 `.cursorignore` 需 `advanced.scan.hierarchicalCursorIgnore: true`；
+- `.md` 默认索引；`.docx` / `.pdf` 等 Office/PDF 不进入 include；
+- 二进制伪装文本会被嗅探跳过；
+- 禁用模块（例如 business 5.0 里的旧 Groovy 模块）默认仍会索引，排除方式：
+  ```yaml
+  exclude:
+    - "business-5.0/legacy-groovy"
+  ```
+  或在该仓库写 `.cursorignore`；
+- `respectIgnoreFiles: false` 可恢复旧行为。
+
+## 自动 freshness（0.12+）
+
+`advanced.sync.watch` 默认打开，但只监听**已经建过索引**的仓库；首次建库仍需显式 `code_index`：
+
+```yaml
+advanced:
+  sync:
+    watch: true
+    debounceMs: 5000
+    maxDelayMs: 30000
+    reconcileMs: 300000
+    lockTtlMs: 900000
+```
+
+- 保存后防抖聚合，运行中收到的新事件不会丢；
+- 每 5 分钟用 `scanStatus` 对账一次，补 `fs.watch` 漏事件；
+- 跨进程锁避免两个 DSH 同时同步同一个仓库；
+- DSH 重启后从 `<DSH_HOME>/code-index/repos.json` 恢复监听。
+
+## 跨血统复用（0.12+）
+
+同一 git remote 已经按服务端 lineage 自动共享向量，无需配置。跨 lineage（fork / remote 改名 / vendor 副本）可用：
+
+```yaml
+remote:
+  reuse: suggest   # off | suggest | auto
+```
+
+- `suggest`：只查候选，不复制（默认）；
+- `auto`：相似度 + 精确 chunk 重叠达到阈值时，只复制目标确实拥有的 blobs/vectors，不复制 chunks/path。
+
 ## 典型用法
 
 ```
@@ -96,7 +143,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
      本机之外手动 npm 安装的则需要重启进程。
 4. **远端不可用时优雅降级**。连不上服务端 → 查询自动退化为纯 FTS5、建库仍完成本地索引，原因写进结果，不会让插件加载失败。
 5. **远端失败有冷却**。连接失败后 60 s 内不再重试（避免每次查询都等满超时），冷却后自动恢复。
-6. **本地零重依赖**。本地不需要 onnxruntime / transformers / 模型文件；唯一可选依赖是 parser 组（AST 切块，实测展开 60.7 MB）。
+6. **本地零重依赖**。本地不需要 onnxruntime / transformers / 模型文件；`ignore` 是纯 JS 扫描依赖（无构建脚本），parser 组是可选增强（AST 切块，实测展开 60.7 MB）。
 7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录；不配则退回 `<repo>/.dsh-index/`（记得加进 `.gitignore`）。
 8. **roots 白名单**。不在白名单内的路径直接拒绝，**且在创建索引库之前校验**。
 
@@ -340,7 +387,7 @@ vectors: off
 ```
 
 服务端在仓库根目录 [`server/code-index-service/`](../../server/code-index-service/)，
-自测 43 项（`selftest.py`）、客户端桩测试 85 项（`test-remote.mjs`，本地 HTTP 桩，不需要网络与模型）。
+自测 248 项（`selftest.py`）、客户端桩测试 91 项（`test-remote.mjs`，本地 HTTP 桩，不需要网络与模型）。
 
 ```yaml
 vectors: remote
@@ -418,8 +465,11 @@ test-remote.mjs       远端地址/重排/配置校验/作用域夹具与多作�
 
 ```console
 # 在插件目录里（或不带 --repo，用自动夹具仓库）
-node test-remote.mjs                            # 90 项：地址/重排/配置校验/作用域夹具/多作用域回退/按次通道（本地 HTTP 桩）
+node test-remote.mjs                            # 91 项：地址/重排/配置校验/作用域夹具/多作用域回退/按次通道（本地 HTTP 桩）
 node test.mjs                                   # 125 项（Windows）/ 119 项（Linux）：建库/检索/增量/切块/排除/作用域
+node test-ignore.mjs                            # 20 项：gitignore / cursorignore / docs / 禁用模块 / 二进制
+node test-auto-sync.mjs                         # 12 项：registry / 锁 / dirty 合并 / 退避
+node test-simhash.mjs                           # 10 项：确定性 / 相似距离 / 两种变体
 node test-plugin.mjs                            # 83 项：契约与接口、五个工具真实调用、Config schema
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 

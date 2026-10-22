@@ -32,6 +32,8 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch } from './lib/repo.js'
 import { canonicalNamespace, normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
+import { RepoRegistry } from './lib/repo-registry.js'
+import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
 import z from '@deepseek-ai/schemastery'
 
 /** 0.10.0 remote-only：本地只保留 parser（切块）依赖组，embed 组不再安装 */
@@ -98,11 +100,17 @@ const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([
  * 当成"库里缺失的文件"而永远报告"过期"。
  */
 function scanOptsOf(config) {
+  const scan = config.scan ?? {}
   return {
     windowLines: config.windowLines,
     maxFileBytes: config.maxFileBytes,
     excludeDirs: config.excludeDirs,
     excludePaths: config.excludePaths.map(normalizeRelPrefix).filter(Boolean),
+    include: scan.include ?? undefined,
+    ignoreFiles: scan.respectIgnoreFiles === false ? [] : (scan.ignoreFiles ?? undefined),
+    hierarchicalGitignore: scan.hierarchicalGitignore !== false,
+    hierarchicalCursorIgnore: scan.hierarchicalCursorIgnore === true,
+    binarySniff: scan.binarySniff !== false,
   }
 }
 
@@ -131,6 +139,8 @@ const REMOTE_DEFAULTS = {
   lineage: null,
   /** 服务端嵌入限速（块/秒）；null = 用服务端默认 */
   rateLimit: null,
+  /** 冷启动复用：off | suggest | auto（跨 lineage 相似索引） */
+  reuse: 'suggest',
   /** 每批上传的正文条数 */
   uploadBatch: 256,
 }
@@ -142,7 +152,7 @@ const REMOTE_DEFAULTS = {
  */
 const USER_DEFAULTS = {
   roots: [],
-  remote: { url: null, apiKey: null, namespace: null, scope: 'auto', readScopes: [] },
+  remote: { url: null, apiKey: null, namespace: null, scope: 'auto', readScopes: [], reuse: 'suggest' },
   vectors: 'auto', // auto（有 remote.url 就用远端）| remote（强制，缺地址报错）| off（纯关键词）
   rerank: 'off', // off | fast | quality（远端）
   exclude: [], // 目录名，或含 "/" 的仓库相对路径前缀
@@ -152,7 +162,21 @@ const USER_DEFAULTS = {
     windowLines: 40,
     depsDir: null, // parser 依赖的受管目录（嵌入式依赖已移除）
     chunking: { strategy: 'auto', byExt: {} },
-    sync: { watch: false, debounceMs: 30000 },
+    scan: {
+      respectIgnoreFiles: true,
+      ignoreFiles: ['.gitignore', '.cursorignore', '.cursorindexingignore'],
+      hierarchicalGitignore: true,
+      hierarchicalCursorIgnore: false,
+      include: null,
+      binarySniff: true,
+    },
+    sync: {
+      watch: true,
+      debounceMs: 5000,
+      maxDelayMs: 30000,
+      reconcileMs: 300000,
+      lockTtlMs: 900000,
+    },
     remoteTimeoutMs: 8000,
     remoteRateLimit: null,
   },
@@ -179,6 +203,7 @@ export const Config = z.object({
     namespace: nullableString(),
     scope: z.any().default('auto'),
     readScopes: z.array(z.string()).default([]),
+    reuse: z.union(['off', 'suggest', 'auto']).default('suggest'),
   }).default({}),
   advanced: z.object({
     indexDirBase: nullableString().volatile(),
@@ -189,9 +214,20 @@ export const Config = z.object({
       strategy: z.union(['auto', 'ast', 'heuristic', 'window']).default('auto'),
       byExt: z.dict(z.any()).default({}),
     }).default({}),
+    scan: z.object({
+      respectIgnoreFiles: z.boolean().default(true),
+      ignoreFiles: z.array(z.string()).default(['.gitignore', '.cursorignore', '.cursorindexingignore']),
+      hierarchicalGitignore: z.boolean().default(true),
+      hierarchicalCursorIgnore: z.boolean().default(false),
+      include: z.union([z.array(z.string()), z.const(null)]).default(null),
+      binarySniff: z.boolean().default(true),
+    }).default({}),
     sync: z.object({
-      watch: z.boolean().default(false),
-      debounceMs: z.number().default(30000),
+      watch: z.boolean().default(true),
+      debounceMs: z.number().default(5000),
+      maxDelayMs: z.number().default(30000),
+      reconcileMs: z.number().default(300000),
+      lockTtlMs: z.number().default(900000),
     }).default({}),
     remoteTimeoutMs: z.number().default(8000),
     remoteRateLimit: nullableNumber(),
@@ -217,7 +253,7 @@ function unwrapConfig(value) {
 
 const USER_TOP_KEYS = Object.keys(USER_DEFAULTS)
 /** remote 下允许用户写的键（0.11.0 新增 namespace / scope / readScopes，见 docs/scope-tier3.md §6） */
-const USER_REMOTE_KEYS = ['url', 'apiKey', 'namespace', 'scope', 'readScopes']
+const USER_REMOTE_KEYS = ['url', 'apiKey', 'namespace', 'scope', 'readScopes', 'reuse']
 const USER_ADVANCED_KEYS = Object.keys(USER_DEFAULTS.advanced)
 
 /** 0.10.0 移除的键 → 迁移提示（不要用一句"未知配置项"打发） */
@@ -278,6 +314,15 @@ const DEFAULTS = {
     strategy: 'auto',
     byExt: {},
   },
+  /** 扫描边界：ignore 文件、include 白名单、二进制嗅探（docs/禁用模块靠 ignore/exclude 处理） */
+  scan: {
+    respectIgnoreFiles: true,
+    ignoreFiles: ['.gitignore', '.cursorignore', '.cursorindexingignore'],
+    hierarchicalGitignore: true,
+    hierarchicalCursorIgnore: false,
+    include: null,
+    binarySniff: true,
+  },
   /**
    * 远端交叉编码器重排（**默认关**）。取值：
    *   `off`（默认）| `fast`（top-10 候选）| `quality`（top-20）
@@ -297,7 +342,13 @@ const DEFAULTS = {
    * `debounceMs`，再在后台跑一次增量同步 —— 对应 Cursor 的 watcher + 周期性 doUpdate
    * （它默认 ≥60 s 且有自我抑制，这里同理：一次只跑一轮，跑的过程中不重入）。
    */
-  sync: { watch: false, debounceMs: 30000 },
+  sync: {
+    watch: true,
+    debounceMs: 5000,
+    maxDelayMs: 30000,
+    reconcileMs: 300000,
+    lockTtlMs: 900000,
+  },
   rerankBackend: 'local',
   /** `rerankBackend: 'remote'` 时的远端地址与超时（与 remote 同构） */
   rerankRemote: { url: null, timeoutMs: 8000, apiKey: null, fallbackLocal: true },
@@ -342,6 +393,9 @@ function userConfigToInternal(raw) {
   if (userRemote.apiKey !== undefined && userRemote.apiKey !== null && typeof userRemote.apiKey !== 'string') {
     throw new ConfigError(`config.remote.apiKey 必须是字符串或 null，收到 ${typeof userRemote.apiKey}`)
   }
+  if (userRemote.reuse !== undefined && !['off', 'suggest', 'auto'].includes(userRemote.reuse)) {
+    throw new ConfigError(`config.remote.reuse 必须是 off/suggest/auto，收到 ${JSON.stringify(userRemote.reuse)}`)
+  }
 
   const advRaw = raw.advanced ?? {}
   if (advRaw === null || typeof advRaw !== 'object' || Array.isArray(advRaw)) {
@@ -355,7 +409,23 @@ function userConfigToInternal(raw) {
     ...USER_DEFAULTS.advanced,
     ...advRaw,
     chunking: { ...USER_DEFAULTS.advanced.chunking, ...(advRaw.chunking ?? {}) },
+    scan: { ...USER_DEFAULTS.advanced.scan, ...(advRaw.scan ?? {}) },
     sync: { ...USER_DEFAULTS.advanced.sync, ...(advRaw.sync ?? {}) },
+  }
+  const scan = adv.scan
+  if (!scan || typeof scan !== 'object' || Array.isArray(scan)) {
+    throw new ConfigError('config.advanced.scan 必须是对象')
+  }
+  for (const key of ['respectIgnoreFiles', 'hierarchicalGitignore', 'hierarchicalCursorIgnore', 'binarySniff']) {
+    if (typeof scan[key] !== 'boolean') {
+      throw new ConfigError(`config.advanced.scan.${key} 必须是布尔值`)
+    }
+  }
+  if (!Array.isArray(scan.ignoreFiles) || scan.ignoreFiles.some((f) => typeof f !== 'string' || !f.trim())) {
+    throw new ConfigError('config.advanced.scan.ignoreFiles 必须是非空字符串数组')
+  }
+  if (scan.include !== null && (!Array.isArray(scan.include) || scan.include.some((e) => typeof e !== 'string' || !e.startsWith('.')))) {
+    throw new ConfigError('config.advanced.scan.include 必须是 null 或以 "." 开头的扩展名数组')
   }
 
   const requestedVectors = raw.vectors ?? 'auto'
@@ -401,6 +471,7 @@ function userConfigToInternal(raw) {
     excludeDirs,
     excludePaths,
     chunking: adv.chunking,
+    scan: adv.scan,
     sync: adv.sync,
     depsDir: adv.depsDir,
     vectorStore: vectors === 'remote' ? 'remote' : 'local',
@@ -422,6 +493,7 @@ function userConfigToInternal(raw) {
       namespace: userRemote.namespace ?? null,
       scope: userRemote.scope ?? null,
       readScopes: userRemote.readScopes ?? [],
+      reuse: userRemote.reuse ?? 'suggest',
     },
   }
 }
@@ -614,6 +686,15 @@ function normalizeConfig(userRaw = {}) {
   if (!Number.isInteger(cfg.sync.debounceMs) || cfg.sync.debounceMs < 1000) {
     throw new ConfigError(`config.sync.debounceMs 必须是 >= 1000 的整数（毫秒），收到 ${JSON.stringify(cfg.sync.debounceMs)}`)
   }
+  if (!Number.isInteger(cfg.sync.maxDelayMs) || cfg.sync.maxDelayMs < cfg.sync.debounceMs) {
+    throw new ConfigError(`config.sync.maxDelayMs 必须是 >= debounceMs 的整数，收到 ${JSON.stringify(cfg.sync.maxDelayMs)}`)
+  }
+  if (!Number.isInteger(cfg.sync.reconcileMs) || cfg.sync.reconcileMs < 60000) {
+    throw new ConfigError(`config.sync.reconcileMs 必须是 >= 60000 的整数（毫秒），收到 ${JSON.stringify(cfg.sync.reconcileMs)}`)
+  }
+  if (!Number.isInteger(cfg.sync.lockTtlMs) || cfg.sync.lockTtlMs < 60000) {
+    throw new ConfigError(`config.sync.lockTtlMs 必须是 >= 60000 的整数（毫秒），收到 ${JSON.stringify(cfg.sync.lockTtlMs)}`)
+  }
   // 0.10.0：vectorStore 由 vectors 推导（remote|local），不再暴露给用户
   if (cfg.vectors === 'remote' && !String(cfg.remote.url ?? '').trim()) {
     throw new ConfigError('config.vectors = remote 时必须给 remote.url（服务端地址）')
@@ -755,6 +836,11 @@ function applyInner(ctx, rawConfig = {}) {
   }
 
   const stores = new Map()
+/** 已索引仓库注册表：DSH 重启后恢复 watcher，而不是等下一次手动 code_index */
+const repoRegistry = new RepoRegistry(bootDir())
+/** repoRoot -> AutoSyncEntry；同进程内去重 */
+const autoEntries = new Map()
+let reconcileTimer = null
 
   // ---- 远端可用性闸门（自动切换）----
   // 连不上一次后，60 秒内不再尝试：否则服务端关机时**每次查询都要先等满 8 s 超时**，
@@ -960,13 +1046,32 @@ function applyInner(ctx, rawConfig = {}) {
           // status_only 不动远端，只把**将要写入**的作用域带上（配置有 scope 时才出现）
           const scopeInfo = config.vectorStore === 'remote' ? scopeInfoFor(repoRoot, store) : null
           const scopeLine = scopeInfo ? renderScopeLine(scopeInfo) : null
+          const scanStats = st.scanStats ?? null
+          const autoSync = {
+            enabled: Boolean(config.sync.watch),
+            watching: autoEntries.size,
+            running: [...autoEntries.values()].filter((e) => e.running).length,
+            dirty: [...autoEntries.values()].filter((e) => e.dirty).length,
+            entries: [...autoEntries.values()].map((e) => e.state()),
+          }
+          const ignoredLine = scanStats && scanStats.ignored
+            ? `  已忽略：${scanStats.ignored} 文件（gitignore ${scanStats.bySource.gitignore} / cursorignore ${scanStats.bySource.cursorignore} / exclude ${scanStats.bySource.exclude}）`
+            : null
+          const reuseLine = config.vectorStore === 'remote'
+            ? `  跨血统复用：${config.remote.reuse}（同 remote 已按 lineage 自动共享）`
+            : null
           return textResult(
-            { repoRoot, dbPath, status: st, stats: s, scope: scopeInfo },
+            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, scope: scopeInfo, reuse: config.remote.reuse },
             [
               `索引状态 ${repoRoot}`,
               `  已入库：${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
               `  仓库当前：${st.scanned} 个候选文件`,
               `  待更新：${st.changed} 改 / ${st.removed} 删；未变 ${st.unchanged}`,
+              ignoredLine,
+              autoSync.enabled
+                ? `  自动同步：开（监听 ${autoSync.watching} 个仓库；本仓库${autoEntries.has(repoRoot) ? '已监听' : '未监听'}）`
+                : '  自动同步：关（sync.watch=false）',
+              reuseLine,
               scopeLine ? '  ' + scopeLine : null,
               `  ${st.stale ? '索引已过期，运行 code_index 刷新' : '索引是最新的'}`,
             ]
@@ -1008,6 +1113,7 @@ function applyInner(ctx, rawConfig = {}) {
                 // 重新推导 canonical 命名空间，把用户的显式覆盖顶掉（契约 §6 的优先级）。
                 scope: config.remote.namespace ? null : effectiveScopeFor(repoRoot),
                 rateLimit: config.remote.rateLimit,
+                reuse: config.remote.reuse,
                 uploadBatch: config.remote.uploadBatch,
               }
             : null,
@@ -1022,6 +1128,9 @@ function applyInner(ctx, rawConfig = {}) {
         const lines = [
           `索引完成（${r.mode}）${repoRoot}`,
           `  扫描 ${r.scanned} 文件；变更 ${r.changed} / 删除 ${r.removed}；写入 ${r.chunksWritten} 块`,
+          r.scanStats?.ignored
+            ? `  已忽略 ${r.scanStats.ignored} 文件（gitignore ${r.scanStats.bySource.gitignore} / cursorignore ${r.scanStats.bySource.cursorignore} / exclude ${r.scanStats.bySource.exclude}）`
+            : null,
           `  切块策略：${Object.entries(r.strategies ?? {}).map(([s, n]) => `${s} ${n} 文件`).join('；') || '（本轮无变更文件）'}`,
           ...(!r.parserMissing?.length
             ? []
@@ -1040,6 +1149,12 @@ function applyInner(ctx, rawConfig = {}) {
           // 作用域只在配了新键时多一行：旧配置输出保持原样（不制造噪音）
           scopeInfo ? renderScopeLine(scopeInfo) : null,
           keywordOnly ? null : `  ${r.embedNote}`,
+          r.remote?.adopted
+            ? `  复用：从 ${r.remote.adopted.fromRepo || r.remote.adopted.fromLineage} 复用 ${r.remote.adopted.vectors ?? 0} 块（重叠 ${((r.remote.adopted.overlap ?? 0) * 100).toFixed(0)}%）`
+            : null,
+          r.remote?.adoptCandidates?.length
+            ? `  可复用候选：${r.remote.adoptCandidates.map((c) => `${c.repoName || c.lineage}（相似 ${(c.similarity * 100).toFixed(0)}%）`).join('；')}；设 remote.reuse=auto 可自动复用`
+            : null,
           `  用时 ${(r.elapsedMs / 1000).toFixed(1)}s；库 ${dbPath}`,
         ]
         // 降级必须显式可见：以为在用 AST、实际在跑启发式，是"检索质量悄悄变化"的典型来源
@@ -1061,6 +1176,7 @@ function applyInner(ctx, rawConfig = {}) {
           )
         }
         ensureWatch(repoRoot)
+        repoRegistry.upsert(repoRoot, { dbPath, lastIndexedAt: Date.now(), lastSyncAt: Date.now() })
         return textResult({ repoRoot, dbPath, ...r, scope: scopeInfo }, lines.filter((l) => l !== null).join('\n'))
       } catch (e) {
         return fail(String(e.message))
@@ -1070,61 +1186,94 @@ function applyInner(ctx, rawConfig = {}) {
   registerTool(codeIndexTool)
 
   // ---------------------------------------------------------------- 文件变更监听（sync.watch）
-  // 与 Cursor 的对应关系：它用 watcher 标记 + 周期性 doUpdate（≥60 s、有自我抑制），
-  // 我们同样是"防抖聚合 + 跑的时候不重入"，区别是默认**关**：主触发仍是显式 code_index。
-  const watchers = new Map()
-  const WATCH_IGNORE = /(^|\/)(\.git|node_modules|dist|target|build|\.dsh-index|__pycache__)(\/|$)/
-  async function runWatchSync(repoRoot, entry) {
-    if (entry.running) return
-    entry.running = true
+  // Cursor 的 watcher 只标记，再由周期性 doUpdate 统一刷新；这里用防抖 + dirty 合并，
+  // 另外保留一个低频 scanStatus 对账，处理 fs.watch 漏事件/睡眠唤醒/网络盘。
+  async function runWatchSync(repoRoot) {
+    const dbPath = indexDbPath(repoRoot, { indexDirBase: config.indexDirBase })
+    const lock = acquireRepoLock(dbPath, { ttlMs: config.sync.lockTtlMs })
+    if (!lock.ok) {
+      ctx.logger?.info?.(`dsh-code-index: 跳过自动同步 ${repoRoot}：${lock.reason}`)
+      return
+    }
     const t0 = Date.now()
     try {
       const r = await codeIndexTool.execute({ path: repoRoot }, {})
-      const head = (r?.content?.[0]?.text ?? '').split('\n').find((l) => l.startsWith('索引完成'))
+      const text = r?.content?.[0]?.text ?? ''
+      if (text.startsWith('错误：')) throw new Error(text.slice(3).trim() || 'code_index 失败')
+      repoRegistry.upsert(repoRoot, { dbPath, lastIndexedAt: Date.now(), lastSyncAt: Date.now() })
+      const head = text.split('\n').find((l) => l.startsWith('索引完成'))
       ctx.logger?.info?.(`dsh-code-index: 自动同步完成（${Date.now() - t0} ms）${head ? '：' + head : ''}`)
-    } catch (e) {
-      ctx.logger?.warn?.(`dsh-code-index: 自动同步失败：${String(e?.message ?? e).slice(0, 160)}`)
     } finally {
-      entry.running = false
+      lock.release()
     }
   }
+
   function ensureWatch(repoRoot) {
-    if (!config.sync.watch || watchers.has(repoRoot)) return
-    const entry = { watcher: null, timer: null, running: false }
+    if (!config.sync.watch) return
+    const root = path.resolve(repoRoot)
+    if (autoEntries.has(root)) return
+    let stats
     try {
-      entry.watcher = fs.watch(repoRoot, { recursive: true }, (_evt, filename) => {
-        if (!filename) return
-        const rel = String(filename).replace(/\\/g, '/')
-        if (WATCH_IGNORE.test(rel)) return
-        if (entry.timer) return // 防抖窗口内的后续事件合并掉
-        entry.timer = setTimeout(() => {
-          entry.timer = null
-          void runWatchSync(repoRoot, entry)
-        }, config.sync.debounceMs)
-        entry.timer.unref?.()
-      })
-      entry.watcher.on?.('error', (e) => ctx.logger?.warn?.(`dsh-code-index: watcher 出错：${e?.message}`))
+      stats = storeFor(root).store.stats()
     } catch (e) {
-      ctx.logger?.warn?.(`dsh-code-index: 无法监听 ${repoRoot}：${e?.message}`)
+      ctx.logger?.warn?.(`dsh-code-index: 无法打开索引监听 ${root}：${e?.message ?? e}`)
       return
     }
-    watchers.set(repoRoot, entry)
-    ctx.logger?.info?.(`dsh-code-index: 已监听 ${repoRoot}（防抖 ${config.sync.debounceMs} ms）`)
+    if (!stats.files) return
+    const entry = new AutoSyncEntry({
+      repoRoot: root,
+      debounceMs: config.sync.debounceMs,
+      maxDelayMs: config.sync.maxDelayMs,
+      logger: (m) => ctx.logger?.warn?.(`dsh-code-index: ${m}`),
+      onRun: () => runWatchSync(root),
+    })
+    entry.start()
+    autoEntries.set(root, entry)
+    ctx.logger?.info?.(`dsh-code-index: 已监听 ${root}（防抖 ${config.sync.debounceMs} ms）`)
   }
+
+  function hydrateWatchers() {
+    if (!config.sync.watch) return
+    for (const item of repoRegistry.prune()) {
+      if (item.watch === false) continue
+      try {
+        assertAllowed(item.root)
+        ensureWatch(item.root)
+      } catch (e) {
+        ctx.logger?.warn?.(`dsh-code-index: 跳过注册表仓库 ${item.root}：${e?.message ?? e}`)
+      }
+    }
+  }
+
+  function startReconcile() {
+    if (!config.sync.watch || reconcileTimer) return
+    reconcileTimer = setInterval(() => {
+      for (const [root, entry] of autoEntries) {
+        if (entry.running) continue
+        try {
+          const { store } = storeFor(root)
+          const st = scanStatus(store, root, scanOptsOf(config))
+          if (st.stale) entry.noteEvent()
+        } catch (e) {
+          ctx.logger?.warn?.(`dsh-code-index: 对账失败 ${root}：${e?.message ?? e}`)
+        }
+      }
+    }, config.sync.reconcileMs)
+    reconcileTimer.unref?.()
+  }
+
   ctx.effect(
     () => () => {
-      for (const entry of watchers.values()) {
-        try {
-          entry.watcher?.close()
-        } catch {
-          /* 已关闭 */
-        }
-        if (entry.timer) clearTimeout(entry.timer)
-      }
-      watchers.clear()
+      for (const entry of autoEntries.values()) entry.stop()
+      autoEntries.clear()
+      if (reconcileTimer) clearInterval(reconcileTimer)
+      reconcileTimer = null
     },
     'dsh-code-index: watchers',
   )
+
+  hydrateWatchers()
+  startReconcile()
 
   // ---------------------------------------------------------------- code_search
   registerTool({

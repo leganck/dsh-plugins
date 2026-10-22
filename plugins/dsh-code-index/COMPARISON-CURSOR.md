@@ -441,3 +441,43 @@ C 与 B 结果相同（连错的两题都一样）→ **该场景下切块策略
 2. **嵌入队列 FIFO 饿死小仓库**（0.8.2 修）：服务端原来把队首命名空间排干再换下一个。
    实测在 43,836 待嵌的大仓后面新建小仓库 → **181 s 后覆盖率仍是 0%**（新增代码在语义通道上搜不到）。
    改成**每批轮转**后：同一个仓库 **18.5 s 到 100%**。
+
+---
+
+## 十二、0.12 后续对齐（扫描边界 / 自动 freshness / simhash adopt）
+
+> 计划全文见 [`docs/code-index-cursor-alignment-plan.md`](../../docs/code-index-cursor-alignment-plan.md)。
+
+### 12.1 扫描边界
+
+- 新增 `.gitignore` / `.cursorignore` / `.cursorindexingignore` 解析；默认支持嵌套 `.gitignore`；
+- `.md` 默认索引，Office/PDF 不在 include；二进制伪装文件被嗅探跳过；
+- 明确**不解析构建系统**：business 5.0 中未启用的 Groovy 模块默认仍会索引，必须通过 ignore 或 `exclude` 排除；
+- `code_index_status` 报告 ignored 数量与来源。
+
+### 12.2 自动 freshness
+
+- `sync.watch` 默认打开，只监听已建过索引的仓库；
+- 持久 registry（`<DSH_HOME>/code-index/repos.json`）支持 DSH 重启后恢复；
+- 修复运行中丢事件：dirty 标记 + maxDelay；
+- 5 分钟 `scanStatus` 对账兜底；
+- 仓库级锁避免多 DSH 进程重复同步。
+
+### 12.3 simhash 复用
+
+Cursor 的机制（[官方博客](https://cursor.com/blog/secure-codebase-indexing)）是：
+
+```text
+Merkle tree → simhash → 服务端向量库找同团队近似 index
+→ 复制整份 index → content proof 过滤本地没有的文件
+```
+
+我们的实现**只借候选发现**：
+
+```text
+文件 manifest → path/content 两个 simhash
+→ 服务端 Hamming 候选 → 目标 chunks ∩ 候选 vectors 精确重叠
+→ 只复制目标确实拥有的 blobs/vectors
+```
+
+不复制候选 chunks/path，不做整份 index copy；同一 remote 仍按 lineage 自动共享。`remote.reuse` 默认 `suggest`，验证后可按团队策略切 `auto`。

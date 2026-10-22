@@ -1,18 +1,22 @@
 # DSH 插件仓（记忆 + 索引加速 + 多根工作空间）
 
 本仓库是一个**多插件仓库**：三个 DSH 插件 + 一个可选的远端检索服务。
-所有插件零运行时依赖，版本以各自的 `package.json` 为准（下表不再写死版本号，避免漂移）。
+插件尽量保持轻依赖（code-index 仅多一个纯 JS 的 `ignore` 解析器），版本以各自的 `package.json` 为准（下表不再写死版本号，避免漂移）。
 
 | 插件 | 作用 | 依赖 |
 |---|---|---|
 | [`plugins/dsh-memory-archive`](plugins/dsh-memory-archive/) | **记忆**：每次压缩（compaction）把被折叠的**逐字**轮次写成 `segment_NNN.md`，并维护 `INDEX.md`，同时向会话注入指针，让早期工具输出在长会话里可被重新检索 | 无（纯 node 内置模块） |
-| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | **索引加速**：本地 SQLite FTS5/BM25 + 可选**远端**语义检索/重排（RRF 融合），五个工具 `code_index` / `code_search` / `code_map` / `code_index_status` / `code_index_deps` | 无（parser 组为可选增强，按需装） |
+| [`plugins/dsh-code-index`](plugins/dsh-code-index/) | **索引加速**：本地 SQLite FTS5/BM25 + 可选**远端**语义检索/重排（RRF 融合），五个工具 `code_index` / `code_search` / `code_map` / `code_index_status` / `code_index_deps` | 纯 JS（`ignore`；parser 组为可选增强，按需装） |
 | [`plugins/dsh-multiroot`](plugins/dsh-multiroot/) | **多根工作空间**（脚手架）：`.dshworkspace.json` 声明多个根目录，`workspace_roots` 工具列出根 id/路径/只读/主根 | 无 |
 
 > 0.10.0 起 code-index 为 **remote-only**：本地不再有嵌入模型与重排模型，
 > 向量与重排都交给 [`server/code-index-service`](server/code-index-service/)；
 > 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，零模型）。
 > 远端不可用会自动退化 + 60 秒冷却后重试，不需要重启。
+
+## 规划
+
+- [code-index 与 Cursor 对齐计划](docs/code-index-cursor-alignment-plan.md)（已实施 P0–P3，发布验证中）
 
 ## 为什么这些放一起
 
@@ -39,8 +43,8 @@ plugin_manager(action: "install_bundle", target: "<release/*.tgz 或包目录的
 需要在 profile 补丁层按 id 覆盖成 `disabled: false` 并重启应用，`plugin_manager` 才可用。
 另外本 profile 由应用独占管理，`dsh plugin --profile …` CLI 那条路不可用。
 
-**安装期依赖**：三个插件都没有 `dependencies`（code-index 的 parser 组是运行期按需装，记忆插件与多根插件只用 node 内置模块），
-所以安装是纯 JS、秒级，不会触发 `pendingBuilds`。code-index 需要 AST 切块时再
+**安装期依赖**：memory/multiroot 没有 `dependencies`；code-index 只有纯 JS 的 `ignore`（无构建脚本），
+parser 组仍是运行期按需装。安装不触发 `pendingBuilds`；code-index 需要 AST 切块时再
 `code_index_deps action=install group=parser`（约 61 MB，按需）。
 
 ### 生效时机（实测，别搞混）
