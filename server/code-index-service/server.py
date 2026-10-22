@@ -1206,8 +1206,10 @@ function shortNs(ns) {
 }
 function renderRuntime(health, scopesBody) {
   const sc = (scopesBody && scopesBody.scopes) || [];
-  let chunks = 0, vectors = 0, used = 0;
-  for (const s of sc) { chunks += Number(s.chunks || 0); vectors += Number(s.vectors || 0); used += Number(s.totalBytes || 0); }
+  let chunks = 0, vectors = 0;
+  for (const s of sc) { chunks += Number(s.chunks || 0); vectors += Number(s.vectors || 0); }
+  // /v1/scopes 不返回字节数；存储占用取 /health 的 spaces[].totalBytes
+  const used = ((health && health.spaces) || []).reduce((a, x) => a + Number(x.totalBytes || 0), 0);
   const backlog = Math.max(0, chunks - vectors);
   const coverage = chunks ? (vectors / chunks) * 100 : 0;
   const limits = (health && health.limits) || {};
