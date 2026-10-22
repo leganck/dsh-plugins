@@ -91,6 +91,21 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 
 ## 配置
 
+### 在 DSH 里配置（0.11.5+）
+
+装好插件并重启 DSH 后，打开 **插件 → 内置插件配置 → 代码索引**，可以直接改：
+
+- **主设置**：远端地址 `remote.url`、API Key `remote.apiKey`（只写，不回显）
+- **高级设置**：向量模式 `vectors`、重排模式 `rerank`、本地索引目录 `advanced.indexDirBase`
+
+远端地址 + API Key 是接远端服务的全部必填项：`vectors` 默认 `auto`，有地址就自动走远端。
+`roots` 白名单、限速、超时、`exclude`、`chunking`、`sync` 等仍只通过下面的 YAML 配置；
+设置页保存时不会清空这些未展示字段。
+
+索引目录不是远端检索的必填项：留空时每个仓库用自己的 `.dsh-index/index.db`；改它只影响
+本地 SQLite 的位置，远端向量/重排仍走 `remote.url`。设置页保存后如果 `roots` 或索引目录变了，
+重新运行一次 `code_index` 重建本地索引。
+
 ```yaml
 - id: code-index
   name: "@local/dsh-code-index"          # 插件源 / install_bundle 安装后，模块名 = 包名
@@ -377,6 +392,7 @@ lib/query.js          查询 → 词项抽取（标识符 / 数字串 / 中文 n
 lib/search.js         FTS5 + 远端 kNN → RRF 融合（k=20）
 lib/indexer.js        建库/增量编排（远端清单同步、切块指纹强制重建）
 lib/remote.js         远端服务客户端（索引同步 / 重排 / 状态）
+lib/client.js         DSH 设置页（client 半，dsh.client 加载）
 test.mjs              核心自测：建库/检索/增量/删除/切块策略/扫描排除
 test-plugin.mjs       插件接口自测：注册面/错误路径/五工具真实调用
 verify-install.mjs    装后验证：从已安装包跑通模块加载、工具注册、parser 依赖状态
@@ -393,7 +409,7 @@ test-remote.mjs       远端地址/重排/配置校验/作用域夹具与多作�
 # 在插件目录里（或不带 --repo，用自动夹具仓库）
 node test-remote.mjs                            # 85 项：地址/重排/配置校验/作用域夹具/多作用域回退（本地 HTTP 桩）
 node test.mjs                                   # 125 项（Windows）/ 119 项（Linux）：建库/检索/增量/切块/排除/作用域
-node test-plugin.mjs                            # 74 项：契约与接口、五个工具真实调用
+node test-plugin.mjs                            # 81 项：契约与接口、五个工具真实调用、Config schema
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 
 # 在仓库根：三个插件一起跑
@@ -420,15 +436,16 @@ DSH 自带技能 `cordis-plugin-development`（位于 asar 内 `dsh-agent-preset
 | 注册用 `ctx.effect` 并返回清理 | ✅ 五个工具注册在一个带标签的 effect 里，卸载即回收 |
 | 显示元数据 + 图标 | ✅ `locale/{zh,en}.json` 的 `meta.title/description` + `icon.svg` |
 | `exports` / `files` 白名单 | ✅ 含 `./package.json`、`./locale/*.json` |
-| 不要 import `@deepseek-ai/*` 值 | ✅ 源码零 DSH 内部导入（有断言守着） |
-| 配置放 `Config` 以便用户在补丁层改 | ⚠️ **故意不导出 Schemastery `Config`**，理由见下 |
+| 不要 import `@deepseek-ai/*` 值 | ✅ 除声明式依赖 `@deepseek-ai/schemastery` 外零导入（有断言守着） |
+| 配置放 `Config` | ✅ 0.11.5 起导出；设置页只开放 5 个 volatile 字段，显式校验保留 |
 
-### 两个刻意的设计取舍
+### 设计取舍
 
-**① 不导出 Schemastery `Config`。** 同 `dsh-ops` 的选择：宿主这一半必须做到不 import 任何
-`@deepseek-ai/*` 值——那些名字由 profile 加载器提供，每多一个就多一条让插件加载失败的路。
-本插件就曾因缺少 `inject` 而**整行静默不生效**（见下）。改为显式校验并大声失败：
-键名写错/取值非法时抛出 `ConfigError`，指明是哪个键、允许什么。
+**① 导出 Config，但保留显式校验。** 0.11.5 起为了让 DSH 设置页读取/写入，导出 Schemastery
+`Config`；只有远端地址/API Key、`vectors`、`rerank`、`advanced.indexDirBase` 标成
+`.volatile()`，其余字段仍只走 YAML。Loader 的 schema 负责类型与默认值，原有的
+`userConfigToInternal` / `normalizeConfig` 继续负责语义校验并抛 `ConfigError`——键名写错、
+`vectors: remote` 却没 URL 等错误仍在 apply 时大声失败。
 
 **② 加载记录仪。** `~/.dsh/code-index/_boot.log` 记录模块导入、`apply()` 进入/结束/抛错
 （含堆栈）。这不是装饰：插件的失败模式是"什么都不发生"，而应用的报错去向不可靠
