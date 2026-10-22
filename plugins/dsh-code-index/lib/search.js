@@ -272,6 +272,7 @@ export async function searchFusedRemote(
   question,
   {
     topK = 10,
+    mode = 'auto',
     remoteHits = [],
     remoteMeta = null,
     reranker = null,
@@ -315,6 +316,10 @@ export async function searchFusedRemote(
   })
 
   let ranked = [...acc.values()]
+  // 调用方可以按次选择通道：fts 只保留本地 FTS 命中，vector 只保留远端向量命中。
+  // 以前远端模式无条件融合两路，导致 code_search(mode=fts|vector) 在远端开启时被静默忽略。
+  if (mode === 'fts') ranked = ranked.filter((e) => e.ftsRank !== null)
+  else if (mode === 'vector') ranked = ranked.filter((e) => e.vecRank !== null)
   ranked.sort((a, b) => b.score - a.score)
   let byHash = store.chunksByHashes(ranked.map((e) => e.hash))
 
@@ -377,7 +382,7 @@ export async function searchFusedRemote(
   }
 
   const notes = []
-  if (!remoteHits.length) notes.push('远端向量通道没有返回结果（可能服务端还没嵌入完该仓库）')
+  if (mode !== 'fts' && !remoteHits.length) notes.push('远端向量通道没有返回结果（可能服务端还没嵌入完该仓库）')
   if (stale) notes.push(`${stale} 条远端命中的块在本地已不存在（本地索引比远端新，跑一次 code_index 可对齐）`)
   // 阈值取 0.999 而不是 1：99.67% 会被 toFixed(0) 显示成「100%」，却还提示「仍在嵌入」，自相矛盾
   if (remoteMeta?.coverage !== undefined && remoteMeta.coverage < 0.999) {
@@ -385,7 +390,15 @@ export async function searchFusedRemote(
   }
 
   return {
-    mode: remoteHits.length && fts.length ? 'hybrid-remote' : remoteHits.length ? 'vector-remote' : 'fts',
+    mode: mode === 'fts'
+      ? 'fts'
+      : mode === 'vector'
+        ? 'vector-remote'
+        : remoteHits.length && fts.length
+          ? 'hybrid-remote'
+          : remoteHits.length
+            ? 'vector-remote'
+            : 'fts',
     terms,
     note: notes.join('；'),
     results,

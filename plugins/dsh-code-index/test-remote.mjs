@@ -337,6 +337,24 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
     JSON.stringify(scopedHit?.scope),
   )
 
+  // ---- 4c2. 远端开启时按次选择通道：mode=fts 不请求远端，mode=vector 不混本地关键词 ----
+  stub.state.searchCalls.length = 0
+  const ftsOnly = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5, mode: 'fts' }, {})
+  const ftsOnlyText = ftsOnly.content[0].text
+  check('mode=fts 不请求远端（即使 vectors=remote）', stub.state.searchCalls.length === 0, `calls=${stub.state.searchCalls.length}`)
+  check('mode=fts 输出通道为 fts，并说明跳过远端', /通道 fts/.test(ftsOnlyText) && /mode=fts/.test(ftsOnlyText), ftsOnlyText.slice(0, 240))
+
+  stub.state.searchCalls.length = 0
+  const vectorOnly = await searchTool.execute({ query: 'ZEPHYRQUARTZ', path: repo, top_k: 5, mode: 'vector' }, {})
+  const vectorOnlyText = vectorOnly.content[0].text
+  check('mode=vector 请求远端', stub.state.searchCalls.length === 1, `calls=${stub.state.searchCalls.length}`)
+  check('mode=vector 输出通道为 vector-remote', /通道 vector-remote/.test(vectorOnlyText), vectorOnlyText.slice(0, 240))
+  check(
+    'mode=vector 结果只保留向量命中（没有纯 FTS 项）',
+    (vectorOnly.structuredContent?.results ?? []).every((h) => typeof h.vecRank === 'number'),
+    JSON.stringify(vectorOnly.structuredContent?.results?.map((h) => ({ fts: h.ftsRank, vec: h.vecRank }))),
+  )
+
   // ---- 4d. 旧服务端 404 同样回退 ----
   stub.state.mode = 'legacy404'
   stub.state.searchCalls.length = 0
