@@ -363,10 +363,9 @@ export function computeRepoState(store) {
  * @param {object} o
  * @param {import('./store.js').Store} o.store
  * @param {object} o.client createRemoteIndex() 的返回值
- * @param {string} [o.namespace] 写作用域命名空间（由调用方按 lib/scope.js 推导；
- *   省略时回退旧默认 `<repoId>@<fingerprint>`，保持 0.10.x 行为）
+ * @param {string} [o.namespace] 显式 namespace（通常是远程配置的逃生口）；省略时由服务端按 repoId/chunkFp/scope 计算
  * @param {{kind:string, ref:string, ttlDays?:number|null}|null} [o.scope]
- *   作用域元数据：有配置时随 payload 发给服务端（`POST /v1/repos/{ns}/sync` 的可选字段）
+ *   作用域元数据：有配置时随 payload 发给服务端（`POST /v1/namespaces/sync`）
  */
 export async function syncRemote({
   store,
@@ -387,7 +386,6 @@ export async function syncRemote({
   uploadBatch = 256,
   log = () => {},
 }) {
-  const ns = namespace || `${repoId}@${fingerprint}`
   const state = computeRepoState(store)
   const lastState = store.getMeta('remote_repo_state')
   const lastRev = store.getMeta('remote_revision')
@@ -399,17 +397,19 @@ export async function syncRemote({
     tag,
     repoState: state,
     lineage: lineage ?? undefined,
-    // 只有配置了作用域才带 scope：旧服务端不该被多出来的字段打扰（它对未知字段的容忍度未测）
-    ...(scope
+    // 显式 namespace 优先；否则必须给服务端 scope 输入（默认 main:default）。
+    ...(!namespace
       ? {
           scope: {
-            kind: scope.kind,
-            ref: scope.ref,
-            ...(scope.ttlDays === undefined || scope.ttlDays === null ? {} : { ttlDays: scope.ttlDays }),
+            kind: (scope || { kind: 'main', ref: 'default' }).kind,
+            ref: (scope || { kind: 'main', ref: 'default' }).ref,
+            ...(scope?.ttlDays === undefined || scope?.ttlDays === null ? {} : { ttlDays: scope.ttlDays }),
           },
         }
       : {}),
     noEmbed,
+    // 显式 namespace 是例外输入；否则服务端按 repoId/chunkFp/scope 计算 canonical namespace。
+    ...(namespace ? { namespace } : {}),
     // 指纹必须**连块数一起**交给服务端：只有指纹一致、块数也一致，才算"内容确实一样"。
     // 否则"本地早已建好、本轮 0 变更"的空清单会让服务端记下指纹却没有内容（实测踩过）。
     chunkCount: store.stats().chunks,
@@ -427,36 +427,38 @@ export async function syncRemote({
     // 但服务端可能被删过/重置过（例如后台清理了命名空间）→ diff 会 409，必须同样自愈成全量，
     // 否则会一直卡在"同步冲突"（实测：删掉 scope 后本地 meta 仍记着旧 revision）。
     try {
-      res = await client.sync(ns, { ...base, mode: 'diff', revision: Number(lastRev) })
+      res = await client.sync({ ...base, mode: 'diff', revision: Number(lastRev) })
     } catch (e) {
       if (e.code !== 'revision-conflict') throw e
       log(`远端 revision 冲突（服务端 ${e.revision}），改走全量清单`)
-      res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+      res = await client.sync({ ...base, mode: 'full', upsert: store.manifest(), remove: [] })
     }
   } else if (firstContact) {
     // **首次连这台服务端：状态未知**，必须发全量清单。
     // 否则"本地索引早就建好、本轮 0 变更"会发一份空清单，服务端据此认为库里没有块，
     // 于是 missing=0 —— 表现是"同步成功但一个向量都没算"（ES 16 万块那次就是这么踩到的）。
-    res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+    res = await client.sync({ ...base, mode: 'full', upsert: store.manifest(), remove: [] })
   } else {
     try {
-      res = await client.sync(ns, { ...base, mode: 'diff', revision: Number(lastRev), upsert: changedFiles, remove: removed })
+      res = await client.sync({ ...base, mode: 'diff', revision: Number(lastRev), upsert: changedFiles, remove: removed })
     } catch (e) {
       if (e.code !== 'revision-conflict') throw e
       // 服务端的 revision 与本地记录不一致（多客户端/服务端重置）→ 全量自愈
       log(`远端 revision 冲突（服务端 ${e.revision}），改走全量清单`)
-      res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+      res = await client.sync({ ...base, mode: 'full', upsert: store.manifest(), remove: [] })
     }
   }
   // 自愈：服务端报告 0 块但本地确有块 → 它被重置过，补一次全量。
   // 注意**必须也覆盖 unchanged 分支**：本地 meta 记着"已同步"，服务端却空了，短路会一直骗自己。
   if ((res.chunks ?? 0) === 0 && store.stats().chunks > 0) {
     log('服务端报告 0 块但本地有索引 → 补发全量清单')
-    res = await client.sync(ns, { ...base, mode: 'full', upsert: store.manifest(), remove: [] })
+    res = await client.sync({ ...base, mode: 'full', upsert: store.manifest(), remove: [] })
   }
-  // **以服务端返回的 namespace 为准**：命名空间规范的唯一权威是服务端（旧服务端可能不做任何
-  // 规范化、或把 legacy 空间原样返回）。它没回时才用本地推导值。
-  const serverNamespace = typeof res.namespace === 'string' && res.namespace ? res.namespace : ns
+  // 服务端是 namespace canonical 的唯一权威；首次同步没有本地 namespace 也完全正常。
+  const serverNamespace = typeof res.namespace === 'string' ? res.namespace.trim() : ''
+  if (!serverNamespace) {
+    throw new Error('服务端 sync 响应缺少 namespace；服务端版本过旧或响应异常')
+  }
 
   // 只上传服务端缺向量的那些块的正文（幂等：已存在的会被服务端计入 deduped）
   const missing = res.missing ?? []

@@ -1,13 +1,13 @@
 """索引同步客户端（Python 版）：把 worktree 切块后同步到 code-index-service。
 
 协议（与服务端/插件完全一致）：
-  POST /v1/repos/{namespace}/sync
+  POST /v1/namespaces/sync
     {repoId, chunkFp, url, tag, repoState, revision, mode:'full'|'diff',
      upsert:[{path, hash, chunks:[{hash,start,end}]}], remove:[path],
      chunkCount, noEmbed, scope?:{kind, ref, commit?, ttlDays?}}
     → {revision, unchanged, missing:[hash...], chunks, vectors, coverage, namespace?}
-  POST /v1/repos/{namespace}/chunks   {bodies:[{hash, body}]}
-  POST /v1/repos/{namespace}/embed    {rate?}   （触发服务端后台嵌入）
+  POST /v1/namespaces/{namespace}/chunks   {bodies:[{hash, body}]}
+  POST /v1/namespaces/{namespace}/embed    {rate?}   （触发服务端后台嵌入）
 
 默认 namespace = `{repoId}@{chunkFp}`（旧行为，INDEX_SCOPE_MODE=repo 时不变）；
 档3 作用域模式下由 worker 先 `POST /v1/scopes/resolve` 拿到 namespace 再传进来，
@@ -146,16 +146,15 @@ class IndexSync:
     ) -> SyncResult:
         """同步一个 worktree。
 
-        - `namespace=None, scope=None`：旧行为（`{repo_id}@{chunk_fp}`），服务端零感知；
-        - `namespace=<服务端 resolve 结果>, scope={kind,ref,...}`：档3 作用域快照，
-          payload 带 scope，最终 namespace 以响应体为准（没给则回退本地值）。
+        - 默认不带 namespace：服务端按 repoId/chunkFp/scope 计算 canonical namespace；
+        - `namespace=<显式值>`：逃生口，服务端校验/保留；
+        - 响应里的 namespace 是权威值，后续 chunks/embed 都用它。
         """
         import time
 
         t0 = time.monotonic()
-        local_ns = namespace or f"{repo_id}@{chunk_fp}"
         manifest, bodies, repo_state, chunk_count = build_manifest(worktree, chunking=chunking)
-        res = SyncResult(namespace=local_ns, repo_state=repo_state, files=len(manifest))
+        res = SyncResult(namespace=namespace or "", repo_state=repo_state, files=len(manifest))
 
         base = {
             "repoId": repo_id,
@@ -166,11 +165,14 @@ class IndexSync:
             "noEmbed": no_embed,
             "chunkCount": chunk_count,
         }
+        if namespace:
+            base["namespace"] = namespace
         if scope:
             base["scope"] = dict(scope)
+        elif not namespace:
+            base["scope"] = {"kind": "main", "ref": "default"}
         last_state = (state or {}).get("repo_state")
         last_rev = (state or {}).get("revision")
-        ns_path = f"/v1/repos/{urllib.parse.quote(local_ns, safe='')}"
 
         if last_state == repo_state and last_rev is not None:
             payload = {**base, "mode": "diff", "revision": int(last_rev)}
@@ -180,23 +182,28 @@ class IndexSync:
             payload = {**base, "mode": "diff", "revision": int(last_rev), "upsert": manifest, "remove": []}
 
         try:
-            resp = self._post(f"{ns_path}/sync", payload)
+            resp = self._post("/v1/namespaces/sync", payload)
         except HttpError as e:
             body = (e.body or "").lower()
             if e.status == 409 and "revision-conflict" in body:
                 log_fn("同步 revision 冲突，改走全量清单")
-                resp = self._post(f"{ns_path}/sync", {**base, "mode": "full", "upsert": manifest, "remove": []})
+                resp = self._post("/v1/namespaces/sync", {**base, "mode": "full", "upsert": manifest, "remove": []})
             else:
                 raise
 
         missing = list(resp.get("missing") or [])
-        # 档3：以服务端返回的 namespace 为准；旧服务端没有该字段时沿用本地值
-        res.namespace = str((resp or {}).get("namespace") or local_ns)
+        # 服务端是 canonical namespace 的唯一权威；响应必须带 namespace。
+        res.namespace = str((resp or {}).get("namespace") or "")
+        if not res.namespace:
+            raise RuntimeError("服务端 sync 响应缺少 namespace；服务端版本过旧或响应异常")
         res.revision = int(resp.get("revision") or 0)
         res.unchanged = bool(resp.get("unchanged"))
         res.missing = len(missing)
         res.chunks = int(resp.get("chunks") or 0)
         res.vectors = int(resp.get("vectors") or 0)
+
+        # 后续 chunks/embed 统一使用服务端返回的 canonical namespace。
+        ns_path = f"/v1/namespaces/{urllib.parse.quote(res.namespace, safe='')}"
 
         # 只上传服务端缺的正文（幂等）
         for i in range(0, len(missing), self.batch):
