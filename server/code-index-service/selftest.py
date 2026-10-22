@@ -149,7 +149,10 @@ def req_form(path, fields):
 
 
 def sync(ns, payload, gz=False):
-    return req("POST", f"/v1/repos/{ns}/sync", payload, gz=gz)
+    # 旧测试显式指定 namespace；生产客户端首次同步不带 namespace（服务端计算）。
+    data = dict(payload)
+    data.setdefault("namespace", ns)
+    return req("POST", "/v1/namespaces/sync", data, gz=gz)
 
 
 def nsq(ns):
@@ -160,11 +163,11 @@ def nsq(ns):
 def wait_vectors(ns, want, timeout=20):
     t0 = time.time()
     while time.time() - t0 < timeout:
-        st, body = req("GET", f"/v1/repos/{nsq(ns)}/status")
+        st, body = req("GET", f"/v1/namespaces/{nsq(ns)}/status")
         if body.get("vectors", 0) >= want:
             return body
         time.sleep(0.1)
-    return req("GET", f"/v1/repos/{nsq(ns)}/status")[1]
+    return req("GET", f"/v1/namespaces/{nsq(ns)}/status")[1]
 
 
 def main():
@@ -218,9 +221,9 @@ def main():
 
     print("\n[3] 上传正文（幂等）")
     bodies = [{"hash": h, "body": b} for cs in files.values() for h, b, _s, _e in cs]
-    st, r1 = req("POST", f"/v1/repos/{NS}/chunks", {"bodies": bodies})
+    st, r1 = req("POST", f"/v1/namespaces/{NS}/chunks", {"bodies": bodies})
     check("首次全部 accepted", r1.get("accepted") == 5 and r1.get("deduped") == 0, r1)
-    st, r2 = req("POST", f"/v1/repos/{NS}/chunks", {"bodies": bodies})
+    st, r2 = req("POST", f"/v1/namespaces/{NS}/chunks", {"bodies": bodies})
     check("重复上传全部 deduped", r2.get("accepted") == 0 and r2.get("deduped") == 5, r2)
 
     print("\n[4] 后台嵌入")
@@ -240,7 +243,7 @@ def main():
     st, body3 = sync(NS, manifest(files, "state-2"))
     check("revision 递增到 3（2b 已推进过一次）", body3.get("revision") == 3, body3.get("revision"))
     check("只缺 h6", body3.get("missing") == ["h6"], body3.get("missing"))
-    req("POST", f"/v1/repos/{NS}/chunks", {"bodies": [{"hash": "h6", "body": "class A2 { }"}]})
+    req("POST", f"/v1/namespaces/{NS}/chunks", {"bodies": [{"hash": "h6", "body": "class A2 { }"}]})
     stt = wait_vectors(NS, 6)
     check("向量补到 6", stt.get("vectors") == 6, stt)
 
@@ -251,7 +254,7 @@ def main():
     payload["remove"] = ["c.java"]
     st, body4 = sync(NS, payload)
     check("删除后 chunks = 4", body4.get("chunks") == 4, body4)
-    lid = req("GET", f"/v1/repos/{NS}/status")[1]["lineage"]
+    lid = req("GET", f"/v1/namespaces/{NS}/status")[1]["lineage"]
     st, g = req("POST", "/v1/admin/gc", {"lineage": lid, "retentionDays": 0})
     check("GC 清掉了 2 个 blob", g.get("blobs") == 2, g)
     check("GC 清掉了 2 个向量", g.get("vectors") == 2, g)
@@ -281,13 +284,13 @@ def main():
     }
     st, o1 = sync(NS2, other)
     check("另一血统里 h1 也算缺（不跨血统共享）", o1.get("missing") == ["h1"], o1.get("missing"))
-    lid2 = req("GET", f"/v1/repos/{NS2}/status")[1]["lineage"]
+    lid2 = req("GET", f"/v1/namespaces/{NS2}/status")[1]["lineage"]
     check("两个血统 id 不同", lid != lid2)
     st, ad = req("POST", f"/v1/lineages/{lid2}/adopt", {"from": lid, "hashes": ["h1"]})
     check("adopt 复制了 1 个向量", ad.get("vectors") == 1, ad)
     st, o2 = sync(NS2, {"repoState": "o2", "mode": "full", "chunkFp": "fp1", "upsert": other["upsert"], "remove": []})
     check("adopt 后 h1 不再缺", o2.get("missing") == [], o2.get("missing"))
-    lid2b = req("GET", f"/v1/repos/{NS2}/status")[1]["lineage"]
+    lid2b = req("GET", f"/v1/namespaces/{NS2}/status")[1]["lineage"]
     check("最小载荷不会造出新血统", lid2b == lid2, (lid2, lid2b))
 
     print("\n[11] 存储上界 → 507")
@@ -307,11 +310,12 @@ def main():
 
     print("\n[13] gzip 请求体")
     NS3 = "gz-abc@fp1"
-    st, g3 = req("POST", f"/v1/repos/{NS3}/sync", manifest(files, "g1"), gz=True)
+    m3pay = manifest(files, "g1"); m3pay["namespace"] = NS3
+    st, g3 = req("POST", "/v1/namespaces/sync", m3pay, gz=True)
     check("gzip 同步成功", st == 200 and g3.get("chunks") == sum(len(v) for v in files.values()), (st, g3))
 
     print("\n[14] 未知命名空间 / 自述")
-    st, nf = req("GET", "/v1/repos/nope/status")
+    st, nf = req("GET", "/v1/namespaces/nope/status")
     check("未知命名空间 → 404", st == 404, (st, nf))
     st, h = req("GET", "/health")
     check("health 带 tag", isinstance(h.get("tag"), str) and h["tag"].startswith("fake-model"), h.get("tag"))
@@ -336,11 +340,11 @@ def main():
         }
         if scope:
             payload["scope"] = scope
-        return req("POST", f"/v1/repos/{nsq(ns)}/sync", payload)
+        return req("POST", "/v1/namespaces/sync", payload)
 
     def upload(ns, files_map):
         bodies = [{"hash": h, "body": b} for cs in files_map.values() for h, b, _s, _e in cs]
-        return req("POST", f"/v1/repos/{nsq(ns)}/chunks", {"bodies": bodies})[1]
+        return req("POST", f"/v1/namespaces/{nsq(ns)}/chunks", {"bodies": bodies})[1]
 
     print("\n[15] namespace 规范夹具（scope_format.json）")
     fixture_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scope_format.json")
@@ -388,7 +392,7 @@ def main():
           item is not None and item.get("kind") == "branch" and item.get("ref") == "feat/x"
           and item.get("expiresAt") and (item.get("ttlRemaining") or 0) > 0 and item.get("pinned") is False,
           item)
-    st, sst = req("GET", f"/v1/repos/{nsq(NS_BR)}/status")
+    st, sst = req("GET", f"/v1/namespaces/{nsq(NS_BR)}/status")
     check("status 带 scope 元数据",
           sst.get("scope", {}).get("kind") == "branch" and sst["scope"].get("ref") == "feat/x"
           and sst["scope"].get("commit") == "c0ffee", sst.get("scope"))
@@ -398,7 +402,8 @@ def main():
 
     print("\n[17] legacy 命名空间 pinned，janitor 不删")
     LEG = "legacy-demo@fp1"
-    st, lg = req("POST", f"/v1/repos/{nsq(LEG)}/sync", {
+    st, lg = req("POST", "/v1/namespaces/sync", {
+        "namespace": LEG,
         "repoId": REPO, "chunkFp": "fp1", "url": URL2, "repoState": "lg-1", "mode": "full",
         "upsert": [{"path": "l.java", "hash": "file-l.java", "chunks": [{"hash": "hl1", "start": 1, "end": 2}]}],
         "remove": [],
@@ -406,7 +411,7 @@ def main():
     check("legacy 同步成功", st == 200, (st, lg))
     st, sw = req("POST", "/v1/admin/sweep", {})
     check("sweep 不删 legacy", LEG not in sw.get("deleted", []), sw)
-    st, lstt = req("GET", f"/v1/repos/{nsq(LEG)}/status")
+    st, lstt = req("GET", f"/v1/namespaces/{nsq(LEG)}/status")
     check("legacy = pinned + 无过期时间", lstt.get("scope", {}).get("kind") == "legacy"
           and lstt["scope"].get("pinned") is True and lstt["scope"].get("expiresAt") is None, lstt.get("scope"))
 
@@ -439,7 +444,7 @@ def main():
     upload(NS_WB, fb)
     wait_vectors(NS_WA, 2)
     wait_vectors(NS_WB, 2)
-    lid3 = req("GET", f"/v1/repos/{nsq(NS_WB)}/status")[1]["lineage"]
+    lid3 = req("GET", f"/v1/namespaces/{nsq(NS_WB)}/status")[1]["lineage"]
 
     def blob_exists(h):
         return server.store.db.execute(
@@ -573,11 +578,12 @@ def main():
         "remove": [],
         "scope": {"kind": "branch", "ref": "feat/n"},
     }
-    st, nt = req("POST", f"/v1/repos/{nsq(NS_NULL)}/sync", null_payload)
+    null_payload = {**null_payload, "namespace": NS_NULL}
+    st, nt = req("POST", "/v1/namespaces/sync", null_payload)
     check("显式 tag=null 的 sync → 200", st == 200, nt)
-    stt = req("GET", f"/v1/repos/{nsq(NS_NULL)}/status")[1]
+    stt = req("GET", f"/v1/namespaces/{nsq(NS_NULL)}/status")[1]
     check("repos.tag 被补成服务端当前 tag", stt.get("tag") == server.state["info"].get("tag"), stt.get("tag"))
-    req("POST", f"/v1/repos/{nsq(NS_NULL)}/chunks",
+    req("POST", f"/v1/namespaces/{nsq(NS_NULL)}/chunks",
         {"bodies": [{"hash": "hn1", "body": "null tag probe"}]})
     server.governor.kick(NS_NULL)
     stv = wait_vectors(NS_NULL, 1)
@@ -614,7 +620,7 @@ def main():
         check("log 需鉴权（401）", st == 401, st)
         st, _ = req("GET", "/v1/scopes")
         check("scopes 需鉴权（401）", st == 401, st)
-        st, _ = req("GET", f"/v1/repos/{nsq(NS_NULL)}/status")
+        st, _ = req("GET", f"/v1/namespaces/{nsq(NS_NULL)}/status")
         check("repo status 需鉴权（401）", st == 401, st)
         st, _ = req("POST", "/embed", {"texts": ["auth probe"]})
         check("POST 需鉴权（401）", st == 401, st)
@@ -682,12 +688,13 @@ def main():
         "remove": [],
         "scope": {"kind": "branch", "ref": "feat/n"},
     }
-    st, sy = req("POST", f"/v1/repos/{nsq(NS_NAME)}/sync", named)
+    named = {**named, "namespace": NS_NAME}
+    st, sy = req("POST", "/v1/namespaces/sync", named)
     check("sync 带 repoName → 200", st == 200, sy)
     stl, lst = req("GET", "/v1/scopes?repoId=named01")
     row = (lst.get("scopes") or [{}])[0]
     check("/v1/scopes 返回可读仓库名", row.get("repoName") == "smartpos-crm-order", row)
-    sts, st_body = req("GET", f"/v1/repos/{nsq(NS_NAME)}/status")
+    sts, st_body = req("GET", f"/v1/namespaces/{nsq(NS_NAME)}/status")
     check("status 带 repoName", st_body.get("repoName") == "smartpos-crm-order", st_body.get("repoName"))
     old_name_row = istore.IndexStore  # noqa: F841  （仅保持脚本结构清晰）
     check("健康检查 spaces 也带 repoName",
@@ -1057,7 +1064,7 @@ def main():
           and isinstance(row_ca["simhash_at"], int), row_ca)
     bodies_a = [{"hash": h, "body": "body-" + h} for h in A_SHARED + [A_ONLY]]
     bodies_a.append({"hash": STALE, "body": "body-" + STALE})  # 候选有正文，但只有 stale tag 向量
-    req("POST", f"/v1/repos/{NS_CA}/chunks", {"bodies": bodies_a})
+    req("POST", f"/v1/namespaces/{NS_CA}/chunks", {"bodies": bodies_a})
     stv = wait_vectors(NS_CA, len(A_SHARED) + 1)
     check("候选仓库块全部嵌入（adopt 的前提）", stv.get("vectors") == 9, stv.get("vectors"))
     stale_vec = server.embedder.embed(["stale-tag-probe"])[0]

@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-remote-home-'))
 
 const { endpointsOf, createRemoteReranker, createRemoteIndex, RemoteError } = await import('./lib/remote.js')
-const { canonicalNamespace, normalizeNamespace, refToken, safeRef, validateScope } = await import('./lib/scope.js')
+const { normalizeNamespace, refToken, safeRef, validateScope } = await import('./lib/scope.js')
 const { apply } = await import('./index.js')
 
 let pass = 0
@@ -99,7 +99,7 @@ async function makeStub(opts = {}) {
 
 /**
  * 索引/检索桩（0.11.0 作用域测试）：
- *   POST /v1/repos/{ns}/sync -> 记下路径 & payload，返回一个最小可用的同步结果
+ *   POST /v1/namespaces/sync -> 服务端计算 namespace，返回最小同步结果
  *   POST /v1/search          -> 按 state.mode 决定是否接受 `namespaces`：
  *     'multi'      新服务端：接受；
  *     'legacy400'  旧服务端：带 namespaces → 400（参数不被认）；
@@ -125,10 +125,16 @@ async function makeIndexStub({ mode = 'multi' } = {}) {
         /* 非 JSON 请求体（不会发生；保守处理） */
       }
       if (req.method === 'GET') return send(200, { ready: true, rerank_ready: false })
-      if (req.url.endsWith('/sync')) {
-        const namespace = decodeURIComponent(req.url.replace(/^\/v1\/repos\//, '').replace(/\/sync$/, ''))
-        state.syncCalls.push({ url: req.url, namespace, body })
-        return send(200, { revision: 1, chunks: 1, vectors: 0, missing: [], unchanged: false, coverage: 1 })
+      if (req.url === '/v1/namespaces/sync') {
+        let namespace = body.namespace
+        if (!namespace && body.scope) {
+          try {
+            const token = body.scope.kind === 'main' ? 'default' : refToken(body.scope.kind, body.scope.ref)
+            namespace = `${body.repoId}@${body.chunkFp}#${body.scope.kind === 'worktree' ? 'wt' : body.scope.kind}:${token}`
+          } catch { namespace = null }
+        }
+        state.syncCalls.push({ url: req.url, namespace: namespace || 'legacy-ns', body })
+        return send(200, { revision: 1, chunks: 1, vectors: 0, missing: [], unchanged: false, coverage: 1, namespace: namespace || 'legacy-ns' })
       }
       if (req.url === '/v1/search') {
         state.searchCalls.push({ body })
@@ -178,22 +184,9 @@ console.log('\n[2] 作用域命名规范（scope_format.json 夹具）')
     check(`读取夹具 ${fixturePath}`, false, `本测试需要在 monorepo 里跑：${e.message}`)
   }
   if (fixture) {
-    for (const c of fixture.cases) {
-      const got = canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref)
-      check(`${c.kind} ${JSON.stringify(c.ref)} → ${c.expect}`, got === c.expect, `实际 ${got}`)
-    }
     for (const c of fixture.legacy_cases) {
       const got = normalizeNamespace(c.namespace)
       check(`legacy 命名空间原样保留（${c.namespace.slice(0, 22)}…）`, got === c.expect, `实际 ${got}`)
-    }
-    for (const c of fixture.invalid_cases) {
-      let err = null
-      try {
-        canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref)
-      } catch (e) {
-        err = e
-      }
-      check(`非法输入按 reason 拒绝：${c.reason}`, err?.reason === c.reason, String(err?.reason ?? err))
     }
   }
   check('safeRef 把连续非法字符压成一个 -', safeRef('feat//x!!y') === 'feat-x-y', safeRef('feat//x!!y'))

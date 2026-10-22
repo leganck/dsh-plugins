@@ -14,7 +14,7 @@ worker ─▶ MirrorManager（每项目一镜像，fetch MR ref + 目标分支�
    │        ├ head worktree（评审对象）
    │        └ base worktree（建图 / 索引 / grep）
    ├─▶ git diff base...head（覆盖 API 的 too_large 盲区）
-   ├─▶ IndexSync → code-index-service（/v1/repos/{ns}/sync|chunks|embed）
+   ├─▶ IndexSync → code-index-service（/v1/namespaces/sync、/v1/namespaces/{ns}/chunks|embed）
    ├─▶ Graph（tree-sitter 语法图 + 置信度）→ callers/callees/tests
    ├─▶ Planner（1 次）→ 并行 Reviewer（block 级）→ 并行 Verifier（候选级，≤2 轮取证）
    ├─▶ Aggregator（去重/排序/阈值/截断；confidence<0.8 的图谱边不进 evidence）
@@ -70,7 +70,7 @@ clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地�
 要点：
 
 - **namespace 以服务端为准**：review 侧不复制 canonical 规则。同步前先
-  `POST /v1/scopes/resolve` 拿快照 namespace，再 `/v1/repos/{ns}/sync`（payload 带
+  `POST /v1/scopes/resolve` 拿快照 namespace，再 `/v1/namespaces/sync`（payload 带
   `scope:{kind,ref,commit?,ttlDays?}`）；同步响应里的 `namespace` 若存在则覆盖本地。
 - **多作用域检索**：`pr` 模式把 `[baseNs, prNs]` 作为一个列表传给 `/v1/search`
  （`{"namespaces":[{"namespace":...},...]}`），服务端按内容 hash 去重并加权 RRF 融合；

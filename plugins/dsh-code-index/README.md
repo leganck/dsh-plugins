@@ -460,7 +460,7 @@ advanced:
 index.js              插件入口：apply(ctx, config) + 五个工具定义 + 加载标记
 lib/store.js          SQLite schema（files / chunks / chunks_fts / vectors / meta）+ FTS/地图/清单查询
 lib/repo.js           仓库身份：repoId / git origin 归一化 / 远端命名空间
-lib/scope.js          作用域命名规范：canonicalNamespace / refToken / safeRef / 配置校验（档 3）
+lib/scope.js          作用域输入校验：refToken / safeRef / remote.scope 配置校验（namespace 由服务端计算）
 lib/parser-hints.js   "这个仓库本可按语法切块但缺语法包"的检测与提示渲染
 lib/reranker.js       重排档位定义（off / fast / quality 的候选数）
 lib/strategies.js     切块策略表（扩展名 → ast|heuristic|window）+ 配置覆盖解析

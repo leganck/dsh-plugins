@@ -266,7 +266,8 @@ const NS_ENC = (namespace) => encodeURIComponent(namespace)
 export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, apiKey = null, log = () => {} } = {}) {
   const client = new RemoteClient({ url, timeoutMs, apiKey, log })
   const base = client.endpoints.base
-  const repoUrl = (namespace, action) => `${base}/v1/repos/${NS_ENC(namespace)}${action ? `/${action}` : ''}`
+  // namespace 是单个 URL segment；服务端负责 canonical 计算，sync 走无 namespace 入口。
+  const namespaceUrl = (namespace, action) => `${base}/v1/namespaces/${NS_ENC(namespace)}${action ? `/${action}` : ''}`
 
   /** 大载荷走 gzip（16 万块的清单 ≈ 10 MB → 压完 2–3 MB）；返回 {rawBody, headers} */
   function encoded(body) {
@@ -301,14 +302,27 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
   return {
     url: base,
     client,
-    /** 命名空间清单差分（payload 见 server.py 的 /sync 文档） */
-    async sync(namespace, payload) {
+    /**
+     * 同步入口：不要求客户端先知道 namespace。
+     * payload 必须带 repoId / chunkFp / scope（或显式 namespace）；服务端返回 canonical namespace。
+     */
+    async sync(payload) {
       const enc = encoded(payload)
       try {
-        return await client.request('POST', repoUrl(namespace, 'sync'), enc.body, {
+        return await client.request('POST', `${base}/v1/namespaces/sync`, enc.body, {
           headers: enc.headers,
           rawBody: enc.rawBody,
           timeoutMs: Math.max(timeoutMs, 15000),
+        })
+      } catch (e) {
+        rethrow(e)
+      }
+    },
+    /** 恢复/诊断：服务端按输入算 canonical namespace。 */
+    async resolve(payload) {
+      try {
+        return await client.request('POST', `${base}/v1/namespaces/resolve`, payload, {
+          timeoutMs: Math.max(timeoutMs, 5000),
         })
       } catch (e) {
         rethrow(e)
@@ -318,7 +332,7 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
     async uploadChunks(namespace, bodies) {
       const enc = encoded({ bodies })
       try {
-        return await client.request('POST', repoUrl(namespace, 'chunks'), enc.body, {
+        return await client.request('POST', namespaceUrl(namespace, 'chunks'), enc.body, {
           headers: enc.headers,
           rawBody: enc.rawBody,
           timeoutMs: Math.max(timeoutMs, 20000),
@@ -335,7 +349,7 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
      */
     async uploadVectors(namespace, vectors, tag) {
       try {
-        return await client.request('POST', repoUrl(namespace, 'vectors'), { vectors, tag }, { timeoutMs: Math.max(timeoutMs, 60000) })
+        return await client.request('POST', namespaceUrl(namespace, 'vectors'), { vectors, tag }, { timeoutMs: Math.max(timeoutMs, 60000) })
       } catch (e) {
         rethrow(e)
       }
@@ -343,14 +357,14 @@ export function createRemoteIndex({ url, timeoutMs = REMOTE_DEFAULTS.timeoutMs, 
     /** 触发后台嵌入（服务端会自动限流；rate 可选地覆盖） */
     async kickEmbed(namespace, { rate } = {}) {
       try {
-        return await client.request('POST', repoUrl(namespace, 'embed'), rate === undefined ? {} : { rate })
+        return await client.request('POST', namespaceUrl(namespace, 'embed'), rate === undefined ? {} : { rate })
       } catch (e) {
         rethrow(e)
       }
     },
     async status(namespace) {
       try {
-        return await client.request('GET', repoUrl(namespace, 'status'), undefined, { timeoutMs: Math.max(timeoutMs, 15000) })
+        return await client.request('GET', namespaceUrl(namespace, 'status'), undefined, { timeoutMs: Math.max(timeoutMs, 15000) })
       } catch (e) {
         rethrow(e)
       }

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-code-index",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional remote vectors/index/rerank (no local models). 0.12.0: ignore-aware scanning (.gitignore/.cursorignore), auto sync freshness, cross-lineage simhash adoption, settings page + snapshot scopes.",

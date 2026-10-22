@@ -69,35 +69,42 @@ class FakeServer:
                 payload = json.loads(self.rfile.read(n) or b"{}")
                 outer.calls.append((self.path, payload))
                 parts = self.path.strip("/").split("/")
-                if len(parts) >= 4 and parts[0] == "v1" and parts[1] == "repos":
-                    ns = parts[2]
+                if self.path == "/v1/namespaces/sync":
+                    ns = payload.get("namespace") or f"{payload.get('repoId')}@{payload.get('chunkFp')}#main:default"
+                    action = "sync"
+                    st = outer.state.setdefault(ns, {"revision": 0, "repo_state": "", "chunks": 0})
+                elif len(parts) >= 4 and parts[0] == "v1" and parts[1] == "namespaces":
+                    import urllib.parse
+                    ns = urllib.parse.unquote(parts[2])
                     action = parts[-1]
                     st = outer.state.setdefault(ns, {"revision": 0, "repo_state": "", "chunks": 0})
-                    if action == "sync":
-                        client_rev = payload.get("revision")
-                        if outer.conflict_once and client_rev is not None and int(client_rev) != st["revision"]:
-                            outer.conflict_once = False
-                            return self._send(409, {"error": "revision-conflict", "revision": st["revision"]})
-                        if payload.get("repoState") == st["repo_state"] and int(payload.get("chunkCount", -1)) == st["chunks"]:
-                            return self._send(200, {"revision": st["revision"], "unchanged": True, "missing": [],
-                                                    "chunks": st["chunks"], "vectors": 0})
-                        missing = []
-                        for f in payload.get("upsert") or []:
-                            for c in f.get("chunks") or []:
-                                if c["hash"] not in outer.bodies:
-                                    missing.append(c["hash"])
-                        st["repo_state"] = payload.get("repoState", "")
-                        st["chunks"] = int(payload.get("chunkCount") or 0)
-                        st["revision"] += 1
-                        return self._send(200, {"revision": st["revision"], "unchanged": False,
-                                                "missing": missing, "chunks": st["chunks"], "vectors": 0})
-                    if action == "chunks":
-                        bodies = payload.get("bodies") or []
-                        for b in bodies:
-                            outer.bodies.add(b["hash"])
-                        return self._send(200, {"accepted": len(bodies)})
-                    if action == "embed":
-                        return self._send(200, {"ok": True})
+                else:
+                    return self._send(404, {"error": "not found"})
+                if action == "sync":
+                    client_rev = payload.get("revision")
+                    if outer.conflict_once and client_rev is not None and int(client_rev) != st["revision"]:
+                        outer.conflict_once = False
+                        return self._send(409, {"error": "revision-conflict", "revision": st["revision"]})
+                    if payload.get("repoState") == st["repo_state"] and int(payload.get("chunkCount", -1)) == st["chunks"]:
+                        return self._send(200, {"revision": st["revision"], "unchanged": True, "missing": [],
+                                                "chunks": st["chunks"], "vectors": 0, "namespace": ns})
+                    missing = []
+                    for f in payload.get("upsert") or []:
+                        for c in f.get("chunks") or []:
+                            if c["hash"] not in outer.bodies:
+                                missing.append(c["hash"])
+                    st["repo_state"] = payload.get("repoState", "")
+                    st["chunks"] = int(payload.get("chunkCount") or 0)
+                    st["revision"] += 1
+                    return self._send(200, {"revision": st["revision"], "unchanged": False,
+                                            "missing": missing, "chunks": st["chunks"], "vectors": 0, "namespace": ns})
+                if action == "chunks":
+                    bodies = payload.get("bodies") or []
+                    for b in bodies:
+                        outer.bodies.add(b["hash"])
+                    return self._send(200, {"accepted": len(bodies)})
+                if action == "embed":
+                    return self._send(200, {"ok": True})
                 return self._send(404, {"error": "not found"})
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -125,7 +132,7 @@ def main() -> int:
     sync = IndexSync(url, "", timeout=5)
     try:
         res = sync.sync_worktree(wt, repo_id="repo-7", repo_url="", chunk_fp="review-1")
-        check("1. 首次同步拿到 namespace/revision", res.namespace == "repo-7@review-1" and res.revision >= 1, str(res.as_dict()))
+        check("1. 首次同步拿到 namespace/revision", res.namespace == "repo-7@review-1#main:default" and res.revision >= 1, str(res.as_dict()))
         check("2. 全量清单产生缺失 hash", res.missing > 0, str(res.missing))
         check("3. 正文上传成功", res.uploaded == res.missing, f"{res.uploaded} vs {res.missing}")
         check("4. 触发了嵌入", any(p.endswith("/embed") for p, _ in srv.calls))

@@ -81,10 +81,11 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 
 | 端点 | 说明 |
 |---|---|
-| `POST /v1/repos/{ns}/sync` | 清单差分。`{repoState, revision?, mode:'diff'|'full', tag, url, repoId, chunkFp, lineage?, scope?{kind,ref,commit?,ttlDays?}, upsert[], remove[], simhash?{v,path,content,files}, adopt?, reuse?}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace, adopted?{fromLineage,fromRepo,similarity,overlap,blobs,vectors}, adoptError?}` |
-| `POST /v1/repos/{ns}/chunks` | 上传缺失正文（gzip、批量、幂等）→ `{accepted, deduped}` |
-| `POST /v1/repos/{ns}/embed` | 触发后台嵌入（可带 `rate`） |
-| `GET /v1/repos/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt,expiresAt,pinned}, limits}` |
+| `POST /v1/namespaces/sync` | **服务端计算 canonical namespace**。`{repoId, chunkFp, scope?{kind,ref,commit?,ttlDays?}, namespace?, repoState, revision?, mode:'diff'|'full', tag, url, lineage?, upsert[], remove[], simhash?, adopt?, reuse?}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace, adopted?, adoptError?}`。客户端首次同步不需要知道 namespace。 |
+| `POST /v1/namespaces/resolve` | `{repoId, chunkFp, scope}` → `{namespace, exists, revision?}` |
+| `POST /v1/namespaces/{ns}/chunks` | 上传缺失正文（gzip、批量、幂等）→ `{accepted, deduped}` |
+| `POST /v1/namespaces/{ns}/embed` | 触发后台嵌入 |
+| `GET /v1/namespaces/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt,expiresAt,pinned}, limits}` |
 | `POST /v1/search` | `{namespace}` 或 `{namespaces:[{namespace,weight?}]}, query, k, tag?, rerank:{candidates}}` → `{hits[{hash,path,start,end,score,namespace,scope,rrf,rerankScore?}], ms{embed,knn,rerank}, coverage, byScope[]}` |
 | `GET /v1/scopes?repoId=&kind=` | 作用域清单：`{namespace, kind, ref, repoId, chunkFp, revision, commit, chunks, vectors, coverage, createdAt, expiresAt, pinned, ttlRemaining}` |
 | `POST /v1/scopes/resolve` | `{repoId, chunkFp, kind, ref, commit?}` → `{namespace, exists, revision?}`；非法 → `400 {error:'bad-scope', reason}` |
@@ -92,6 +93,8 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `DELETE /v1/scopes/{ns}` | 删 scope + 对血统做 retention GC → `{deleted, chunks}`（幂等；未知 ns → `{deleted:false}`） |
 | `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
 | `GET /v1/admin/models`、`POST /v1/admin/models/{name}/download` `/cancel` | **模型下载**：进度/速度、取消、失败重试、强制重传、断点续传、sha256 校验 |
+| `GET /v1/admin/runtime` | **运行时指标**：CPU/内存/GPU（nvidia-smi）与 ORT active/available providers；5s 轮询用 |
+| `POST /v1/admin/models/check` | **切换前预检**：`{kind:'embed'|'rerank', dir|name}` → `{warnings:[{code,level,message}], blocking, runtime, model}`；不加载 ONNX |
 | `POST /v1/admin/models/activate`、`POST /v1/admin/models/deactivate` | **模型热切换**：`{kind:'embed'|'rerank', dir|name}` 动态加载，无需重启（见下文） |
 | `POST /v1/admin/reset-index` | **清空索引**：`{confirm:'RESET'}` 删除全部作用域/块/向量/正文并 VACUUM（Key/统计保留）；客户端下次同步自动全量重建 |
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
@@ -205,7 +208,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 带 `scope` 时**服务端返回的 `namespace` 为准**（客户端后续 chunks/embed/status 都用它）。
 
 > ⚠️ namespace 里的路径参数要做 percent-encode（canonical namespace 含 `#`、`@`、`:`）：
-> `DELETE /v1/scopes/{encodeURIComponent(ns)}`、`GET /v1/repos/{encodeURIComponent(ns)}/status`。
+> `DELETE /v1/scopes/{encodeURIComponent(ns)}`、`GET /v1/namespaces/{encodeURIComponent(ns)}/status`。
 
 ## 档 3：快照作用域（scope）与多作用域检索
 
@@ -563,3 +566,11 @@ docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app
 - 默认按"局域网 / 内网可信"设计。生产建议 `API_KEY`（索引）与 `ADMIN_USER`/`ADMIN_PASSWORD`（后台）都配。
 - 暴露到公网请在 Traefik/Nginx 上再加一层认证或 IP 白名单，不要只靠服务自身的凭据。
 - 服务端**存源码正文**（`blobs`），这是 rerank 与片段返回的前提；请把它当成代码仓库同等敏感。
+
+
+## 0.14.0 鉴权与数据范围
+
+- `GET /v1/status`、`GET /v1/scopes`、`/v1/spaces`、`/v1/lineages/*`、所有 `/v1/admin/*` 与 DELETE：**仅管理员**。
+- 索引/检索用 Bearer Key：`POST /v1/namespaces/sync|resolve`、`/v1/namespaces/{ns}/chunks|vectors|embed|status`、`POST /v1/search`、`POST /v1/embed|/rerank`。
+- Key 可带 `repoIds`（创建时传数组或逗号分隔）；为空表示不限。越权访问按 404 处理，避免泄露 namespace 是否存在。
+- 旧路径 `/v1/repos/*` 已删除，返回 410；必须使用 `/v1/namespaces/*`。

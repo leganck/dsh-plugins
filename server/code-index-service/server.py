@@ -26,14 +26,14 @@
     GET  /log?n=200                日志尾巴
     POST /embed                    {texts, is_query} -> {vectors_b64, dim, count, ms}   （兼容 0.7.0）
     POST /rerank                   {query, texts, max_tokens} -> {scores, ms}          （兼容 0.7.0）
-    POST /v1/repos/{ns}/sync       {repoState, revision?, mode, upsert, remove, tag, url, repoId, chunkFp,
-                                    scope?{kind,ref,commit?,ttlDays?}, simhash?{v,path,content,files},
+    POST /v1/namespaces/sync       {repoId, chunkFp, scope?{kind,ref,commit?,ttlDays?}, namespace?（显式逃生口）,
+                                    repoState, revision?, mode, upsert, remove, tag, url, simhash?,
                                     adopt?, reuse?}
-                                    -> {revision, unchanged, missing[], chunks, vectors, coverage, namespace,
-                                        adopted?{fromLineage,fromRepo,similarity,overlap,blobs,vectors}, adoptError?}
-    POST /v1/repos/{ns}/chunks     {bodies:[{hash, body}]} -> {accepted, deduped}
-    POST /v1/repos/{ns}/embed      {order?, batch?} -> 入队后台嵌入
-    GET  /v1/repos/{ns}/status     -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes, scope{}}
+                                    -> {..., namespace}（服务端算 canonical；首次同步无需先知道 namespace）
+    POST /v1/namespaces/resolve    {repoId, chunkFp, scope} -> {namespace, exists, revision?}
+    POST /v1/namespaces/{ns}/chunks {bodies:[{hash, body}]} -> {accepted, deduped}
+    POST /v1/namespaces/{ns}/embed  {order?, batch?} -> 入队后台嵌入
+    GET  /v1/namespaces/{ns}/status -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes, scope{}}
     POST /v1/search                {namespace} 或 {namespaces:[{namespace,weight?}]}, query, k?, tag?,
                                     rerank?:{candidates} -> {hits[]（带 namespace/scope）, ms{}, coverage, byScope[]}
     POST /v1/admin/pause | /resume | /rate | /gc | /sweep
@@ -61,6 +61,8 @@ import index_store
 import admin_store
 import model_downloader
 import models_admin
+import runtime_metrics
+import runtime_preflight
 
 APP = os.path.dirname(os.path.abspath(__file__))
 F = os.environ
@@ -122,7 +124,7 @@ MODEL_LOCK = threading.RLock()  # embed/热切换互斥：切换时不能被推�
 ACTIVE = {"embed_dir": MODEL_DIR, "embed_name": MODEL_NAME, "rerank_dir": RERANK_DIR}
 LOGIN_FAILS = {}  # ip -> [ts...]，简单登录限速（5 次 / 5 分钟）
 
-# 端点分组：统计按组聚合，避免 path 高基数（/v1/repos/<ns>/... 每个 ns 一行）
+# 端点分组：统计按组聚合，避免 path 高基数（/v1/namespaces/<ns>/... 每个 ns 一行）
 def _endpoint_group(path):
     if path == "/embed":
         return "embed"
@@ -130,11 +132,13 @@ def _endpoint_group(path):
         return "rerank"
     if path == "/v1/search":
         return "search"
-    if path.startswith("/v1/repos/") and path.endswith("/sync"):
+    if path == "/v1/namespaces/sync":
         return "sync"
-    if path.startswith("/v1/repos/") and (path.endswith("/chunks") or path.endswith("/vectors")):
+    if path.startswith("/v1/namespaces/") and path.endswith("/sync"):
+        return "sync"
+    if path.startswith("/v1/namespaces/") and (path.endswith("/chunks") or path.endswith("/vectors")):
         return "vectors"
-    if path.startswith("/v1/repos/") and path.endswith("/embed"):
+    if path.startswith("/v1/namespaces/") and path.endswith("/embed"):
         return "embed-queue"
     if path.startswith("/v1/admin/"):
         return "admin"
@@ -381,6 +385,25 @@ ADMIN_HTML = r"""<!doctype html>
   .delta { font-size:11px; margin-left:4px; color:var(--muted); }
   .delta.up { color:var(--bad); } .delta.down { color:var(--ok); }
   .stat .sub { color:var(--faint); font-size:11px; margin-left:3px; }
+  .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; }
+  .metric { min-width:0; }
+  .metric .head { display:flex; align-items:baseline; gap:8px; margin-bottom:6px; }
+  .metric .head b { font-size:16px; }
+  .metric .head span { color:var(--faint); font-size:11.5px; }
+  .metric .sub { color:var(--faint); font-size:11.5px; margin-top:5px; }
+  .meter { height:8px; border-radius:6px; background:var(--line); overflow:hidden; }
+  .meter > i { display:block; height:100%; width:0; background:var(--ok); border-radius:6px; transition:width .35s ease; }
+  .meter.warn > i { background:var(--warn); }
+  .meter.bad > i { background:var(--bad); }
+  .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.48); z-index:100; display:none; align-items:center; justify-content:center; padding:18px; }
+  .modal-backdrop.show { display:flex; }
+  .modal-card { width:min(620px,100%); max-height:88vh; overflow:auto; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; box-shadow:0 18px 60px rgba(0,0,0,.35); }
+  .modal-card h3 { margin:0 0 10px; font-size:16px; }
+  .modal-card .runtime-line { color:var(--muted); font-size:12px; margin-bottom:12px; }
+  .warn-list { display:grid; gap:8px; margin:12px 0; }
+  .warn-item { display:flex; gap:8px; padding:9px 10px; border-radius:8px; background:var(--warn-bg); border:1px solid color-mix(in srgb,var(--warn) 30%,transparent); font-size:12.5px; }
+  .warn-item.danger { background:var(--bad-bg); border-color:color-mix(in srgb,var(--bad) 35%,transparent); }
+  .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
 </style>
 </head>
 <body>
@@ -388,6 +411,7 @@ ADMIN_HTML = r"""<!doctype html>
   <div class="brand"><span class="logo">CI</span><h1>code-index-service</h1><span class="sub">控制台</span></div>
   <span id="ready" class="chip"><span class="dot"></span>加载中</span>
   <span id="model" class="chip mono" title="当前向量模型 tag">—</span>
+  <span id="devicechip" class="chip mono" title="当前运行时设备">—</span>
   <span id="authchip" class="chip"></span>
   <span class="spacer"></span>
   <span id="refreshed" class="faint" style="font-size:12px"></span>
@@ -412,6 +436,10 @@ ADMIN_HTML = r"""<!doctype html>
     <section class="card">
       <h2>运行时</h2>
       <div class="kv" id="runtime"><div class="k">加载中…</div><div class="v"></div></div>
+    </section>
+    <section class="card wide">
+      <h2>系统负载 <span class="tail faint" id="sys-at"></span></h2>
+      <div class="metric-grid" id="system"><div class="faint">加载中…</div></div>
     </section>
     <section class="card">
       <h2>嵌入治理</h2>
@@ -440,6 +468,7 @@ ADMIN_HTML = r"""<!doctype html>
   <section id="tab-models" class="panel">
     <section class="card wide">
       <h2>当前模型</h2>
+      <div class="faint" id="model-runtime" style="margin-bottom:10px">运行时加载中…</div>
       <div class="grid2" id="active-models"></div>
     </section>
     <section class="card wide">
@@ -465,6 +494,7 @@ ADMIN_HTML = r"""<!doctype html>
       <div class="stats" id="key-stats"></div>
       <div class="toolbar" style="margin-top:14px">
         <input id="key-name" placeholder="名称，例如：本机插件 / review-service" style="min-width:200px">
+        <input id="key-repo-ids" placeholder="限制 repoId（可选，逗号分隔；留空=全部）" style="min-width:230px">
         <select id="key-role">
           <option value="index">index · 索引/检索服务</option>
         </select>
@@ -678,6 +708,7 @@ function showTab(name) {
   if (name === 'keys') loadKeys();
   if (name === 'stats') { loadStats(STATS_DAYS); startStatsTimer(); } else { stopStatsTimer(); }
   if (name === 'logs') loadLogs();
+  if (name === 'overview' || name === 'models') startRuntimeTimer(); else stopRuntimeTimer();
   if (name === 'overview' || name === 'scopes') refreshHealth();
   location.hash = name;
 }
@@ -734,6 +765,98 @@ function renderOverview() {
     ['登录方式', '<span class="faint">登录页 → HttpOnly Cookie（12h）；也支持 HTTP Basic 与 admin 角色 Key</span>'],
   ]);
   $('#setup-box').style.display = auth.adminPasswordSet ? 'none' : 'block';
+}
+let RUNTIME = null;
+let RUNTIME_TIMER = null;
+function pctWidth(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+}
+function meterClass(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  return n >= 90 ? 'bad' : n >= 75 ? 'warn' : '';
+}
+function renderSystem(sys) {
+  const box = $('#system'); if (!box) return;
+  RUNTIME = sys || null;
+  const d = sys || {};
+  const cpu = d.cpu || {}, mem = d.memory || {}, gpu = d.gpu || {}, rt = d.runtime || {};
+  const cpuPct = cpu.percent;
+  const memPct = mem.percent;
+  const devLabel = rt.device === 'cuda' ? 'CUDA' : 'CPU';
+  if ($('#devicechip')) {
+    $('#devicechip').textContent = devLabel + (rt.gpuName ? ' · ' + rt.gpuName : '');
+    $('#devicechip').className = 'chip mono ' + (rt.device === 'cuda' ? 'ok' : 'warn');
+  }
+  if ($('#sys-at')) $('#sys-at').textContent = d.sampledAt ? '更新于 ' + new Date(d.sampledAt * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+  const cpuText = cpuPct === null || cpuPct === undefined ? '采样中' : Number(cpuPct).toFixed(1) + '%';
+  const memText = mem.usedBytes != null && mem.totalBytes ? fmtBytes(mem.usedBytes) + ' / ' + fmtBytes(mem.totalBytes) : '—';
+  let html = '<div class="metric"><div class="head"><b>CPU（' + (cpu.source === 'cgroup-v2' ? '容器' : '宿主') + '）</b><span>' + cpuText + '</span></div>'
+    + '<div class="meter ' + meterClass(cpuPct) + '"><i style="width:' + pctWidth(cpuPct) + '%"></i></div>'
+    + '<div class="sub">' + fmtNum(cpu.cores) + ' cores · load ' + (cpu.load || []).map((x) => x == null ? '?' : fmtNum(x)).join(' / ') + '</div></div>'
+    + '<div class="metric"><div class="head"><b>内存</b><span>' + (memPct == null ? '—' : Number(memPct).toFixed(1) + '%') + '</span></div>'
+    + '<div class="meter ' + meterClass(memPct) + '"><i style="width:' + pctWidth(memPct) + '%"></i></div>'
+    + '<div class="sub">' + memText + ' · ' + escapeHtml(mem.source || '') + '</div></div>';
+  const devices = (gpu.devices || []);
+  if (!gpu.available || !devices.length) {
+    html += '<div class="metric"><div class="head"><b>GPU</b><span>不可见</span></div>'
+      + '<div class="sub">' + escapeHtml(gpu.reason || 'CPU-only 运行') + '</div></div>';
+  } else {
+    devices.forEach((g) => {
+      const util = g.utilizationPercent;
+      const mp = g.memoryPercent;
+      html += '<div class="metric"><div class="head"><b>GPU ' + fmtNum(g.index) + ' ' + escapeHtml(g.name || '') + '</b><span>' + (util == null ? '—' : Number(util).toFixed(0) + '%') + '</span></div>'
+        + '<div class="meter ' + meterClass(util) + '"><i style="width:' + pctWidth(util) + '%"></i></div>'
+        + '<div class="sub">显存 ' + (g.memoryUsedBytes == null ? '—' : fmtBytes(g.memoryUsedBytes)) + ' / ' + (g.memoryTotalBytes ? fmtBytes(g.memoryTotalBytes) : '—') + (mp == null ? '' : ' (' + Number(mp).toFixed(0) + '%)')
+        + (g.temperatureC == null ? '' : ' · ' + g.temperatureC + '°C') + (g.powerW == null ? '' : ' · ' + g.powerW + 'W') + '</div></div>';
+    });
+  }
+  box.innerHTML = html;
+  if ($('#model-runtime')) {
+    $('#model-runtime').innerHTML = '运行时：' + (rt.device === 'cuda' ? 'CUDA' : 'CPU')
+      + (rt.gpuName ? ' · ' + escapeHtml(rt.gpuName) : '')
+      + (rt.vramFreeBytes ? ' · 显存 ' + fmtBytes(rt.vramFreeBytes) + ' 可用' : '')
+      + ' · providers ' + (rt.activeProviders || []).map(escapeHtml).join(', ');
+  }
+}
+async function loadRuntime() {
+  const r = await api('/v1/admin/runtime');
+  if (r.status === 200 && r.body) renderSystem(r.body);
+}
+function startRuntimeTimer() {
+  if (RUNTIME_TIMER) return;
+  loadRuntime();
+  RUNTIME_TIMER = setInterval(() => {
+    if (document.visibilityState === 'visible') loadRuntime();
+  }, 5000);
+}
+function stopRuntimeTimer() {
+  if (RUNTIME_TIMER) { clearInterval(RUNTIME_TIMER); RUNTIME_TIMER = null; }
+}
+function showPreflight(pre) {
+  return new Promise((resolve) => {
+    const modal = $('#modal');
+    const done = (ok) => { modal.classList.remove('show'); modal.setAttribute('aria-hidden', 'true'); resolve(ok); };
+    $('#modal-title').textContent = pre.kind === 'rerank' ? '启用重排模型？' : '切换嵌入模型？';
+    const rt = pre.runtime || {};
+    $('#modal-runtime').textContent = '运行时：' + (rt.device === 'cuda' ? 'CUDA' : 'CPU')
+      + (rt.gpuName ? ' · ' + rt.gpuName : '')
+      + (rt.vramFreeBytes ? ' · 显存 ' + fmtBytes(rt.vramFreeBytes) + ' 可用' : '')
+      + ' · providers ' + (rt.activeProviders || []).join(', ');
+    const m = pre.model || {};
+    $('#modal-model').innerHTML = '<span class="mono">' + escapeHtml(m.dir || '') + '</span><br>'
+      + escapeHtml(m.name || '') + ' · ' + (m.modelBytes ? fmtBytes(m.modelBytes) : '—')
+      + (m.dim ? ' · ' + m.dim + ' 维' : '') + (m.tag ? ' · <span class="mono">' + escapeHtml(m.tag) + '</span>' : '');
+    const warnings = pre.warnings || [];
+    $('#modal-warnings').innerHTML = warnings.length
+      ? warnings.map((w) => '<div class="warn-item ' + (w.level === 'danger' ? 'danger' : '') + '"><b>' + (w.level === 'danger' ? '✕' : '⚠') + '</b><span>' + escapeHtml(w.message) + '</span></div>').join('')
+      : '<div class="faint">运行时检查和模型元数据未发现明显问题。</div>';
+    $('#modal-ok').disabled = !!pre.blocking;
+    $('#modal-cancel').onclick = () => done(false);
+    $('#modal-ok').onclick = () => done(true);
+    modal.classList.add('show'); modal.setAttribute('aria-hidden', 'false');
+  });
 }
 let REFRESH_INFLIGHT = null;
 function overviewError(msg) {
@@ -961,7 +1084,15 @@ async function cancelModel(name) {
 }
 async function switchModel(kind, dir) {
   const what = kind === 'embed' ? '嵌入模型' : '重排模型';
-  if (!confirm('切换' + what + '？切换嵌入模型会改变向量 tag：旧向量保留但立即检索不到，客户端下次同步会全量重嵌（覆盖率从 0 恢复）。')) return;
+  let pre = null;
+  const check = await api('/v1/admin/models/check', { method: 'POST', body: JSON.stringify({ kind, dir }) });
+  if (check.status === 200 && check.body && check.body.ok) {
+    pre = check.body;
+    const ok = await showPreflight(pre);
+    if (!ok) return;
+  } else if (!confirm('切换' + what + '？切换嵌入模型会改变向量 tag：旧向量保留但立即检索不到，客户端下次同步会全量重嵌。')) {
+    return;
+  }
   toast('正在切换' + what + '…');
   const r = await api('/v1/admin/models/activate', { method: 'POST', body: JSON.stringify({ kind, dir }) });
   if (r.status !== 200) { toast('切换失败：' + ((r.body && (r.body.detail || r.body.error)) || r.status)); return; }
@@ -969,7 +1100,10 @@ async function switchModel(kind, dir) {
   if (kind === 'embed') banner('已切换嵌入模型：' + (b.prevTag || '?') + ' → ' + b.tag + '（' + (b.ms || 0) + ' ms，' + (b.repos || 0) + ' 个仓库已改 tag）。旧向量保留但不可检索；等客户端重新同步后覆盖率会自动恢复。');
   else banner('');
   toast('切换完成（' + (b.ms || 0) + ' ms）');
-  await refreshHealth(); await loadModels();
+  if (b.providers && (b.providers || []).indexOf('CUDAExecutionProvider') < 0) {
+    banner('模型已加载，但实际 provider 是 ' + b.providers.join(', ') + '：可能在 CPU 上运行。');
+  }
+  await refreshHealth(); await loadModels(); await loadRuntime();
 }
 async function deactivateRerank() {
   if (!confirm('关闭重排？检索会跳过重排（客户端回退 RRF 顺序）。')) return;
@@ -1047,9 +1181,11 @@ async function createKey() {
   const name = $('#key-name').value.trim();
   const role = 'index'; // 页面不再提供 admin 角色；admin 仅保留给 env/既有 Key
   if (!name) { toast('先填一个名称'); return; }
-  const r = await api('/v1/admin/keys', { method: 'POST', body: JSON.stringify({ name, role }) });
+  const repoIds = ($('#key-repo-ids').value || '').trim();
+  const r = await api('/v1/admin/keys', { method: 'POST', body: JSON.stringify({ name, role, repoIds }) });
   if (r.status !== 200) { toast('创建失败：' + ((r.body && r.body.error) || r.status)); return; }
   $('#key-name').value = '';
+  $('#key-repo-ids').value = '';
   PLAIN_KEY = r.body.key;
   $('#key-plain').textContent = PLAIN_KEY;
   $('#key-test-out').textContent = '';
@@ -1385,6 +1521,18 @@ if (INITIAL_TAB !== 'overview' && INITIAL_TAB !== 'scopes') refreshHealth();
 // 模型列表只在「模型」Tab 打开时拉取（冷启动指纹 ~1s，不再拖慢首页）
 setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && $('#auto').checked && (location.hash === '' || location.hash === '#overview' || location.hash === '#scopes')) refreshHealth(); }, 15000);
 </script>
+<div id="modal" class="modal-backdrop" aria-hidden="true">
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <h3 id="modal-title">切换模型？</h3>
+    <div class="runtime-line" id="modal-runtime"></div>
+    <div id="modal-model" style="font-size:12.5px"></div>
+    <div class="warn-list" id="modal-warnings"></div>
+    <div class="modal-actions">
+      <button id="modal-cancel">取消</button>
+      <button id="modal-ok" class="primary">仍然切换</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 """
@@ -1507,7 +1655,9 @@ def activate_rerank(directory):
         state.update(rerank_ready=True, rerank_err=None, rerank_info=new.info())
         ACTIVE["rerank_dir"] = spec["dir"]
         log(f"rerank switched: {state['rerank_info']}")
-        return {"ok": True, "dir": spec["dir"], **new.info()}
+        info = new.info()
+    info.update({"ok": True, "dir": spec["dir"], "providers": state.get("info", {}).get("providers") or []})
+    return info
 
 
 def deactivate_rerank():
@@ -2069,19 +2219,43 @@ def delete_scope(namespace):
     return {"deleted": bool(result.get("deleted")), "chunks": result.get("chunks", 0)}
 
 
-def _scope_from_sync(req, ns):
-    """解析 sync 里的可选 scope 元数据 → (canonical_ns, scope_meta)。
+def _scope_from_sync(req, ns=None):
+    """解析 sync 里的 scope 元数据 → (canonical_ns, scope_meta)。
 
-    namespace 以服务端推导出的 canonical 为准（响应里回给客户端）；
-    没有 scope 时原样返回路径里的 namespace（老客户端/legacy 行为不变）。
+    服务端是 namespace canonical 的唯一实现：客户端只提供 repoId / chunkFp / scope
+    （或显式 namespace），不再在本地拼 canonical 字符串。
     """
+    explicit = req.get("namespace")
+    if isinstance(explicit, str) and explicit.strip():
+        meta = None
+        scope = req.get("scope")
+        if isinstance(scope, dict):
+            ttl_days = scope.get("ttlDays")
+            if ttl_days is not None:
+                try:
+                    ttl_days = int(ttl_days)
+                except (TypeError, ValueError):
+                    raise index_store.ScopeFormatError("bad-ttl-days", f"ttlDays={ttl_days!r}")
+            meta = {
+                "kind": scope.get("kind"), "ref": scope.get("ref"),
+                "commit": scope.get("commit"), "ttl_days": ttl_days,
+            }
+        return explicit.strip(), meta
     scope = req.get("scope")
     if not isinstance(scope, dict):
-        return ns, None
-    existing = store.repo(ns)
+        if ns:
+            return ns, None
+        raise index_store.ScopeFormatError(
+            "missing-scope", "new /v1/namespaces/sync 必须带 scope（或显式 namespace）"
+        )
+    existing = store.repo(ns) if ns else None
     repo_id = req.get("repoId") or (existing or {}).get("repo_id")
     chunk_fp = req.get("chunkFp") or (existing or {}).get("chunk_fp")
     if not repo_id or not chunk_fp:
+        if not ns:
+            raise index_store.ScopeFormatError(
+                "missing-identity", "scope 模式必须带 repoId 和 chunkFp"
+            )
         guess_repo, guess_fp = index_store.namespace_identity(ns)
         repo_id = repo_id or guess_repo
         chunk_fp = chunk_fp or guess_fp
@@ -2185,6 +2359,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": int(row["id"]),
             "name": row.get("name") or "",
             "role": row.get("role") or "index",
+            "repoIds": row.get("repoIds") or [],
             "enabled": bool(row.get("enabled")),
         }
 
@@ -2228,6 +2403,17 @@ class Handler(BaseHTTPRequestHandler):
         if ADMIN_PASSWORD and hmac.compare_digest(pwd, ADMIN_PASSWORD):
             return True
         return adm.check_admin_password(pwd)
+
+    def _repo_allowed(self, namespace):
+        """index key 只能访问自己 repoId 的 namespace；admin/无限制 key 放行。"""
+        who = self._who or {}
+        if who.get("role") == "admin":
+            return True
+        allowed = who.get("repoIds") or []
+        if not allowed:
+            return True
+        repo = str(namespace or "").split("@", 1)[0]
+        return repo in allowed
 
     def _admin_ok(self):
         """后台数据接口：会话 Cookie / HTTP Basic / admin 角色的 Bearer Key。"""
@@ -2382,14 +2568,23 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query or "")
             if "text/html" in accept and "json" not in q and "format" not in q:
                 return self._redirect("/admin")
-        if path.startswith("/v1/admin/"):
+        admin_only = (
+            path.startswith("/v1/admin/")
+            or path in ("/v1/status", "/v1/scopes", "/v1/spaces", "/v1/lineages/similar")
+            or path.startswith("/v1/scopes/")
+            or path.startswith("/v1/lineages/")
+        )
+        if admin_only:
             if not self._admin_ok():
                 return self._unauthorized(basic=bool(ADMIN_PASSWORD))
         else:
-            # 索引客户端（插件 / review-service）用 Bearer Key 读自述、repo status、scopes
+            # 索引客户端（插件 / review-service）用 Bearer Key 读自述 / 单 namespace status。
             if not (self._api_ok() or self._admin_ok()):
                 return self._unauthorized(basic=bool(ADMIN_PASSWORD) and not adm.has_admin_password())
-        if path in ("/", "/v1/status"):
+        if path == "/":
+            # API 自述：admin 拿完整状态；index key 只拿公开探活字段，避免泄露全量 scopes/tags。
+            return self._send(200, self._status_payload(public=not self._admin_ok()))
+        if path == "/v1/status":
             return self._send(200, self._status_payload())
         if path == "/v1/admin/session":
             return self._send(200, {
@@ -2417,6 +2612,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data)
         if path == "/v1/admin/models":
             return self._send(200, models_payload())
+        if path == "/v1/admin/runtime":
+            return self._send(200, self._runtime_payload())
         if path == "/log":
             n = 200
             if "n=" in (u.query or ""):
@@ -2432,10 +2629,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"lines": [x.rstrip() for x in lines]})
         if path == "/":
             return self._send(200, self._status_payload())
-        if path.startswith("/v1/repos/") and path.endswith("/status"):
-            ns = unquote(path[len("/v1/repos/") : -len("/status")])
+        if path.startswith("/v1/namespaces/") and path.endswith("/status"):
+            encoded_ns = path[len("/v1/namespaces/") : -len("/status")]
+            if "/" in encoded_ns or not encoded_ns:
+                return self._send(400, {"error": "bad-namespace-path",
+                                        "message": "namespace 必须是单个 URL segment"})
+            ns = unquote(encoded_ns)
+            if not self._repo_allowed(ns):
+                return self._send(404, {"error": "not-found"})
             payload, code = repo_status(ns)
             return self._send(code, payload)
+        if path.startswith("/v1/repos/"):
+            return self._send(410, {
+                "error": "path-removed",
+                "message": "请使用 GET /v1/namespaces/{namespace}/status",
+                "replacement": "/v1/namespaces/{namespace}/status",
+            })
         if path == "/v1/scopes":
             if not store:
                 return self._send(503, {"error": "not ready", "detail": state["err"]})
@@ -2491,10 +2700,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
-        if path.startswith("/v1/admin/"):
-            ok = self._admin_ok()
-        else:
-            ok = self._api_ok() or self._admin_ok()
+        # DELETE 目前只有管理操作（删 Key / 删 scope），index key 不允许。
+        ok = self._admin_ok()
         if not ok:
             return self._unauthorized(basic=bool(ADMIN_PASSWORD))
         if not state["ready"]:
@@ -2512,6 +2719,34 @@ class Handler(BaseHTTPRequestHandler):
             ns = unquote(path[len("/v1/scopes/") :])
             return self._send(200, delete_scope(ns))
         return self._send(404, {"error": "not found"})
+
+    def _runtime_payload(self):
+        """CPU/内存/GPU + ORT provider 的运行时快照；任何采集失败都降级为空值。"""
+        metrics = runtime_metrics.snapshot()
+        gpu = metrics.get("gpu") or {}
+        devices = gpu.get("devices") or []
+        active = state.get("info", {}).get("providers") or []
+        available = state.get("available_providers") or []
+        device = "cuda" if "CUDAExecutionProvider" in active else "cpu"
+        free = None
+        if devices:
+            total = sum((d.get("memoryTotalBytes") or 0) for d in devices)
+            used = sum((d.get("memoryUsedBytes") or 0) for d in devices)
+            free = max(0, total - used)
+        return {
+            **metrics,
+            "runtime": {
+                "device": device,
+                "activeProviders": active,
+                "availableProviders": available,
+                "gpuAvailable": bool(devices),
+                "gpuCount": len(devices),
+                "gpuName": devices[0].get("name") if devices else None,
+                "vramFreeBytes": free,
+                "threads": THREADS,
+                "ort": state.get("ort_version"),
+            },
+        }
 
     def _status_payload(self, public=False):
         """public=True 只给探活所需的最小字段（API_KEY 开启时无人认领的 /health 走这条）。"""
@@ -2544,6 +2779,10 @@ class Handler(BaseHTTPRequestHandler):
             info["tags"] = store.tag_stats()
             info["scopes"] = store.scope_stats()
             info["db"] = DB_PATH
+        try:
+            info["runtime"] = self._runtime_payload().get("runtime")
+        except Exception as e:  # noqa: BLE001
+            log(f"runtime metrics failed: {type(e).__name__}: {e}")
         info["limits"] = {
             "maxVectorsPerLineage": MAX_VECTORS_PER_LINEAGE,
             "maxTotalGb": round(MAX_TOTAL_BYTES / 1024**3, 2),
@@ -2565,14 +2804,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._setup_admin()
         # /v1/admin/* 是后台治理接口：Basic（页面）或 Bearer（脚本）都行；其余索引/检索接口只认 Bearer
         # /v1/search 也允许后台 Basic（admin 页面的「检索测试」用），索引客户端仍可用 Bearer
-        is_admin = path.startswith("/v1/admin/")
+        is_admin = (
+            path.startswith("/v1/admin/")
+            or path.startswith("/v1/lineages/")
+            or (path.startswith("/v1/scopes/") and path != "/v1/scopes/resolve")
+        )
         if is_admin:
             ok = self._admin_ok()
         elif path in ("/embed", "/rerank"):
             ok = self._api_ok()
         else:
-            # /v1/search、/v1/repos/*、/v1/scopes/resolve、/v1/scopes/*/pin…
-            # 索引客户端用 Bearer，控制台用会话/Basic
+            # /v1/search、/v1/namespaces/*、/v1/scopes/resolve：索引客户端 Bearer 或控制台
             ok = self._api_ok() or self._admin_ok()
         if not ok:
             return self._unauthorized(basic=bool(ADMIN_PASSWORD) and is_admin)
@@ -2628,83 +2870,100 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             # ---------------- 索引层 ----------------
-            if path.startswith("/v1/repos/"):
-                rest = unquote(path[len("/v1/repos/") :])
-                ns, _, action = rest.partition("/")
-                if not ns or not action:
-                    return self._send(404, {"error": "bad path"})
-                if action == "sync":
-                    body = dict(req)
-                    # 显式 null 与"缺键"同义：用服务端当前模型 tag。
-                    # 不能只用 setdefault —— review-service 会固定发 "tag": null，setdefault 不覆盖显式 null，
-                    # 结果是 repos.tag=NULL → governor 认为未定模型不嵌入 → /v1/search 永远 no-tag（实测踩到）。
-                    if not body.get("tag"):
-                        body["tag"] = state["info"].get("tag")
-                    # 可选 scope 元数据：namespace 以服务端推导为准（老客户端没有 scope，保持原 ns）
-                    try:
-                        effective_ns, scope_meta = _scope_from_sync(req, ns)
-                    except index_store.ScopeFormatError as e:
-                        return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
-                    existed = store.repo(effective_ns) is not None
-                    # 配额：新建 repos 行前检查 MAX_SCOPES（只限 scope/快照路径，不拦老客户端的 legacy 行）
-                    if not existed and (scope_meta is not None or "#" in effective_ns):
-                        count = store.count_scopes()
-                        if count >= MAX_SCOPES:
-                            return self._send(507, {"error": "scope-cap", "count": count, "limit": MAX_SCOPES,
-                                                    "hint": "DELETE /v1/scopes/{ns} 清理不用的快照，或调大 MAX_SCOPES"})
-                    try:
-                        payload = store.sync(effective_ns, body)
-                    except Exception as e:
-                        name = type(e).__name__
-                        if name == "RevisionConflict":
-                            return self._send(409, {"error": "revision-conflict", "revision": e.revision, "needFull": e.need_full})
-                        if name == "SyncDiverged":
-                            return self._send(400, {"error": "diverged", "detail": str(e)})
-                        raise
-                    # 跨血统 simhash 复用是"尽力而为"：成功记一行，失败也记一行但 sync 已正常返回。
-                    if payload.get("adopted"):
-                        a = payload["adopted"]
-                        log(f"adopt: {effective_ns} <- {a.get('fromNamespace')} blobs={a.get('blobs')} "
-                            f"vectors={a.get('vectors')} overlap={a.get('overlap')} sim={a.get('similarity')}")
-                    elif payload.get("adoptError"):
-                        log(f"adopt failed (sync 继续): {effective_ns}: {payload['adoptError']}")
-                    repo = store.repo(effective_ns)
-                    # 注册/刷新 scope 元数据：新行落默认 TTL；老行只更新 commit/updated_at，
-                    # 不覆盖 pinned/expires_at（除非 ttlDays 显式给出）。
-                    try:
-                        if scope_meta is not None:
-                            store.register_scope(
-                                effective_ns, scope_meta["kind"], scope_meta["ref"],
-                                commit_sha=scope_meta["commit"], ttl_days=scope_meta["ttl_days"],
-                                pinned=0 if not existed else None, new_row=not existed,
-                            )
-                        elif "#" in effective_ns:
-                            meta = index_store.parse_scope_namespace(effective_ns)
-                            store.register_scope(
-                                effective_ns, meta["kind"], meta["token"], scope_ref=meta["scope_ref"],
-                                pinned=0 if not existed else None, new_row=not existed,
-                            )
-                    except index_store.ScopeFormatError as e:
-                        return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
-                    payload["namespace"] = effective_ns
-                    cap = ensure_capacity(repo["lineage_id"]) if repo else None
-                    if cap:
-                        return self._send(507, cap)
-                    if payload["missing"]:
-                        # 外部预热（seed）时客户端自己算向量，别让服务端再算一遍
-                        if not req.get("noEmbed"):
-                            governor.kick(effective_ns)
-                    knn.invalidate(effective_ns)
-                    return self._send(200, payload)
+            # 服务端是 namespace canonical 的唯一实现：首次 sync 不需要 path 里的 namespace。
+            if path == "/v1/namespaces/resolve":
+                try:
+                    effective_ns, _ = _scope_from_sync(req, None)
+                except index_store.ScopeFormatError as e:
+                    return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                if not self._repo_allowed(effective_ns):
+                    return self._send(404, {"error": "not-found"})
+                repo = store.repo(effective_ns)
+                return self._send(200, {
+                    "namespace": effective_ns,
+                    "exists": repo is not None,
+                    "revision": (repo or {}).get("revision"),
+                })
+            if path == "/v1/namespaces/sync":
+                body = dict(req)
+                # 显式 null 与缺键同义：用服务端当前模型 tag。
+                if not body.get("tag"):
+                    body["tag"] = state["info"].get("tag")
+                try:
+                    effective_ns, scope_meta = _scope_from_sync(req, None)
+                except index_store.ScopeFormatError as e:
+                    return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                if not self._repo_allowed(effective_ns):
+                    return self._send(404, {"error": "not-found"})
+                existed = store.repo(effective_ns) is not None
+                if not existed and (scope_meta is not None or "#" in effective_ns):
+                    count = store.count_scopes()
+                    if count >= MAX_SCOPES:
+                        return self._send(507, {"error": "scope-cap", "count": count, "limit": MAX_SCOPES,
+                                                "hint": "DELETE /v1/scopes/{ns} 清理不用的快照，或调大 MAX_SCOPES"})
+                try:
+                    payload = store.sync(effective_ns, body)
+                except Exception as e:
+                    name = type(e).__name__
+                    if name == "RevisionConflict":
+                        return self._send(409, {"error": "revision-conflict", "revision": e.revision, "needFull": e.need_full})
+                    if name == "SyncDiverged":
+                        return self._send(400, {"error": "diverged", "detail": str(e)})
+                    raise
+                if payload.get("adopted"):
+                    a = payload["adopted"]
+                    log(f"adopt: {effective_ns} <- {a.get('fromNamespace')} blobs={a.get('blobs')} "
+                        f"vectors={a.get('vectors')} overlap={a.get('overlap')} sim={a.get('similarity')}")
+                elif payload.get("adoptError"):
+                    log(f"adopt failed (sync 继续): {effective_ns}: {payload['adoptError']}")
+                repo = store.repo(effective_ns)
+                try:
+                    if scope_meta is not None:
+                        store.register_scope(
+                            effective_ns, scope_meta["kind"], scope_meta["ref"],
+                            commit_sha=scope_meta["commit"], ttl_days=scope_meta["ttl_days"],
+                            pinned=0 if not existed else None, new_row=not existed,
+                        )
+                    elif "#" in effective_ns:
+                        meta = index_store.parse_scope_namespace(effective_ns)
+                        store.register_scope(
+                            effective_ns, meta["kind"], meta["token"], scope_ref=meta["scope_ref"],
+                            pinned=0 if not existed else None, new_row=not existed,
+                        )
+                except index_store.ScopeFormatError as e:
+                    return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                payload["namespace"] = effective_ns
+                cap = ensure_capacity(repo["lineage_id"]) if repo else None
+                if cap:
+                    return self._send(507, cap)
+                if payload["missing"] and not req.get("noEmbed"):
+                    governor.kick(effective_ns)
+                knn.invalidate(effective_ns)
+                return self._send(200, payload)
+
+            # 旧路径不保留别名：明确迁移，而不是静默兼容。
+            if path.startswith("/v1/repos/") or (path.startswith("/v1/namespaces/") and path.endswith("/sync")):
+                return self._send(410, {
+                    "error": "path-removed",
+                    "message": "请使用 POST /v1/namespaces/sync（无 namespace 路径）",
+                    "replacement": "/v1/namespaces/sync",
+                })
+
+            if path.startswith("/v1/namespaces/"):
+                rest = path[len("/v1/namespaces/"):]
+                encoded_ns, sep, action = rest.rpartition("/")
+                if not sep or not encoded_ns or not action:
+                    return self._send(400, {"error": "bad-namespace-path",
+                                            "message": "namespace 必须是单个 URL segment"})
+                ns = unquote(encoded_ns)
+                if not self._repo_allowed(ns):
+                    return self._send(404, {"error": "not-found"})
                 if action == "chunks":
                     r = store.put_chunks(ns, req.get("bodies") or [])
                     if r["accepted"]:
                         governor.kick(ns)
                     return self._send(200, r)
                 if action == "vectors":
-                    # 外部算好的向量直接灌进来（"用快机器预热"的路径）：
-                    # 服务端不再重复嵌入，接完就生效。tag 必须与服务端当前模型一致，
-                    # 否则这批向量会被闸门当成别的模型产物（等于白算）。
                     repo = store.repo(ns)
                     if not repo:
                         return self._send(404, {"error": "unknown-namespace"})
@@ -2724,19 +2983,24 @@ class Handler(BaseHTTPRequestHandler):
                     cap = ensure_capacity(repo["lineage_id"])
                     if cap:
                         return self._send(507, cap)
-                    return self._send(200, {"accepted": len(pairs), "dim": int(pairs[0][1].shape[0]) if pairs else 0, **store.counts(ns)})
+                    return self._send(200, {"accepted": len(pairs), "dim": int(pairs[0][1].shape[0]) if pairs else 0,
+                                            **store.counts(ns)})
                 if action == "embed":
-                    if isinstance(req.get("rate"), (int, float)):
-                        governor.set_rate(req["rate"])
+                    # 兼容旧客户端字段：不再允许客户端改服务端全局 rate；rate 只由 admin/env 设置。
+                    if "rate" in req:
+                        log("embed: ignored client-provided rate (server owns EMBED_RATE/admin rate)")
                     governor.kick(ns)
                     return self._send(200, governor.status(ns))
-                return self._send(404, {"error": "unknown repo action"})
+                return self._send(404, {"error": "unknown namespace action"})
+
             if path == "/v1/search":
                 raw_namespaces = req.get("namespaces")
                 if isinstance(raw_namespaces, list) and len(raw_namespaces) > MAX_SEARCH_SCOPES:
                     return self._send(400, {"error": "too-many-namespaces",
                                             "count": len(raw_namespaces), "limit": MAX_SEARCH_SCOPES})
                 entries = _namespaces_from_request(raw_namespaces, req.get("namespace"))
+                if any(not self._repo_allowed(entry[0]) for entry in entries):
+                    return self._send(404, {"error": "not-found"})
                 self._scope_ns = entries[0][0] if entries else None
                 self._counts["search_calls"] += 1
                 # 检索也会 embed 1 次 query（计入 embed 文本数，便于统计算力消耗）
@@ -2758,6 +3022,8 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except index_store.ScopeFormatError as e:
                     return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
+                if not self._repo_allowed(ns):
+                    return self._send(404, {"error": "not-found"})
                 repo = store.repo(ns)
                 out = {"namespace": ns, "exists": repo is not None}
                 if repo:
@@ -2788,7 +3054,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not name:
                         return self._send(400, {"error": "name required"})
                     try:
-                        created = adm.create_key(name, role, str(req.get("note") or ""))
+                        created = adm.create_key(name, role, str(req.get("note") or ""), req.get("repoIds"))
                     except ValueError as e:
                         return self._send(400, {"error": str(e)})
                     log(f"api key created: id={created['id']} name={created['name']} role={created['role']}")
@@ -2814,6 +3080,56 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(400, {"error": "confirm-required",
                                                 "hint": '需要在 body 里传 {"confirm":"RESET"}'})
                     return self._send(200, reset_index(confirm))
+                if action == "models/check":
+                    kind = str(req.get("kind") or "embed").strip().lower()
+                    directory = req.get("dir")
+                    if not directory and req.get("name"):
+                        inst = models_payload()["installed"]
+                        pool = inst.get("rerank" if kind == "rerank" else "embed") or []
+                        hit = [x for x in pool if x.get("name") == req.get("name")]
+                        if not hit:
+                            return self._send(404, {"error": "unknown model", "name": req.get("name")})
+                        directory = hit[0]["dir"]
+                    if kind not in ("embed", "rerank"):
+                        return self._send(400, {"error": "bad kind", "hint": "embed | rerank"})
+                    if not directory:
+                        return self._send(400, {"error": "dir or name required"})
+                    try:
+                        spec = (models_admin.validate_rerank_dir(directory, roots=MODEL_ROOTS)
+                                if kind == "rerank" else
+                                models_admin.validate_embed_dir(directory, roots=MODEL_ROOTS))
+                    except models_admin.ModelError as e:
+                        return self._send(400, {"error": "model-invalid", "detail": str(e)})
+                    rt = self._runtime_payload()["runtime"]
+                    if kind == "rerank":
+                        active = {
+                            "dir": ACTIVE["rerank_dir"],
+                            "tag": state["rerank_info"].get("rerank_tag"),
+                            "dim": None,
+                        }
+                    else:
+                        active = {
+                            "dir": ACTIVE["embed_dir"],
+                            "tag": state["info"].get("tag"),
+                            "dim": models_admin.model_dim(ACTIVE["embed_dir"]),
+                        }
+                    result = runtime_preflight.preflight(
+                        kind=kind,
+                        model={
+                            "dir": spec["dir"], "name": spec["name"], "tag": spec["tag"],
+                            "modelFile": spec.get("model_file"), "modelBytes": spec.get("model_bytes"),
+                            "dim": spec.get("dim"), "active": spec["tag"] == active.get("tag"),
+                        },
+                        runtime=rt,
+                        active=active,
+                    )
+                    result.update({"ok": True, "kind": kind, "model": {
+                        "dir": spec["dir"], "name": spec["name"], "tag": spec["tag"],
+                        "modelFile": spec.get("model_file"), "modelBytes": spec.get("model_bytes"),
+                        "sizeBytes": spec.get("size_bytes"), "dim": spec.get("dim"),
+                        "active": spec["tag"] == active.get("tag"),
+                    }, "runtime": rt})
+                    return self._send(200, result)
                 if action == "models/activate":
                     kind = str(req.get("kind") or "embed").strip().lower()
                     directory = req.get("dir")
