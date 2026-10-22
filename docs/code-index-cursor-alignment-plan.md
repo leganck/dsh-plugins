@@ -1,8 +1,8 @@
 # code-index 与 Cursor 对齐计划
 
-- 状态：实施中（P0–P3 已落地并测试，P4 发布中）
+- 状态：已实施（P0–P4 完成并发布，2026-10-22）
 - 日期：2026-10-22
-- 目标插件：`plugins/dsh-code-index`（目标 0.12.0）
+- 目标插件：`plugins/dsh-code-index`（已发布 0.12.2）
 - 目标服务端：`server/code-index-service`
 - 范围：扫描边界（docs / 禁用模块 / ignore）、自动 freshness、团队共享与 simhash 整库复用
 - 原则：对齐 Cursor 的**行为结果**，不照抄 Merkle 协议、整份 index copy 和 content proof
@@ -787,4 +787,16 @@ remote:
 - `server/code-index-service/index_store.py`：schema/sync/adopt
 - `server/code-index-service/server.py`：接口
 - `server/code-index-service/selftest.py`：服务端测试
-- `plugins/dsh-code-index/COMPARISON-CURSOR.md`：需要同步更新（当前 0.4–0.8 口径，已过时）
+- `plugins/dsh-code-index/COMPARISON-CURSOR.md`：已同步更新（0.12 扫描/freshness/simhash 口径）
+
+---
+
+## 十四、实施结果（2026-10-22）
+
+- P0：`.gitignore` / `.cursorignore` / `.cursorindexingignore`、嵌套 `.gitignore`、docs/binary 过滤、禁用模块 `exclude`，新增 `test-ignore.mjs` 20 项；
+- P1：持久 registry、启动恢复 watcher、dirty 合并、周期对账、跨进程锁、已有索引启动发现，新增 `test-auto-sync.mjs` 12 项；
+- P2：`remote.reuse` 配置、同 lineage 共享状态、`code_index_status` 自动同步/复用信息；
+- P3：服务端 simhash schema/候选/精确 overlap/adopt + 诊断接口；客户端 simhash + payload + adopted 输出，新增 `test-simhash.mjs` 10 项；
+- 测试：插件 91 + 125 + 20 + 12 + 10 + 83 全绿；服务端 `selftest.py` 248 项全绿；
+- 发布：插件 `0.12.2`（GitHub tag + market），服务端镜像 `server-v0.12.1` 已部署到 NAS；
+- 安装：`~/.dsh/profiles/desktop` 已更新到 0.12.2，加载标记 `build=2026-10-22.1`。
