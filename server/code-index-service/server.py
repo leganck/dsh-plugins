@@ -478,6 +478,12 @@ ADMIN_HTML = r"""<!doctype html>
     #tab-overview { grid-template-columns:1fr; }
     #tab-overview .runtime-card .kv { grid-template-columns:86px minmax(0,1fr); }
   }
+  main { max-width:1600px; margin:0 auto; }
+  #banner { max-width:1600px; margin:12px auto 0; }
+  @media (prefers-color-scheme: dark) {
+    button.primary, button.danger { color:#0d1016; }
+    button.primary:disabled, button.danger:disabled { color:var(--faint); }
+  }
 </style>
 </head>
 <body>
@@ -1167,8 +1173,7 @@ function renderDownloads() {
     if (downloading) {
       actions.push('<button class="danger small" data-cancel="' + escapeHtml(m.name) + '">取消下载</button>');
     } else if (blocked) {
-      if (active) actions.push('<span class="chip ok"><span class="dot"></span>当前使用</span>');
-      else actions.push('<button class="primary small" data-use-kind="' + kind + '" data-use-dir="' + escapeHtml(useDir) + '">使用已有</button>');
+      if (!active) actions.push('<button class="primary small" data-use-kind="' + kind + '" data-use-dir="' + escapeHtml(useDir) + '">使用已有</button>');
       actions.push('<button class="ghost small" data-force="' + escapeHtml(m.name) + '" title="本机已有同款，仍下载一份副本">仍要下载副本</button>');
     } else if (ready) {
       if (active) actions.push('<span class="chip ok"><span class="dot"></span>当前使用</span>');
@@ -1183,6 +1188,7 @@ function renderDownloads() {
     if (downloading) chip = '<span class="chip blue"><span class="dot"></span>下载中</span>';
     else if (ready && active) chip = '<span class="chip ok"><span class="dot"></span>已启用</span>';
     else if (ready) chip = '<span class="chip ok"><span class="dot"></span>已下载</span>';
+    else if (blocked && active) chip = '<span class="chip ok"><span class="dot"></span>当前使用</span>';
     else if (blocked) chip = '<span class="chip blue"><span class="dot"></span>本机已有</span>';
     else if (failed) chip = '<span class="chip bad"><span class="dot"></span>下载失败</span>';
     else if (cancelled) chip = '<span class="chip warn"><span class="dot"></span>已取消</span>';
