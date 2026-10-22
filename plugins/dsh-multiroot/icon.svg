@@ -1,8 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-  <!-- 多根：主干分叉到两个目录框 -->
-  <path d="M12 21v-6" />
-  <path d="M12 15c0-3-4-3-4-6" />
-  <path d="M12 15c0-3 4-3 4-6" />
-  <path d="M5 9V6h6v3" />
-  <path d="M13 9V6h6v3" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Multiroot">
+  <defs>
+    <linearGradient id="multirootBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#multirootBg)"/>
+  <path d="M32 24v16M32 32H18v8M32 32h14v8" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="19" r="5" fill="#ffffff"/>
+  <circle cx="18" cy="45" r="5" fill="#ffffff" opacity="0.95"/>
+  <circle cx="32" cy="45" r="5" fill="#ffffff" opacity="0.95"/>
+  <circle cx="46" cy="45" r="5" fill="#ffffff" opacity="0.95"/>
 </svg>

@@ -143,6 +143,16 @@ def _endpoint_group(path):
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
+# 站点图标（浏览器标签页/收藏夹）：单文件随镜像 COPY；缺失时退回纯色方块，不影响启动
+try:
+    with open(os.path.join(APP, "favicon.svg"), "rb") as _fav:
+        FAVICON_SVG = _fav.read()
+except OSError:
+    FAVICON_SVG = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+        b'<rect width="64" height="64" rx="14" fill="#2563eb"/></svg>'
+    )
+
 
 def log(msg):
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
@@ -163,6 +173,7 @@ ADMIN_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>code-index-service · 控制台</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --faint:#98a2b3;
           --ok:#067647; --ok-bg:#e7f6ec; --warn:#b54708; --warn-bg:#fef4e6; --bad:#b42318; --bad-bg:#fdecea;
@@ -889,6 +900,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && 
 LOGIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>code-index-service · 登录</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --blue:#175cd3; --bad:#b42318; --bad-bg:#fdecea; }
   @media (prefers-color-scheme: dark) { :root { --bg:#0d1016; --card:#161a22; --line:#262c37; --text:#e7e9ee; --muted:#98a2b3; --blue:#84adff; --bad:#fda29b; --bad-bg:#3a1512; } }
@@ -1753,8 +1765,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._admin_ok():
                 return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
             return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8")
-        if path == "/favicon.ico":
-            return self._send(204, b"", ctype="image/x-icon")
+        if path in ("/favicon.svg", "/favicon.ico"):
+            return self._send(200, FAVICON_SVG, ctype="image/svg+xml",
+                              headers={"Cache-Control": "public, max-age=86400"})
         if path == "/health":
             # 免鉴权，但无人认领时只返回最小探活字段（不泄露作用域/存储/治理信息）
             return self._send(200, self._status_payload(public=not self._admin_ok()))

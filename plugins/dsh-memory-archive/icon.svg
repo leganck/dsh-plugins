@@ -1,6 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-  <!-- 归档：三层叠放的段落 + 底部托盘 -->
-  <path d="M7 3h8l3 3v7H7z" />
-  <path d="M7 16h11M7 19h11" />
-  <path d="M4 5v11l3 3" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Memory Archive">
+  <defs>
+    <linearGradient id="memoryArchiveBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#memoryArchiveBg)"/>
+  <rect x="16" y="17" width="32" height="9" rx="4" fill="#ffffff"/>
+  <path d="M18.5 29h27v13.5a5 5 0 0 1-5 5h-17a5 5 0 0 1-5-5z" fill="#ffffff" opacity="0.88"/>
+  <rect x="36.5" y="30.5" width="6" height="12" rx="3" fill="#000000" opacity="0.18"/>
+  <rect x="21.5" y="34" width="10" height="3.2" rx="1.6" fill="#000000" opacity="0.18"/>
+  <rect x="21.5" y="40" width="7" height="3.2" rx="1.6" fill="#000000" opacity="0.18"/>
 </svg>
