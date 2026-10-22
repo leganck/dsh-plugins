@@ -121,17 +121,17 @@
           "ast"
         ],
         "sortKeys": {
-          "published": 1792658602
+          "published": 1792658805
         }
       },
       "versions": [
         {
-          "version": "0.13.0",
-          "publishTimestamp": 1792658602,
+          "version": "0.13.1",
+          "publishTimestamp": 1792658805,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "c6de5764581f00fafd43d5296c11706faba80ae1",
+            "commit": "cebcacfb15a065855d7084654ad6af29c567ed5a",
             "path": "plugins/dsh-code-index"
           },
           "engines": {
