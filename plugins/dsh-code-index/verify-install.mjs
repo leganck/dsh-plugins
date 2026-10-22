@@ -110,7 +110,7 @@ function makeCtx(injectList) {
 if (mod) {
   try {
     mod.apply(makeCtx(mod.inject), {
-      roots: ['D:/Code'],
+      // roots 已废弃：允许路径从 workspace/cwd 推导
       vectors: 'off', // 纯关键词：不连远端、也不需要任何模型
       advanced: { indexDirBase: tmpIndexDir }, // 临时目录：不碰线上索引
     })
@@ -121,16 +121,20 @@ if (mod) {
     check('apply() 成功且注册 5 个工具', false, String(e.message).slice(0, 140))
   }
 
-  // ---- 3. roots 白名单（验证 config 覆盖行是否应用）----
-  console.log('\n[3] roots 白名单（验证 profile 里补的 config 覆盖行生效）')
+  // ---- 3. 工作空间边界（不再依赖 roots 配置）----
+  console.log('\n[3] 工作空间边界（workspace/cwd 自动推导）')
   const status = registry.get('code_index_status')
   if (status) {
-    const outside = await status.execute({ path: 'C:/Users/you', scan: false }, {})
-    const inside = await status.execute({ path: 'D:/Code/your-repo', scan: false }, {})
-    const outText = outside.content[0].text
-    const inText = inside.content[0].text
-    check('白名单外的路径被拒', /白名单/.test(outText), outText.split('\n')[0].slice(0, 90))
-    check('白名单内的路径通过', !/错误/.test(inText), inText.split('\n')[0].slice(0, 90))
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-verify-workspace-'))
+    const inside = path.join(workspace, 'repo')
+    fs.mkdirSync(inside)
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-verify-outside-'))
+    const out = await status.execute({ path: outside, scan: false }, { cwd: workspace })
+    const inRes = await status.execute({ path: inside, scan: false }, { cwd: workspace })
+    const outText = out.content[0].text
+    const inText = inRes.content[0].text
+    check('工作空间外的路径被拒', /工作空间|允许路径/.test(outText), outText.split('\n')[0].slice(0, 90))
+    check('工作空间内的路径不因边界被拒', !/不在当前工作空间/.test(inText), inText.split('\n')[0].slice(0, 90))
   } else {
     check('拿到 code_index_status', false, '未注册')
   }

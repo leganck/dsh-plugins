@@ -58,7 +58,6 @@ dsh plugin --profile desktop ...  →  error: profile "desktop" is managed exclu
     - id: code-index
       name: "file:///<本包绝对路径>/index.js"
       config:
-        roots: ["D:/Code"]
         remote:
           url: "https://dsh-embed.example.com"
         vectors: "remote"          # off = 纯关键词（不连服务端）
@@ -162,11 +161,10 @@ code_search(query="订单状态机", path="D:/Code/demo/svc/legacy-java-service"
 
 ## 4. 配置
 
-行内 `config` 的全部可用键（**未知键会让插件行不生效**）。0.10.0 起 remote-only，用户面只有 6 个键：
+行内 `config` 的全部可用键（**未知键会让插件行不生效**）。0.13 起允许路径自动从 DSH workspace / 会话 cwd / `.dshworkspace.json` 推导，不再配置 `roots`：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `roots` | `[]` | 路径白名单；空数组 = 允许任意路径。**校验发生在创建索引库之前** |
 | `remote.url` | `null` | 向量服务地址；`vectors: remote` 时必填 |
 | `remote.apiKey` | `null` | 服务端设了 API_KEY 才需要 |
 | `vectors` | `auto` | `auto`（有 `remote.url` 就走远端，没有则纯关键词）\| `remote`（强制，缺地址报错）\| `off`（纯关键词，本地 FTS5） |

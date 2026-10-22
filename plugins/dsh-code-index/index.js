@@ -34,6 +34,7 @@ import { canonicalNamespace, normalizeNamespace, validateScope, describeScope, S
 import { renderParserHint } from './lib/parser-hints.js'
 import { RepoRegistry } from './lib/repo-registry.js'
 import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
+import { resolveAllowedRoots, isInsideRoots } from './lib/workspace-roots.js'
 import z from '@deepseek-ai/schemastery'
 
 /** 0.10.0 remote-only：本地只保留 parser（切块）依赖组，embed 组不再安装 */
@@ -575,6 +576,10 @@ function normalizeConfig(userRaw = {}) {
     }
   }
   if (!Array.isArray(cfg.roots)) throw new ConfigError(`config.roots 必须是数组，收到 ${typeof cfg.roots}`)
+  cfg.deprecations = []
+  if (cfg.roots.length) {
+    cfg.deprecations.push('roots 已废弃：允许路径改为从 DSH workspace / 会话 cwd / .dshworkspace.json 自动推导')
+  }
 
   // ---- 远端推理（remote / rerankRemote）----
   // 这两块的错误信息必须**点名键路径**：远端配置错一个字段的表现是"一直降级成本机"，
@@ -705,7 +710,7 @@ function normalizeConfig(userRaw = {}) {
   if (cfg.rerank !== 'off' && !String(cfg.rerankRemote.url ?? '').trim()) {
     throw new ConfigError('config.rerank 需要 remote.url（重排与向量共用同一个服务地址）')
   }
-  cfg.allowedRoots = cfg.roots.map((r) => path.resolve(String(r).replace(/^~(?=[\\/]|$)/, os.homedir())))
+  cfg.legacyRoots = cfg.roots
   return cfg
 }
 
@@ -767,6 +772,22 @@ export function apply(ctx, rawConfig = {}) {
 function applyInner(ctx, rawConfig = {}) {
   const config = normalizeConfig(rawConfig)
 
+  const workspaceRootFromCtx = () => {
+    try {
+      const policy = typeof ctx.get === 'function' ? ctx.get('sandboxPolicy') : ctx.sandboxPolicy
+      return policy?.workspaceRoot ?? null
+    } catch {
+      return null
+    }
+  }
+  const initialWorkspace = resolveAllowedRoots({
+    workspaceRoot: workspaceRootFromCtx(),
+    sessionCwd: process.cwd(),
+  })
+  for (const warning of config.deprecations ?? []) {
+    ctx.logger?.warn?.(`dsh-code-index: ${warning}`)
+  }
+
   // 加载标记：尽早写。写在这里而不是函数末尾 —— 之后任何一步（尤其工具注册）
   // 抛错时，标记仍能证明"apply() 确实被调用过"，从而把故障范围一分为二。
   //
@@ -795,7 +816,9 @@ function applyInner(ctx, rawConfig = {}) {
             vectors: config.vectors,
             vectorsMode: config.vectorsMode,
             indexDirBase: config.indexDirBase,
-            roots: config.allowedRoots,
+            workspaceRoot: workspaceRootFromCtx(),
+            workspaceRoots: initialWorkspace.roots,
+            workspaceSources: initialWorkspace.sources,
             // 远端只记**地址与开关**，绝不记 apiKey（标记文件是明文的，会被归档/分享）
             remote:
               config.vectors === 'remote'
@@ -905,10 +928,21 @@ let reconcileTimer = null
     return { store: s, dbPath }
   }
 
-  function assertAllowed(repoRoot) {
-    if (!config.allowedRoots.length) return
-    const ok = config.allowedRoots.some((r) => repoRoot === r || repoRoot.startsWith(r + path.sep))
-    if (!ok) throw new Error(`路径不在允许的 roots 白名单内：${repoRoot}\n已配置：${config.allowedRoots.join(', ')}`)
+  function allowedRootsFor(exec) {
+    return resolveAllowedRoots({
+      workspaceRoot: workspaceRootFromCtx(),
+      sessionCwd: exec?.agent?.session?.cwd ?? exec?.cwd ?? process.cwd(),
+    })
+  }
+
+  function assertAllowed(repoRoot, exec) {
+    if (exec?.trusted) return
+    const info = allowedRootsFor(exec)
+    if (isInsideRoots(repoRoot, info.roots)) return
+    const where = info.definitionFile ? `；多根定义 ${info.definitionFile}` : ''
+    throw new Error(
+      `路径不在当前工作空间内：${repoRoot}\n允许路径：${info.roots.join(', ') || '（无）'}${where}`,
+    )
   }
 
   /**
@@ -1037,7 +1071,7 @@ let reconcileTimer = null
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         if (!fs.existsSync(repoRoot)) return fail(`目录不存在：${repoRoot}`)
-        assertAllowed(repoRoot)
+        assertAllowed(repoRoot, exec)
         const { store, dbPath } = storeFor(repoRoot)
 
         if (args.status_only) {
@@ -1054,6 +1088,8 @@ let reconcileTimer = null
             dirty: [...autoEntries.values()].filter((e) => e.dirty).length,
             entries: [...autoEntries.values()].map((e) => e.state()),
           }
+          const workspace = allowedRootsFor(exec)
+          const workspaceLine = `允许路径：${workspace.roots.join('、') || '（无）'}（${workspace.sources.join('+') || 'cwd'}）`
           const ignoredLine = scanStats && scanStats.ignored
             ? `  已忽略：${scanStats.ignored} 文件（gitignore ${scanStats.bySource.gitignore} / cursorignore ${scanStats.bySource.cursorignore} / exclude ${scanStats.bySource.exclude}）`
             : null
@@ -1061,12 +1097,13 @@ let reconcileTimer = null
             ? `  跨血统复用：${config.remote.reuse}（同 remote 已按 lineage 自动共享）`
             : null
           return textResult(
-            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, scope: scopeInfo, reuse: config.remote.reuse },
+            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, workspace, scope: scopeInfo, reuse: config.remote.reuse },
             [
               `索引状态 ${repoRoot}`,
               `  已入库：${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
               `  仓库当前：${st.scanned} 个候选文件`,
               `  待更新：${st.changed} 改 / ${st.removed} 删；未变 ${st.unchanged}`,
+              workspaceLine,
               ignoredLine,
               autoSync.enabled
                 ? `  自动同步：开（监听 ${autoSync.watching} 个仓库；本仓库${autoEntries.has(repoRoot) ? '已监听' : '未监听'}）`
@@ -1197,7 +1234,7 @@ let reconcileTimer = null
     }
     const t0 = Date.now()
     try {
-      const r = await codeIndexTool.execute({ path: repoRoot }, {})
+      const r = await codeIndexTool.execute({ path: repoRoot }, { trusted: true })
       const text = r?.content?.[0]?.text ?? ''
       if (text.startsWith('错误：')) throw new Error(text.slice(3).trim() || 'code_index 失败')
       repoRegistry.upsert(repoRoot, { dbPath, lastIndexedAt: Date.now(), lastSyncAt: Date.now() })
@@ -1258,7 +1295,6 @@ let reconcileTimer = null
     for (const item of repoRegistry.prune()) {
       if (item.watch === false) continue
       try {
-        assertAllowed(item.root)
         ensureWatch(item.root)
       } catch (e) {
         ctx.logger?.warn?.(`dsh-code-index: 跳过注册表仓库 ${item.root}：${e?.message ?? e}`)
@@ -1332,7 +1368,7 @@ let reconcileTimer = null
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         // 白名单必须在打开/创建索引库之前校验，否则会在任意路径下建出 .dsh-index
-        assertAllowed(repoRoot)
+        assertAllowed(repoRoot, exec)
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         if (s.chunks === 0) {
@@ -1546,7 +1582,7 @@ let reconcileTimer = null
     async execute(args, exec) {
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
-        assertAllowed(repoRoot)
+        assertAllowed(repoRoot, exec)
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         const remoteMode = config.vectorStore === 'remote'
@@ -1665,7 +1701,7 @@ let reconcileTimer = null
     async execute(args, exec) {
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
-        assertAllowed(repoRoot)
+        assertAllowed(repoRoot, exec)
         const { store } = storeFor(repoRoot)
         const s = store.stats()
         if (s.files === 0) {
@@ -1804,7 +1840,7 @@ let reconcileTimer = null
         : ''
   const readLog = config.vectors === 'remote' && config.remote.readScopes.length ? `，readScopes=${config.remote.readScopes.length}` : ''
   ctx.logger?.info?.(
-    `dsh-code-index ${BUILD} 已加载（remote-only：vectors=${config.vectorsMode}${config.vectors === 'remote' ? `@${config.remote.url}` : ''}，roots=${config.allowedRoots.length || '任意'}，` +
+    `dsh-code-index ${BUILD} 已加载（remote-only：vectors=${config.vectorsMode}${config.vectors === 'remote' ? `@${config.remote.url}` : ''}，roots=${initialWorkspace.roots.join(',') || 'cwd'}（${initialWorkspace.sources.join('+') || 'cwd'}），` +
       `rerank=${config.rerank}${config.rerank !== 'off' ? `@远端` : ''}，` +
       `chunking=${config.chunking.strategy}，deps=${expandPath(config.depsDir) ?? defaultDepsDir()}${scopeLog}${readLog}）`,
   )
