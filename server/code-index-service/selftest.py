@@ -776,8 +776,10 @@ def main():
     check("后台页面初始化会加载模型列表（不会停在加载中）", "loadModels();" in page)
     check("API Key 页含权限说明与测试按钮", "测试访问索引服务" in page and "index · 索引/检索服务" in page)
     check("新建 Key 只有 index 选项（无 admin option）", 'value="admin"' not in page)
-    check("统计页含趋势图/导出/运行状态", all(k in page for k in (
-        "stat-trend", "stat-latency", "stat-mix", "stat-runtime", "btn-stats-export", "btn-stats-refresh")))
+    check("统计页含趋势图/导出/运行状态/按作用域", all(k in page for k in (
+        "stat-trend", "stat-latency", "stat-mix", "stat-runtime", "stat-scopes",
+        "btn-stats-export", "btn-stats-refresh")))
+    check("统计页不再显示原始端点表", "按端点" not in page and "stat-endpoints" not in page)
     check("作用域页含清空索引危险操作", "清空所有作用域" in page and "输入 RESET 确认" in page)
     with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/admin", timeout=10) as _resp:
         _cc = _resp.headers.get("Cache-Control") or ""
@@ -896,6 +898,22 @@ def main():
         st1, body1 = req("GET", "/v1/admin/stats?days=1", headers=admin_auth)
         check("days=1 只返回今日一天", st1 == 200 and len((body1 or {}).get("byDay") or []) == 1,
               len((body1 or {}).get("byDay") or []))
+        cats = stats.get("categories") or {}
+        check("统计含业务/系统四类", set(cats) == {"retrieval", "indexing", "embedding", "system"}, list(cats))
+        check("系统/轮询请求不为 0 且单独归类", cats.get("system", {}).get("requests", 0) >= 1,
+              (cats.get("system") or {}).get("requests"))
+        biz_requests = sum((cats.get(name) or {}).get("requests", 0)
+                           for name in ("retrieval", "indexing", "embedding"))
+        check("业务请求 + 系统请求 = 总请求", biz_requests + (cats.get("system") or {}).get("requests", 0)
+              == (tot.get("requests") or 0), (biz_requests, cats, tot.get("requests")))
+        check("byDay 含分类请求数", all(("retrievalRequests" in d and "indexingRequests" in d
+              and "embeddingRequests" in d and "systemRequests" in d) for d in (stats.get("byDay") or [])))
+        by_scope = {s.get("namespace"): s for s in (stats.get("byScope") or [])}
+        check("按作用域统计记录检索请求", NS_NULL in by_scope and by_scope[NS_NULL].get("searchCalls", 0) >= 1,
+              list(by_scope))
+        check("usage_scope 表已建",
+              server.adm.db.execute("select name from sqlite_master where type='table' and name='usage_scope'").fetchone() is not None)
+        check("prevCategories 存在", isinstance(stats.get("prevCategories"), dict))
         server.adm.flush()
         check("flush 后可读（stats 持久化入口）", True, "")
         req("DELETE", f"/v1/admin/keys/{kid2}", headers=admin_auth)
