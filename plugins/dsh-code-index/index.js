@@ -1132,12 +1132,16 @@ function applyInner(ctx, rawConfig = {}) {
     description:
       '在本仓库的代码索引里做混合检索（本地关键词 BM25 + 远端语义向量，RRF 融合），返回排好序的「文件:行 + 片段」。'
       + '第一次查询前需要先跑 code_index。适合“XX 逻辑在哪实现 / 哪个文件处理了 YY”这类问题；'
-      + '查找确切字符串（日志、错误码原文）用 grep 更快。vectors=off 时退化为纯关键词。',
+      + '查找确切字符串（日志、错误码原文）用 grep 更快。vectors=off 时退化为纯关键词。'
+      + '中文自然语言查询请先自行翻译成英文关键词/标识符，或直接中英混合（可先用 code_map/grep 找真实符号名）；纯中文 query 的跨语言召回较弱。',
     isConcurrencySafe: () => true,
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: '自然语言问题或关键词组合。' },
+        query: {
+          type: 'string',
+          description: '自然语言问题或关键词组合。中文查询建议附带英文关键词/标识符（中英混合召回最好）；纯中文的跨语言召回较弱。',
+        },
         path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
         top_k: { type: 'integer', description: '返回条数，默认 10。' },
         mode: { type: 'string', enum: ['auto', 'fts', 'vector'], description: '检索通道，默认 auto（混合）。' },
@@ -1302,6 +1306,10 @@ function applyInner(ctx, rawConfig = {}) {
         if (config.vectorStore !== 'remote') r.note = ''
         // 作用域只在新配置下展示：旧配置输出不变（向后兼容的展示面）
         const scopeLine = scopeInfo ? renderScopeLine(scopeInfo) : null
+        const cjkOnly = /[\u4e00-\u9fff]/u.test(args.query) && !/[A-Za-z]/.test(args.query)
+        const cjkHint = cjkOnly
+          ? '提示：这是纯中文查询，跨语言召回较弱；可先用 code_map/grep 找英文标识符，或带英文关键词重试。'
+          : null
         if (!r.results.length) {
           return textResult(
             { repoRoot, mode: r.mode, terms: r.terms, results: [], rerank: r.rerank, scope: scopeInfo },
@@ -1309,6 +1317,7 @@ function applyInner(ctx, rawConfig = {}) {
               `没有命中（通道 ${r.mode}，词项 ${r.terms.join(' / ') || '无'}）。${r.note}`,
               scopeLine,
               `建议：换更具体的标识符（类名/方法名/错误码），或先用 grep 找确切字符串。`,
+            cjkHint,
             ]
               .filter(Boolean)
               .join('\n'),
@@ -1323,6 +1332,7 @@ function applyInner(ctx, rawConfig = {}) {
           lines.push(`  当前文件锚定：${cf.rel}（${cf.excerpt.split('\n').length} 行片段参与查询向量；${keepSelf}${ex}）`)
         }
         if (r.note) lines.push(`  ${r.note}`)
+        if (cjkHint) lines.push(`  ${cjkHint}`)
         // 重排状态必须显式报告：开了没生效（缺模型/降级）与"本来就没开"是两件事，
         // 不写清楚就会让人以为在享受重排的收益。
         if (r.rerank?.applied) {
