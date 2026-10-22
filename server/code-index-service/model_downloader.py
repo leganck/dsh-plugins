@@ -131,7 +131,13 @@ class ModelDownloader:
         out["note"] = self.catalog[name].get("note", "")
         # 就绪判定：所有文件存在且 sha256 一致
         files = out["files"]
+        disk_bytes = sum(int(f.get("size") or 0) for f in files)
+        out["diskBytes"] = disk_bytes
         out["ready"] = bool(files) and all(f.get("ok") for f in files)
+        # 已就绪时把进度补成真实磁盘大小，避免页面显示 "0 B / ?" 却 100%
+        if out["ready"]:
+            out["bytesDone"] = disk_bytes
+            out["bytesTotal"] = disk_bytes
         out["retryable"] = out["status"] in ("failed", "cancelled") or (out["status"] == "idle" and not out["ready"])
         return out
 

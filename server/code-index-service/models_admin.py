@@ -171,11 +171,14 @@ def tag_for_dir(directory):
     model_file = os.path.basename(model_path)
     name = name_for_dir(real)
     precision = precision_of(model_file)
+    fp = fingerprint_cached(real, model_file)
     out = {
-        "tag": f"{name}-{fingerprint_cached(real, model_file)}-{precision}",
+        "tag": f"{name}-{fp}-{precision}",
         "name": name,
         "precision": precision,
         "model_file": model_file,
+        # 内容指纹（与目录名无关）：同名同内容但目录名不同的副本靠它合并
+        "fingerprint": fp,
         "model_bytes": os.path.getsize(model_path),
     }
     dim = profile_for_dir(real).get("dim")
@@ -250,6 +253,7 @@ def _validated_item(directory, roots, model_files, extra_files):
         "name": info["name"],
         "tag": info["tag"],
         "precision": info["precision"],
+        "fingerprint": info.get("fingerprint"),
         "model_file": info["model_file"],
         "model_bytes": info["model_bytes"],
         "size_bytes": _size_bytes(real, info["model_file"]),
@@ -355,7 +359,9 @@ def discover(*, roots, active_embed_dir=None, active_rerank_dir=None):
     - roots 的每个直接子目录 + roots 本身（若本身就是模型目录）；
     - 只认含 onnx + tokenizer.json 的目录；
     - 目录名含 "rerank" → rerank，否则 embed；
-    - 按 realpath 去重；active 排第一，然后按 name；
+    - 按 realpath 去重，再按 **(kind, tag)** 合并"内容相同、只是复制了一份"的目录：
+      保留 active 的那个，其余放进 `alsoDirs`（页面显示"另有 N 份副本"）；
+    - active 排第一，然后按 name；
     - 单个目录校验失败**直接跳过**（一个坏目录不能拖垮整个列表）。
 
     返回 {"embed":[{...}], "rerank":[{...}]}，每项：
@@ -377,6 +383,22 @@ def discover(*, roots, active_embed_dir=None, active_rerank_dir=None):
         except Exception:  # 单目录的意外错误（权限/坏文件名）同样不影响其它模型
             continue
         active = _same_dir(directory, active_rerank_dir if kind == "rerank" else active_embed_dir)
-        item.update({"kind": kind, "ready": True, "active": active})
+        item.update({"kind": kind, "ready": True, "active": active, "alsoDirs": []})
         buckets[kind].append(item)
-    return {kind: _sorted(items) for kind, items in buckets.items()}
+    # 同一份模型（同 tag）可能被复制到多个 root（例如控制台下载目录 + 挂载目录）：
+    # 按 tag 合并成一行，active 优先，其余目录记在 alsoDirs；否则页面会出现两个"重排"。
+    merged = {}
+    for kind, items in buckets.items():
+        by_tag = {}
+        for item in _sorted(items):
+            key = (item.get("fingerprint") or item.get("tag"), item.get("model_file"),
+                   item.get("model_bytes"), item.get("precision"))
+            cur = by_tag.get(key)
+            if cur is None:
+                by_tag[key] = item
+                continue
+            winner, loser = (item, cur) if item.get("active") and not cur.get("active") else (cur, item)
+            winner["alsoDirs"] = list(winner.get("alsoDirs") or []) + [loser.get("dir")] + list(loser.get("alsoDirs") or [])
+            by_tag[key] = winner
+        merged[kind] = _sorted(by_tag.values())
+    return merged
