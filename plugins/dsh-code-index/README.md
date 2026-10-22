@@ -7,7 +7,7 @@ DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 | 工具 | 作用 | 并发 |
 |---|---|---|
 | `code_index` | 建库 / 增量刷新（SQLite：FTS5 全文 + 可选向量） | 串行（写） |
-| `code_search` | 混合检索：BM25 + 向量 → RRF → 「文件:行 + 片段」 | ✅ 可并行 |
+| `code_search` | 混合检索：BM25 + 向量 → RRF → 「文件:行 + 片段」；`mode=fts` 强制关键词、`mode=vector` 强制远端向量，不被远端模式吞掉 | ✅ 可并行 |
 | `code_index_status` | 覆盖情况与新鲜度（文件/块/向量、待更新数量） | ✅ 可并行 |
 | `code_map` | 目录地图：每个目录的文件数/语言/块数/代表符号，冷启动定位用 | ✅ 可并行 |
 | `code_index_deps` | 可选依赖的按需安装/修剪（只剩 tree-sitter 语法组，按语言装），默认只报状态 | 串行 |
@@ -407,7 +407,7 @@ test-remote.mjs       远端地址/重排/配置校验/作用域夹具与多作�
 
 ```console
 # 在插件目录里（或不带 --repo，用自动夹具仓库）
-node test-remote.mjs                            # 85 项：地址/重排/配置校验/作用域夹具/多作用域回退（本地 HTTP 桩）
+node test-remote.mjs                            # 90 项：地址/重排/配置校验/作用域夹具/多作用域回退/按次通道（本地 HTTP 桩）
 node test.mjs                                   # 125 项（Windows）/ 119 项（Linux）：建库/检索/增量/切块/排除/作用域
 node test-plugin.mjs                            # 83 项：契约与接口、五个工具真实调用、Config schema
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
