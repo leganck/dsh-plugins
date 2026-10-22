@@ -920,10 +920,22 @@ def main():
         check("再切到第二个模型 → tag 不同", st == 200 and r2.get("tag") != r1.get("tag"), r2.get("tag"))
         st, body = req("POST", "/v1/admin/models/activate", {"kind": "embed", "dir": "C:/definitely/not/a/model"}, headers=admin_auth)
         check("非法目录 → 400 且保留原模型", st == 400 and server.state["info"]["tag"] == r2.get("tag"), st)
+        dup_dir = os.path.join(TMP, "model-fake-b-copy")
+        os.makedirs(dup_dir, exist_ok=True)
+        for fn in ("model_fp16.onnx", "tokenizer.json", "tokenizer_config.json"):
+            with open(os.path.join(fake_b, fn), "rb") as src, open(os.path.join(dup_dir, fn), "wb") as dst:
+                dst.write(src.read())
         st, body = req("GET", "/v1/admin/models", headers=admin_auth)
         mdata = body or {}
         check("/v1/admin/models 含 installed/active/下载目录",
               st == 200 and "installed" in mdata and "active" in mdata and "models" in mdata, list(mdata))
+        merged_rows = [m for m in ((mdata.get("installed") or {}).get("embed") or []) if m.get("alsoDirs")]
+        check("重复模型目录按内容指纹合并为一行（active 优先，副本记入 alsoDirs）",
+              len(merged_rows) == 1 and merged_rows[0].get("active")
+              and any("copy" in str(d) for d in (merged_rows[0].get("alsoDirs") or [])),
+              [(m.get("dir"), m.get("tag"), m.get("active"), m.get("alsoDirs")) for m in ((mdata.get("installed") or {}).get("embed") or [])])
+        check("下载列表能标出本机已有同款（installedElsewhere 字段可用）",
+              all("installedElsewhere" not in m or m["installedElsewhere"].get("dir") for m in (mdata.get("models") or [])))
         check("热切换后 governor 恢复运行", server.governor and not server.governor.paused,
               server.governor.paused if server.governor else None)
     finally:

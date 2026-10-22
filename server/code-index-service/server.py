@@ -291,7 +291,7 @@ ADMIN_HTML = r"""<!doctype html>
 <body>
 <header>
   <div class="brand"><span class="logo">CI</span><h1>code-index-service</h1><span class="sub">控制台</span></div>
-  <span id="ready" class="chip"><span class="dot"></span>…</span>
+  <span id="ready" class="chip"><span class="dot"></span>加载中</span>
   <span id="model" class="chip mono" title="当前向量模型 tag">—</span>
   <span id="authchip" class="chip"></span>
   <span class="spacer"></span>
@@ -316,23 +316,23 @@ ADMIN_HTML = r"""<!doctype html>
   <section id="tab-overview" class="panel active">
     <section class="card">
       <h2>运行时</h2>
-      <div class="kv" id="runtime"></div>
+      <div class="kv" id="runtime"><div class="k">加载中…</div><div class="v"></div></div>
     </section>
     <section class="card">
       <h2>嵌入治理</h2>
-      <div class="kv" id="governor"></div>
+      <div class="kv" id="governor"><div class="k">加载中…</div><div class="v"></div></div>
     </section>
     <section class="card">
       <h2>存储与限额</h2>
-      <div class="kv" id="limits"></div>
+      <div class="kv" id="limits"><div class="k">加载中…</div><div class="v"></div></div>
     </section>
     <section class="card">
       <h2>向量标签 <span class="tail"><button id="btn-purge-tags" style="padding:2px 8px">清理旧 tag</button></span></h2>
-      <div class="kv" id="tags"></div>
+      <div class="kv" id="tags"><div class="k">加载中…</div><div class="v"></div></div>
     </section>
     <section class="card wide">
       <h2>鉴权状态</h2>
-      <div class="kv" id="auth-kv"></div>
+      <div class="kv" id="auth-kv"><div class="k">加载中…</div><div class="v"></div></div>
       <div id="setup-box" style="display:none;margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
         <div class="login-hint" style="margin-bottom:8px">还没有管理员密码。设置后控制台需要登录（也可继续用环境变量 ADMIN_PASSWORD）。</div>
         <input id="setup-pwd" type="password" placeholder="设置管理员密码（至少 8 位）" style="min-width:260px">
@@ -639,24 +639,32 @@ function renderOverview() {
   $('#setup-box').style.display = auth.adminPasswordSet ? 'none' : 'block';
 }
 let REFRESH_INFLIGHT = null;
+function overviewError(msg) {
+  $('#ready').className = 'chip bad';
+  $('#ready').innerHTML = '<span class="dot"></span>不可达';
+  ['runtime', 'governor', 'limits', 'tags', 'auth-kv'].forEach((id) => {
+    const el = $('#' + id);
+    if (el) el.innerHTML = '<div class="k">加载失败</div><div class="v">' + escapeHtml(String(msg || '请求失败')) + '</div>';
+  });
+}
 async function refreshHealth() {
   // 并发去重：初始化时 showTab() 与显式调用可能同时触发，旧实现会重复请求 /health 两次。
   if (REFRESH_INFLIGHT) return REFRESH_INFLIGHT;
   REFRESH_INFLIGHT = (async () => {
-    // 两个接口互不依赖 → 并行；串行时总耗时 = 两者之和
-    const [h, s] = await Promise.all([api('/health'), api('/v1/scopes')]);
-    if (h.status !== 200 || !h.body) {
-      $('#ready').className = 'chip bad';
-      $('#ready').innerHTML = '<span class="dot"></span>不可达';
-      return;
+    try {
+      // 两个接口互不依赖 → 并行；串行时总耗时 = 两者之和
+      const [h, s] = await Promise.all([api('/health'), api('/v1/scopes')]);
+      if (h.status !== 200 || !h.body) { overviewError('HTTP ' + h.status); return; }
+      HEALTH = h.body;
+      $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      if (HEALTH.admin && !HEALTH.admin.authRequired) banner('当前未强制 API Key：任何能访问此地址的人都能检索。建议到「API Key」页创建第一个 Key。', true);
+      else banner('');
+      renderOverview();
+      ROWS = (s.body && s.body.scopes) || [];
+      renderScopes();
+    } catch (e) {
+      overviewError((e && e.message) || e);
     }
-    HEALTH = h.body;
-    $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    if (HEALTH.admin && !HEALTH.admin.authRequired) banner('当前未强制 API Key：任何能访问此地址的人都能检索。建议到「API Key」页创建第一个 Key。', true);
-    else banner('');
-    renderOverview();
-    ROWS = (s.body && s.body.scopes) || [];
-    renderScopes();
   })().finally(() => { REFRESH_INFLIGHT = null; });
   return REFRESH_INFLIGHT;
 }
@@ -733,9 +741,11 @@ async function searchTest() {
 // ---------------- 模型 ----------------
 let MODEL_DATA = null;
 let MODEL_TIMER = null;
-function modelStatusChip(s) {
-  const map = { idle: 'chip', downloading: 'chip warn', done: 'chip ok', failed: 'chip bad', cancelled: 'chip warn' };
-  return '<span class="' + (map[s] || 'chip') + '"><span class="dot"></span>' + s + '</span>';
+function modelStatusChip(status, ready) {
+  if (ready) return '<span class="chip ok"><span class="dot"></span>已就绪</span>';
+  const label = { idle: '未下载', downloading: '下载中', done: '已下载', failed: '失败', cancelled: '已取消' }[status] || status;
+  const cls = { failed: 'chip bad', downloading: 'chip warn', cancelled: 'chip warn', done: 'chip ok' }[status] || 'chip';
+  return '<span class="' + cls + '"><span class="dot"></span>' + label + '</span>';
 }
 function renderActiveModels() {
   const a = (MODEL_DATA && MODEL_DATA.active) || {};
@@ -765,11 +775,15 @@ function renderInstalled() {
     const op = kind === 'embed'
       ? (active ? '<span class="chip ok">当前</span>' : '<button class="primary" data-switch-embed="' + escapeHtml(m.dir) + '">切换为嵌入</button>')
       : (active ? '<button data-rerank-off="1">关闭</button>' : '<button class="primary" data-switch-rerank="' + escapeHtml(m.dir) + '">启用重排</button>');
+    const dups = m.alsoDirs || [];
+    const dirTitle = [m.dir].concat(dups).join('\n');
+    const dirCell = '<span class="mono faint" style="font-size:11px" title="' + escapeHtml(dirTitle) + '">' + escapeHtml(m.dir) + '</span>'
+      + (dups.length ? ' <span class="chip warn" title="' + escapeHtml(dups.join('\n')) + '">另有 ' + dups.length + ' 份副本</span>' : '');
     return '<tr>'
       + '<td>' + (kind === 'embed' ? '嵌入' : '重排') + '</td>'
       + '<td>' + escapeHtml(m.name) + '</td>'
       + '<td class="mono" style="font-size:11.5px">' + escapeHtml(m.tag || '—') + '</td>'
-      + '<td class="mono faint" style="font-size:11px">' + escapeHtml(m.dir) + '</td>'
+      + '<td>' + dirCell + '</td>'
       + '<td class="num">' + fmtBytes(m.size_bytes || m.model_bytes) + '</td>'
       + '<td>' + (active ? '<span class="chip ok">active</span>' : (m.ready ? '<span class="chip">ready</span>' : '<span class="chip bad">incomplete</span>')) + '</td>'
       + '<td>' + op + '</td></tr>';
@@ -783,22 +797,36 @@ function renderDownloads() {
   const list = (MODEL_DATA && MODEL_DATA.models) || [];
   if (!list.length) { box.innerHTML = '<span class="faint">没有可下载的模型</span>'; return; }
   box.innerHTML = list.map((m) => {
-    const pct = m.bytesTotal ? Math.min(100, Math.round(m.bytesDone * 100 / m.bytesTotal)) : (m.ready ? 100 : 0);
+    const ready = !!m.ready;
+    const pct = ready ? 100 : (m.bytesTotal ? Math.min(100, Math.round(m.bytesDone * 100 / m.bytesTotal)) : 0);
     const cls = m.status === 'failed' ? 'bad' : (m.status === 'downloading' ? 'warn' : '');
-    const size = fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?');
+    const size = ready
+      ? fmtBytes(m.diskBytes || m.bytesTotal || 0)
+      : (fmtBytes(m.bytesDone) + ' / ' + (m.bytesTotal ? fmtBytes(m.bytesTotal) : '?'));
     const speed = (m.status === 'downloading' && m.speedBps) ? ' · ' + fmtBytes(m.speedBps) + '/s' : '';
+    const elsewhere = m.installedElsewhere;
+    const blocked = !!(elsewhere && !ready);
     const btn = m.status === 'downloading'
       ? '<button data-cancel="' + escapeHtml(m.name) + '">取消</button>'
-      : '<button data-start="' + escapeHtml(m.name) + '"' + (m.ready ? ' disabled' : '') + '>' + (m.ready ? '已就绪' : ((m.status === 'failed' || m.status === 'cancelled') ? '重试' : '下载')) + '</button>'
+      : '<button data-start="' + escapeHtml(m.name) + '"' + (ready || blocked ? ' disabled' : '') + '>'
+        + (ready ? '已就绪' : (blocked ? '已安装' : ((m.status === 'failed' || m.status === 'cancelled') ? '重试' : '下载'))) + '</button>'
         + '<button data-force="' + escapeHtml(m.name) + '" title="删掉已下载文件，从头再下">重传</button>';
-    const hint = m.ready
-      ? '<div class="faint" style="font-size:11.5px;margin-top:6px">已就绪 · 目标目录 <span class="mono">' + escapeHtml(m.target) + '</span> · 到「已安装模型」里点切换即可热加载（无需重启）</div>'
-      : '<div class="faint" style="font-size:11.5px;margin-top:6px">' + escapeHtml(m.error || m.message || '') + '</div>';
+    const hint = ready
+      ? '已就绪 · 目标目录 <span class="mono">' + escapeHtml(m.target) + '</span> · 到「已安装模型」里点切换即可热加载（无需重启）'
+      : escapeHtml(m.error || m.message || '');
+    let extra = '';
+    if (elsewhere && ready) {
+      extra = '<div style="font-size:11.5px;margin-top:4px;color:var(--warn)">同 tag 已安装在 <span class="mono">' + escapeHtml(elsewhere.dir) + '</span>，这个目录是副本（可手动删除，不影响切换）</div>';
+    } else if (elsewhere && !ready) {
+      extra = '<div style="font-size:11.5px;margin-top:4px;color:var(--warn)">本机已有同款：<span class="mono">' + escapeHtml(elsewhere.dir) + '</span>' + (elsewhere.tag ? '（tag ' + escapeHtml(elsewhere.tag) + '）' : '') + '，一般无需再下载；确需副本可用「重传」</div>';
+    }
+    const note = m.note ? '<div class="faint" style="font-size:11.5px;margin-top:2px">' + escapeHtml(m.note) + '</div>' : '';
     return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
-      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>' + escapeHtml(m.name) + '</b> ' + modelStatusChip(m.status)
+      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>' + escapeHtml(m.name) + '</b> ' + modelStatusChip(m.status, ready)
       + '<span class="faint">' + escapeHtml(m.label || '') + '</span><span class="spacer"></span>' + btn + '</div>'
       + '<div class="cov" style="margin-top:8px"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span>'
-      + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>' + hint + '</div>';
+      + '<span class="num">' + pct + '%</span><span class="faint">' + size + speed + '</span></div>'
+      + '<div class="faint" style="font-size:11.5px;margin-top:6px">' + hint + '</div>' + extra + note + '</div>';
   }).join('');
   $$('[data-start]').forEach((b) => { b.onclick = () => startModel(b.dataset.start, false); });
   $$('[data-force]').forEach((b) => { b.onclick = () => { if (confirm('删掉已下载文件，从头重新下载？')) startModel(b.dataset.force, true); }; });
@@ -1359,6 +1387,44 @@ def reset_index(confirm: str):
                 governor.resume()
 
 
+def _annotate_download_models(out, installed):
+    """给“可下载模型”标出本机已有同款（按 tag / 目录名），避免再下载一份副本。"""
+    tag_index = {}
+    fp_index = {}
+    by_base = {}
+    for items in (installed or {}).values():
+        for it in items:
+            if it.get("tag"):
+                tag_index[it["tag"]] = it
+            if it.get("fingerprint"):
+                fp_index[str(it["fingerprint"])] = it
+            base = os.path.basename(str(it.get("dir") or "").rstrip("/\\"))
+            if base:
+                by_base[base] = it
+    for m in out.get("models") or []:
+        target = str(m.get("target") or "")
+        if not target:
+            continue
+        hit = None
+        if m.get("ready"):
+            try:
+                info = models_admin.tag_for_dir(target)
+                hit = tag_index.get(info["tag"]) or fp_index.get(str(info.get("fingerprint") or ""))
+            except Exception:
+                hit = None
+        if hit is None:
+            hit = by_base.get(os.path.basename(target.rstrip("/\\")))
+        if hit is None:
+            continue
+        try:
+            if os.path.realpath(str(hit.get("dir") or "")) == os.path.realpath(target):
+                continue
+        except Exception:
+            continue
+        m["installedElsewhere"] = {"dir": hit.get("dir"), "tag": hit.get("tag"),
+                                   "active": bool(hit.get("active"))}
+
+
 def models_payload():
     installed = {"embed": [], "rerank": []}
     err = None
@@ -1385,6 +1451,11 @@ def models_payload():
     }
     if err:
         out["error"] = err
+    else:
+        try:
+            _annotate_download_models(out, installed)
+        except Exception as e:  # noqa: BLE001 —— 标注失败不影响主数据
+            log(f"models: 标注 installedElsewhere 失败（忽略）{type(e).__name__}: {e}")
     return out
 
 
