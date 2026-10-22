@@ -222,6 +222,18 @@ const readMarker = () => JSON.parse(fs.readFileSync(path.join(process.env.DSH_HO
     schemaError = String(e.message)
   }
   check('volatile Config 传入 apply 不抛错', schemaError === '', schemaError.slice(0, 120))
+
+  // bundle 默认 patch 只有 roots/vectors，没有 advanced/remote；Config 的
+  // 未设置 volatile 引用必须是 undefined，而不能覆盖默认值。
+  let bundleError = ''
+  try {
+    const fake = cordisLikeCtx(plugin)
+    plugin.apply(fake.ctx, plugin.Config({ roots: [], vectors: 'off' }))
+    check('bundle 默认配置（无 advanced/remote）可加载', fake.registry.size === 5, `${fake.registry.size} 个工具`)
+  } catch (e) {
+    bundleError = String(e.message)
+  }
+  check('bundle 默认配置不抛 ConfigError', bundleError === '', bundleError.slice(0, 120))
 }
 
 // ---------- 注册面 ----------

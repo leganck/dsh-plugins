@@ -409,7 +409,7 @@ test-remote.mjs       远端地址/重排/配置校验/作用域夹具与多作�
 # 在插件目录里（或不带 --repo，用自动夹具仓库）
 node test-remote.mjs                            # 85 项：地址/重排/配置校验/作用域夹具/多作用域回退（本地 HTTP 桩）
 node test.mjs                                   # 125 项（Windows）/ 119 项（Linux）：建库/检索/增量/切块/排除/作用域
-node test-plugin.mjs                            # 81 项：契约与接口、五个工具真实调用、Config schema
+node test-plugin.mjs                            # 83 项：契约与接口、五个工具真实调用、Config schema
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 
 # 在仓库根：三个插件一起跑

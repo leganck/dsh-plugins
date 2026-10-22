@@ -204,7 +204,12 @@ function unwrapConfig(value) {
   if (Array.isArray(value)) return value.map(unwrapConfig)
   if (value && typeof value === 'object') {
     const out = {}
-    for (const [key, child] of Object.entries(value)) out[key] = unwrapConfig(child)
+    for (const [key, child] of Object.entries(value)) {
+      const unwrapped = unwrapConfig(child)
+      // 未设置的 volatile 引用会得到 undefined；必须省略这个键，否则展开时会
+      // 覆盖 USER_DEFAULTS 的默认值（例如 advanced.indexDirBase: null）。
+      if (unwrapped !== undefined) out[key] = unwrapped
+    }
     return out
   }
   return value
