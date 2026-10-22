@@ -21,6 +21,7 @@
 """
 import hashlib
 import os
+import threading
 
 # 模型 profile：热切换时 Embedder 按它切 query 前缀 / 池化 / 特殊 token / 截断长度。
 # 字段与 embedder.DEFAULT_PROFILE 一一对应；多出的 name 只用于推导 tag（不进 embedder 的运算）。
@@ -89,6 +90,39 @@ def fingerprint(model_dir, model_file):
     return h.hexdigest()[:8]
 
 
+# 大模型（bge 194MB / rerank 531MB / jina 321MB）跑一次 fingerprint 要读完全部字节，
+# 实测单次 ~0.9s；后台页面每 1.2s 轮询一次 /v1/admin/models 会把 CPU 打满、按钮迟迟不出来。
+# 用 (size, mtime_ns) 做签名缓存：文件没变就不重算哈希。
+_FP_CACHE = {}
+_FP_LOCK = threading.Lock()
+
+
+def _stat_sig(real_dir, model_file):
+    parts = []
+    for name in (model_file, "tokenizer.json", "tokenizer_config.json"):
+        try:
+            st = os.stat(os.path.join(real_dir, name))
+            parts.append((name, st.st_size, st.st_mtime_ns))
+        except OSError:
+            parts.append((name, -1, -1))
+    return tuple(parts)
+
+
+def fingerprint_cached(model_dir, model_file):
+    """fingerprint() 的 stat 缓存版本（模型文件没变时 O(stat)，不再读 GB 级文件）。"""
+    real = os.path.realpath(os.path.abspath(str(model_dir)))
+    key = (real, model_file)
+    sig = _stat_sig(real, model_file)
+    with _FP_LOCK:
+        hit = _FP_CACHE.get(key)
+        if hit and hit[0] == sig:
+            return hit[1]
+    fp = fingerprint(real, model_file)
+    with _FP_LOCK:
+        _FP_CACHE[key] = (sig, fp)
+    return fp
+
+
 def pick_model(directory):
     """按 embedder 的优先级挑模型文件：model_fp16.onnx → model.onnx → model_int8.onnx。
 
@@ -138,7 +172,7 @@ def tag_for_dir(directory):
     name = name_for_dir(real)
     precision = precision_of(model_file)
     out = {
-        "tag": f"{name}-{fingerprint(real, model_file)}-{precision}",
+        "tag": f"{name}-{fingerprint_cached(real, model_file)}-{precision}",
         "name": name,
         "precision": precision,
         "model_file": model_file,
