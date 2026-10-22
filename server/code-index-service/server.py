@@ -396,7 +396,8 @@ ADMIN_HTML = r"""<!doctype html>
           <tbody id="keys"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
-      <div class="faint" style="font-size:11.5px;margin-top:8px">index Key 可调用索引/检索全部接口（sync / chunks / vectors / search / status / scopes），不能进控制台管理。<br>新建 Key 固定为 index 角色；admin 角色仅保留给环境变量 legacy <span class="mono">API_KEY</span>（id=0）和既有 Key，不再从页面新建。</div>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">index Key 可调用索引/检索全部接口（sync / chunks / vectors / search / status / scopes），不能进控制台管理。<br>新建 Key 固定为 index 角色；admin 角色仅保留给既有 Key，不再从页面新建。</div>
+      <div class="faint" id="key-legacy-note" style="font-size:11.5px;margin-top:6px">加载中…</div>
     </section>
   </section>
 
@@ -901,6 +902,12 @@ async function loadKeys() {
   if (r.status !== 200) return;
   KEYS = (r.body && r.body.keys) || [];
   LEGACY = !!(r.body && r.body.legacy);
+  const note = $('#key-legacy-note');
+  if (note) {
+    note.innerHTML = LEGACY
+      ? '环境变量 <span class="mono">API_KEY</span> 作为 legacy Key（id=0，admin 角色）始终有效，不可在页面删除。'
+      : '当前没有配置环境变量 <span class="mono">API_KEY</span>：所有 Key 都由 <span class="mono">admin.db</span> 管理，可随时禁用 / 删除 / 轮换。';
+  }
   renderKeyStats();
   renderKeys();
 }
