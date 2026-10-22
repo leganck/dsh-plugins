@@ -289,7 +289,7 @@ check(
 }
 
 // 依赖工具：默认只**报**状态，绝不擅自下载（下载必须由显式 action 触发）
-const depsStatusOut = await deps.execute({}, {})
+const depsStatusOut = await deps.execute({}, { cwd: repo })
 const depsText = depsStatusOut.content[0].text
 check('code_index_deps 默认只报状态', /依赖目录/.test(depsText) && /各组状态/.test(depsText), depsText.split('\n')[0])
 check('code_index_deps 只列 parser 组（本地嵌入依赖已移除）', /\[parser\]/.test(depsText) && !/\[embed\]/.test(depsText))
@@ -301,29 +301,29 @@ check(
     && !(deps?.parameters?.properties?.group?.enum ?? []).includes('embed'),
   JSON.stringify(deps?.parameters?.properties?.group?.enum),
 )
-const badGroup = await deps.execute({ action: 'install', group: 'nope' }, {})
+const badGroup = await deps.execute({ action: 'install', group: 'nope' }, { cwd: repo })
 check('未知 group 被拒绝且不下载', /未知依赖组/.test(badGroup.content[0].text), badGroup.content[0].text.slice(0, 60))
-const depsPruneOut = await deps.execute({ action: 'prune' }, {})
+const depsPruneOut = await deps.execute({ action: 'prune' }, { cwd: repo })
 check('code_index_deps prune 在空目录上安全', /已移除 0 个/.test(depsPruneOut.content[0].text), depsPruneOut.content[0].text.split('\n')[1])
 
 // ---------- 错误路径 ----------
 console.log('\n[2] 错误路径')
-const badPath = await search.execute({ query: 'x', path: 'Z:\\definitely\\missing' }, {})
+const badPath = await search.execute({ query: 'x', path: 'Z:\\definitely\\missing' }, { cwd: repo })
 check('不存在的仓库给出错误文本', /错误|还没有索引/.test(badPath.content[0].text), badPath.content[0].text.slice(0, 60))
-const noIndex = await search.execute({ query: 'x', path: repo }, {})
+const noIndex = await search.execute({ query: 'x', path: repo }, { cwd: repo })
 check('未建库时提示先建索引', /还没有索引/.test(noIndex.content[0].text), noIndex.content[0].text.slice(0, 80))
-const outside = await search.execute({ query: 'x', path: os.homedir() }, {})
-check('白名单外的路径被拒绝', /白名单/.test(outside.content[0].text), outside.content[0].text.slice(0, 80))
+const outside = await search.execute({ query: 'x', path: os.homedir() }, { cwd: repo })
+check('工作空间外的路径被拒绝', /工作空间|允许路径/.test(outside.content[0].text), outside.content[0].text.slice(0, 80))
 
 // ---------- status_only ----------
 console.log('\n[3] code_index（status_only）')
-const st = await index.execute({ path: repo, status_only: true }, {})
+const st = await index.execute({ path: repo, status_only: true }, { cwd: repo })
 check('返回状态文本', /索引状态/.test(st.content[0].text), st.content[0].text.slice(0, 60))
 check('报告待更新数量', /待更新/.test(st.content[0].text))
 
 // ---------- 真实建库 ----------
 console.log('\n[4] code_index（真实建库）')
-const built = await index.execute({ path: repo }, {})
+const built = await index.execute({ path: repo }, { cwd: repo })
 const builtText = built.content[0].text
 check('建库成功', /索引完成/.test(builtText), builtText.slice(0, 80))
 check('报告了块数', /写入 \d+ 块/.test(builtText))
@@ -334,7 +334,7 @@ console.log('\n[5] code_search')
 const sample = walkRepo(repo)[0]
 const text = fs.readFileSync(path.join(repo, sample.rel), 'utf8')
 const probe = [...text.matchAll(/\b[A-Za-z_][A-Za-z0-9_]{9,}\b/g)].map((m) => m[0]).sort((a, b) => b.length - a.length)[0]
-const found = await search.execute({ query: probe, path: repo, top_k: 5 }, {})
+const found = await search.execute({ query: probe, path: repo, top_k: 5 }, { cwd: repo })
 const foundText = found.content[0].text
 check('返回命中', /命中 \d+ 条/.test(foundText), foundText.slice(0, 80))
 check('结果含 文件:行', /\[\d+\] .+:\d+-\d+/.test(foundText))
@@ -344,7 +344,7 @@ console.log(foundText.split('\n').slice(0, 6).map((l) => '    ' + l).join('\n'))
 
 // ---------- 状态 ----------
 console.log('\n[6] code_index_status')
-const s2 = await status.execute({ path: repo }, {})
+const s2 = await status.execute({ path: repo }, { cwd: repo })
 const s2Text = s2.content[0].text
 check('报告库文件大小', /\d+(\.\d+)?\s*MB[)）]/.test(s2Text), s2Text.slice(0, 120))
 check('报告覆盖情况', /覆盖 \d+ 文件/.test(s2Text))
