@@ -40,7 +40,7 @@ import z from '@deepseek-ai/schemastery'
 const PARSER_GROUPS = GROUP_NAMES.filter((g) => g.startsWith('parser'))
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-21.1'
+export const BUILD = '2026-10-22.1'
 export const SCHEMA_VERSION = 1
 
 /**

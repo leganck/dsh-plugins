@@ -1,2 +1,2 @@
 817573c07e9acdf364f7cfadc044c9624b6cef633c543cd031cd904130f273cb  local-dsh-code-index-0.10.1.tgz  111601
-3c406bce32f44fe8618f97f9e018efd3139d7f1c724d42921ff8b9976c01efea  local-dsh-code-index-0.12.0.tgz  150938
+f4ac1d76ddb7b9328706a743cfdb45adce82807807f501113e68a1d59cf7000b  local-dsh-code-index-0.12.0.tgz  150940
