@@ -278,6 +278,57 @@ def test_llm() -> None:
     got = flaky.chat_json([{"role": "user", "content": "x"}], "reviewer")
     check("chat_json 首次非 JSON 会严格重试", got == {"ok": True} and flaky.calls == 2, f"calls={flaky.calls} got={got}")
 
+    # 只有明确“不支持 response_format”的 400 才回退；其它 400 不能被吞
+    from unittest.mock import patch
+    from .util import HttpError
+
+    calls: list[dict] = []
+
+    def fake_http(method, url, payload, headers, timeout):
+        calls.append(payload)
+        if "response_format" in payload:
+            raise HttpError(400, '{"error":"response_format unsupported"}', url)
+        return {"choices": [{"message": {"content": '{"ok":true}'}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    with patch("app.llm.http_json", fake_http):
+        fallback = LLM("http://fake").chat_json([{"role": "user", "content": "x"}], "reviewer")
+    check("200/400 明确不支持 response_format 才回退", fallback == {"ok": True} and len(calls) == 2 and "response_format" not in calls[1], str(len(calls)))
+
+    calls.clear()
+
+    def fake_bad_request(method, url, payload, headers, timeout):
+        calls.append(payload)
+        raise HttpError(400, '{"error":"max_tokens too large"}', url)
+
+    with patch("app.llm.http_json", fake_bad_request):
+        try:
+            LLM("http://fake").chat([{"role": "user", "content": "x"}], "reviewer")
+            check("非 response_format 的 400 不应回退", False)
+        except HttpError:
+            check("非 response_format 的 400 不应回退", True)
+    check("非 response_format 的 400 只请求一次", len(calls) == 1, str(len(calls)))
+
+    # 空 content 是“停滞”而不是合法空回答，应重试
+    seq = [
+        {"choices": [{"message": {"content": ""}}]},
+        {"choices": [{"message": {"content": '{"ok":true}'}}]},
+    ]
+
+    def fake_empty(method, url, payload, headers, timeout):
+        return seq.pop(0)
+
+    with patch("app.llm.http_json", fake_empty):
+        empty_out = LLM("http://fake").chat([{"role": "user", "content": "x"}], "reviewer")
+    check("空 content 会自动重试", empty_out == '{"ok":true}' and not seq, empty_out)
+
+    # 兼容 content parts 数组
+    def fake_parts(method, url, payload, headers, timeout):
+        return {"choices": [{"message": {"content": [{"type": "text", "text": '{"ok":true}'}]}}]}
+
+    with patch("app.llm.http_json", fake_parts):
+        parts_out = LLM("http://fake").chat([{"role": "user", "content": "x"}], "reviewer")
+    check("content parts 能展平为文本", parts_out == '{"ok":true}', parts_out)
+
 
 # ---------------------------------------------------------------- 4) 流水线
 
