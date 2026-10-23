@@ -109,7 +109,7 @@ class Worker(threading.Thread):
         self.stop_event = stop_event
         self.index = index
         self.poll_interval = 1.0
-        self.mirrors = MirrorManager(cfg.mirror_dir, cfg.worktree_dir) if cfg.git_strategy == "clone" else None
+        self.mirrors = MirrorManager(cfg.mirror_dir, cfg.worktree_dir, git_token=cfg.gitlab_token) if cfg.git_strategy == "clone" else None
         self.index_state = IndexState(store.path)
         self._sync_last: dict[str, float] = {}
         self._last_gc = 0.0
