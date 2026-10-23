@@ -52,7 +52,7 @@ SYSTEM_VERIFIER = """你是评审的复核员。给你一条候选问题，你�
 - 引用的 API 是否真存在、签名是否正确；
 - 问题是否被外层错误处理/重试/事务覆盖。
 
-你可以按需请求证据（最多 {max_steps} 次），每次输出一个动作对象：
+你可以按需请求证据（最多 {max_steps} 次），每次输出一个 JSON 动作对象：
   {{"action":"read_file","path":"<文件>","start":1,"end":80}}
   {{"action":"search","query":"<要搜的代码/符号>"}}
   {{"action":"final","keep":true|false,"reason":"...","evidence":"..."}}
@@ -135,7 +135,7 @@ def verifier_messages(finding: dict, evidence_round: list[dict], max_steps: int)
 {dump(finding)}
 {ev}
 
-请按规则继续：需要更多证据就输出一个动作对象，能判断了就输出 action=final。
+请按规则继续：需要更多证据就输出一个 JSON 动作对象，能判断了就输出 action=final。
 """
     return [
         {"role": "system", "content": SYSTEM_VERIFIER.replace("{max_steps}", str(max_steps))},
