@@ -34,7 +34,8 @@ code-index-service/
 ├── embedder.py      # ONNX 嵌入会话 + 向量标签（tag）
 ├── reranker.py      # 交叉编码器重排
 ├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），248 项
-├── Dockerfile       # 一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
+├── Dockerfile       # 运行时底座 + 模型变体（base / nomodel / embed / embed-rerank）
+├── Dockerfile.app   # 应用层：FROM 已发布 base，只 COPY 代码 + 模型（发布快）
 ├── docker-entrypoint.sh  # 拼 CUDA 路径、查设备、校验模型、/data 权限；能降级就降级
 ├── scripts/fetch-models.mjs  # 拉模型 → models/model、models/model-rerank（也支持 --check）
 ├── compose.yaml     # 默认部署：GHCR latest-cpu，镜像自带嵌入模型
@@ -495,7 +496,7 @@ networks:
 git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workflows/publish-image.yml
 ```
 
-流水线：先构建并推 `base-{cpu,gpu}`（层复用）→ 再叠模型出 4 个变体 → **每个变体先在容器里跑
+流水线：先检查 `base-<Dockerfile哈希>-{cpu,gpu}`，不存在才构建并推 base → app 只 `FROM` 该 base、叠代码与模型（默认只出 cpu/gpu 的 embed；rerank 变体手动构建）→ **每个变体先在容器里跑
 `selftest.py` 与"模型文件在位"检查，通过才推**。首次发布后要在 GitHub → Packages 把
 `dsh-embed` 设为 **public**（否则拉取需要 `docker login ghcr.io`）。
 
