@@ -381,7 +381,7 @@ def run_review(
     changed = [fd for fd in files if not fd.skip_reason()]
     if not changed:
         outcome.stopped_reason = "no-reviewable-files"
-        outcome.summary = render_summary(mr, files, skips, outcome.validation, model=settings.model)
+        outcome.summary = render_summary(mr, files, skips, outcome.validation, model=getattr(llm, "model", settings.model))
         outcome.seconds = round(time.monotonic() - t0, 2)
         return outcome
 
@@ -517,7 +517,7 @@ def run_review(
             files,
             skips,
             outcome.validation,
-            model=settings.model,
+            model=getattr(llm, "model", settings.model),
             tokens_in=llm.budget.usage.tokens_in,
             tokens_out=llm.budget.usage.tokens_out,
             latency_ms=int((time.monotonic() - t0) * 1000),
@@ -530,7 +530,7 @@ def run_review(
             files,
             skips,
             outcome.validation,
-            model=settings.model,
+            model=getattr(llm, "model", settings.model),
             tokens_in=llm.budget.usage.tokens_in,
             tokens_out=llm.budget.usage.tokens_out,
             latency_ms=int((time.monotonic() - t0) * 1000),
@@ -540,7 +540,7 @@ def run_review(
         log(f"流水线异常（已收敛为汇总）：{type(e).__name__}: {e}")
         if not outcome.summary:
             outcome.summary = render_summary(
-                mr, files, skips, outcome.validation, model=settings.model
+                mr, files, skips, outcome.validation, model=getattr(llm, "model", settings.model)
             )
 
     if outcome.block_errors:
