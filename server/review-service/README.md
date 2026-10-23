@@ -50,7 +50,7 @@ clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地�
 | `GIT_STRATEGY` | `api` | `clone` 开启镜像仓 |
 | `INDEX_URL` / `INDEX_SYNC` | 空 / 0 | 接 code-index-service 后才有跨文件语义上下文 |
 | `INDEX_SCOPE_MODE` | `repo` | 档3 作用域：`repo`（旧行为）/`branch`（按目标分支）/`pr`（按 MR） |
-| `INDEX_PR_HEAD` / `INDEX_PR_TTL_DAYS` | 0 / 14 | `pr` 模式下是否建 head 临时作用域、TTL 天数 |
+| `INDEX_PR_HEAD` | 0 | `pr` 模式下是否建 head 临时作用域 |
 | `GRAPH_ENABLED` | 0 | 语法图（ctags 级精度，带置信度） |
 | `REVIEW_CONCURRENCY` / `REVIEW_DEADLINE_S` | 4 / 300 | 并行度与全局截止 |
 | `MIN_CONFIDENCE` / `SEVERITY_FLOOR` / `MAX_TOTAL` | 0.7 / minor / 15 | 降噪阈值 |
@@ -65,25 +65,25 @@ clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地�
 |---|---|---|---|
 | `repo`（默认） | 旧 namespace（`{prefix}-{project}@{chunkFp}` / 配置映射） | 不建 | **行为与之前完全一致**，不向服务端发 scope |
 | `branch` | `kind=branch, ref=<target_branch>` | 不建 | 每个目标分支一个快照，互不覆盖 |
-| `pr` | `kind=branch, ref=<target_branch>` | `INDEX_PR_HEAD=1` 时 `kind=pr, ref=<iid>`（TTL=`INDEX_PR_TTL_DAYS`） | MR 内容进临时作用域，合并/关闭即清理 |
+| `pr` | `kind=branch, ref=<target_branch>` | `INDEX_PR_HEAD=1` 时 `kind=pr, ref=<iid>` | MR 内容进临时作用域，合并/关闭即清理 |
 
 要点：
 
 - **namespace 以服务端为准**：review 侧不复制 canonical 规则。同步前先
   `POST /v1/scopes/resolve` 拿快照 namespace，再 `/v1/namespaces/sync`（payload 带
-  `scope:{kind,ref,commit?,ttlDays?}`）；同步响应里的 `namespace` 若存在则覆盖本地。
+  `scope:{kind,ref,commit?}`）；同步响应里的 `namespace` 若存在则覆盖本地。
 - **多作用域检索**：`pr` 模式把 `[baseNs, prNs]` 作为一个列表传给 `/v1/search`
  （`{"namespaces":[{"namespace":...},...]}`），服务端按内容 hash 去重并加权 RRF 融合；
   `hits[].namespace` / `hits[].scope` 会写进上下文与 Verifier 证据。旧服务端对
   `namespaces` 返回 400/404 时自动回退单作用域重试一次。
 - **生命周期清理**：webhook 收到 `action=merge|close` 不再入队，而是 best-effort
-  `DELETE /v1/scopes/{prNs}`（2s 超时，失败只记日志，返回 200；服务端 janitor TTL 兜底）。
+  `DELETE /v1/scopes/{prNs}`（2s 超时，失败只记日志，返回 200；作用域需手动删除，服务端不再有 TTL）。
 - **状态**：每个 `(project, branch)` 在 `project_state.scope_json` 里分别记录 base/head
   的 namespace 与增量游标（旧库启动时 `ALTER TABLE` 幂等补列）；顶层 `namespace` 列保留
   base 的值，旧运维脚本仍可读。
 - **降级**：`resolve` 不可用（旧服务端）时 base 退回旧的单 namespace 行为并在汇总里注明；
   `pr` head 解析失败则跳过 head 索引（不影响评审）。
-- **回滚**：`INDEX_SCOPE_MODE=repo` 即回到旧行为；服务端可继续保留已建作用域（TTL 清理）。
+- **回滚**：`INDEX_SCOPE_MODE=repo` 即回到旧行为；服务端保留已建作用域，需手动清理。
 - **已知问题（既有，与档3 无关）**：`IndexSync` 同步请求里的 `tag` 固定为 `null`；服务端对**显式
   null** 不会回退到默认模型 tag（`dict.setdefault` 不覆盖已存在的键），于是自建 namespace 的
   `repos.tag` 为空、后台 governor 不嵌入、`/v1/search` 返回 `no-tag` 空结果。作用域链路本身

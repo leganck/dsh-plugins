@@ -26,7 +26,7 @@
     GET  /log?n=200                日志尾巴
     POST /embed                    {texts, is_query} -> {vectors_b64, dim, count, ms}   （兼容 0.7.0）
     POST /rerank                   {query, texts, max_tokens} -> {scores, ms}          （兼容 0.7.0）
-    POST /v1/namespaces/sync       {repoId, chunkFp, scope?{kind,ref,commit?,ttlDays?}, namespace?（显式逃生口）,
+    POST /v1/namespaces/sync       {repoId, chunkFp, scope?{kind,ref,commit?}, namespace?（显式逃生口）,
                                     repoState, revision?, mode, upsert, remove, tag, url, simhash?,
                                     adopt?, reuse?}
                                     -> {..., namespace}（服务端算 canonical；首次同步无需先知道 namespace）
@@ -36,12 +36,11 @@
     GET  /v1/namespaces/{ns}/status -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes, scope{}}
     POST /v1/search                {namespace} 或 {namespaces:[{namespace,weight?}]}, query, k?, tag?,
                                     rerank?:{candidates} -> {hits[]（带 namespace/scope）, ms{}, coverage, byScope[]}
-    POST /v1/admin/pause | /resume | /rate | /gc | /sweep
+    POST /v1/admin/pause | /resume | /rate | /gc
     POST /v1/lineages/{id}/adopt   {from, hashes?} 显式跨血统借用（管理员指定来源）
     GET  /v1/lineages/similar?path=&content=&tag=&limit=  simhash 候选（只返回元信息，不返回正文）
-    GET  /v1/scopes?repoId=&kind=  作用域清单（kind/ref/TTL/占用）
+    GET  /v1/scopes?limit=&offset=&q=  作用域分页清单（kind/ref/文件/占用）
     POST /v1/scopes/resolve        {repoId, chunkFp, kind, ref, commit?} -> {namespace, exists, revision?}
-    POST /v1/scopes/{ns}/pin       {pinned, ttlDays?} -> {namespace, pinned, expiresAt}
     DELETE /v1/scopes/{ns}         -> {deleted, chunks}
 """
 import base64
@@ -84,7 +83,6 @@ KNN_MAX_BYTES = int(float(F.get("KNN_MAX_BYTES", str(2 * 1024**3))))
 # 启动后台预热：嵌入会话、重排 CUDA 内核、最大命名空间的 kNN 矩阵。
 # 实测冷启首查 2.4 s、首次重排 2.5 s（内核编译），预热后第一个用户查询就是热路径。
 WARMUP = F.get("WARMUP", "1") not in ("0", "false", "no")
-RETENTION_DAYS = int(F.get("RETENTION_DAYS", "30"))
 MAX_VECTORS_PER_LINEAGE = int(F.get("MAX_VECTORS_PER_LINEAGE", "500000"))
 MAX_TOTAL_BYTES = int(float(F.get("MAX_TOTAL_GB", "20")) * 1024**3)
 API_KEY = F.get("API_KEY", "")            # 索引/检索客户端用：Authorization: Bearer
@@ -94,17 +92,7 @@ FAKE_EMBED = F.get("FAKE_EMBED", "") not in ("", "0", "false")
 MAX_TEXTS = 512
 MAX_TEXT_CHARS = 8000
 
-# ---------------- 档 3：作用域（快照）生命周期 ----------------
-# TTL 单位是"天"；main / legacy 永久。janitor 周期见 SCOPE_SWEEP_INTERVAL。
-SCOPE_TTL_BRANCH = int(F.get("SCOPE_TTL_BRANCH", "30"))
-SCOPE_TTL_PR = int(F.get("SCOPE_TTL_PR", "14"))
-SCOPE_TTL_WORKTREE = int(F.get("SCOPE_TTL_WORKTREE", "1"))
-SCOPE_TTL = {"branch": SCOPE_TTL_BRANCH, "pr": SCOPE_TTL_PR, "worktree": SCOPE_TTL_WORKTREE,
-             "main": None, "legacy": None}
-SCOPE_SWEEP = F.get("SCOPE_SWEEP", "1") not in ("0", "false", "no")
-SCOPE_SWEEP_INTERVAL = max(1, int(float(F.get("SCOPE_SWEEP_INTERVAL", "3600"))))
-SCOPE_SWEEP_FIRST_DELAY = max(0, int(float(F.get("SCOPE_SWEEP_FIRST_DELAY", "30"))))  # 避开 warmup
-MAX_SCOPES = int(F.get("MAX_SCOPES", "200"))
+# 作用域永久保留，只能管理员显式删除；不再有 TTL / janitor / 配额。
 MAX_SEARCH_SCOPES = int(F.get("MAX_SEARCH_SCOPES", "4"))
 RRF_K = 20  # 与插件 lib/search.js 的 RRF_K 保持一致
 
@@ -208,7 +196,7 @@ def _enrich_stats(data):
     scope_map = {}
     if store:
         try:
-            for item in store.scope_overview(limit=MAX_SCOPES):
+            for item in store.scope_overview(limit=500):
                 scope_map[item.get("namespace")] = item
         except Exception:  # noqa: BLE001 —— 补元信息失败不影响统计
             pass
@@ -484,6 +472,24 @@ ADMIN_HTML = r"""<!doctype html>
     button.primary, button.danger { color:#0d1016; }
     button.primary:disabled, button.danger:disabled { color:var(--faint); }
   }
+  /* ---------------- 作用域列表（永久 + 分页） ---------------- */
+  .scope-toolbar { gap:8px; }
+  .scope-toolbar input[type=search] { flex:1; }
+  .scope-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
+  .scope-pager select { padding:4px 7px; }
+  .scope-table td { vertical-align:middle; }
+  .scope-table .scope-repo { max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle; }
+  .scope-table .scope-fp { color:var(--faint); font:11px var(--mono); }
+  .scope-table .scope-actions { text-align:right; white-space:nowrap; }
+  .scope-table .scope-actions button { padding:3px 7px; font-size:11.5px; margin-left:3px; }
+  .scope-variant { display:inline-flex; align-items:center; padding:1px 6px; border-radius:999px; background:var(--warn-bg); color:var(--warn); font-size:10.5px; margin-left:5px; white-space:nowrap; }
+  .scope-table tr.is-selected td { background:color-mix(in srgb,var(--blue-bg) 50%,transparent); }
+  .scope-table input[type=checkbox] { cursor:pointer; }
+  @media (max-width:760px) {
+    .scope-toolbar { display:grid; grid-template-columns:1fr 1fr; }
+    .scope-toolbar input[type=search] { grid-column:1/-1; max-width:none !important; }
+    .scope-pager { justify-content:flex-start; }
+  }
 </style>
 </head>
 <body>
@@ -498,7 +504,6 @@ ADMIN_HTML = r"""<!doctype html>
   <button id="btn-refresh">刷新</button>
   <button id="btn-pause">暂停嵌入</button>
   <button id="btn-resume">恢复嵌入</button>
-  <button id="btn-sweep">立即清扫</button>
   <button id="btn-logout">退出</button>
 </header>
 <nav class="tabs">
@@ -671,7 +676,7 @@ ADMIN_HTML = r"""<!doctype html>
     <section class="card wide">
       <h2>检索测试</h2>
       <div class="toolbar">
-        <select id="test-ns" style="max-width:380px"></select>
+        <input id="test-ns" placeholder="选择作用域（或在表格点「用于检索」）" style="width:360px;max-width:100%">
         <input id="test-q" placeholder="输入查询，例如：订单支付后的库存扣减" style="flex:1;min-width:240px">
         <input id="test-k" type="number" value="5" min="1" max="20" title="返回条数" style="width:64px">
         <button class="primary" id="btn-test">检索</button>
@@ -679,27 +684,49 @@ ADMIN_HTML = r"""<!doctype html>
       <div id="test-out" class="faint" style="font-size:12.5px">选择作用域、输入查询后点「检索」；结果来自服务端 kNN（附覆盖率与耗时）。</div>
     </section>
     <section class="card wide">
-      <h2>作用域（快照）<span class="tail" id="scope-count"></span></h2>
-      <div class="toolbar">
-        <input id="filter" type="search" placeholder="筛选 kind / ref / repoId / namespace…">
+      <h2>作用域（永久快照）<span class="tail" id="scope-count"></span></h2>
+      <div class="toolbar scope-toolbar">
+        <input id="filter" type="search" placeholder="搜索仓库 / repoId / 分支 / namespace / 指纹…" style="max-width:300px">
+        <select id="scope-repo-filter" title="按仓库筛选"><option value="">全部仓库</option></select>
+        <select id="scope-kind-filter" title="按类型筛选">
+          <option value="">全部类型</option><option value="main">main</option><option value="branch">branch</option>
+          <option value="pr">pr</option><option value="worktree">worktree</option><option value="legacy">legacy</option>
+        </select>
+        <select id="scope-sort" title="排序">
+          <option value="updated_at|desc">最近同步 ↓</option><option value="created_at|desc">创建时间 ↓</option>
+          <option value="repo_name|asc">仓库名 ↑</option><option value="chunks|desc">块数 ↓</option>
+        </select>
         <label><input id="auto" type="checkbox" checked> 每 15 秒自动刷新</label>
         <span class="faint" id="filtered"></span>
+        <span class="spacer"></span>
+        <button id="btn-scope-refresh" class="small">刷新</button>
+        <button id="btn-scope-delete-selected" class="danger small" disabled>删除所选</button>
       </div>
-      <div class="table-wrap">
-        <table>
+      <div class="table-wrap scope-table-wrap">
+        <table class="model-table scope-table">
           <thead><tr>
-            <th>仓库</th><th>类型</th><th>引用</th><th class="num">块</th><th class="num">向量</th><th>覆盖率</th>
-            <th class="num">占用</th><th>创建</th><th>过期</th><th>保护</th><th>命名空间</th>
+            <th style="width:32px"><input id="scope-check-all" type="checkbox" title="选择当前页"></th>
+            <th>仓库</th><th>类型</th><th>引用</th><th class="num">块 / 文件</th><th class="num">向量</th><th>覆盖率</th>
+            <th class="num">占用</th><th>最近同步</th><th>命名空间</th><th style="width:150px;text-align:right">操作</th>
           </tr></thead>
           <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
+      <div class="scope-pager">
+        <span class="faint" id="scope-range"></span>
+        <span class="spacer"></span>
+        <span class="faint">每页</span>
+        <select id="scope-page-size"><option>25</option><option selected>50</option><option>100</option></select>
+        <button id="scope-prev" class="small">上一页</button>
+        <span class="faint" id="scope-page"></span>
+        <button id="scope-next" class="small">下一页</button>
+      </div>
       <details class="help">
         <summary>字段说明</summary>
         <div class="grid">
-          <div><b>类型</b>：legacy = 接入作用域前的老命名空间（永久保护）；main/branch/pr/worktree = 新规范快照。</div>
+          <div><b>永久快照</b>：服务端不再自动过期或自动删除；作用域只能由管理员手动删除。</div>
           <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入限速异步，刚同步完会从 0% 涨到 100%。</div>
-          <div><b>向量 tag</b>：模型指纹。热切换模型后 tag 变化，旧 tag 向量不会被检索，需要客户端重新同步。</div>
+          <div><b>块 / 文件</b>：块数 / 不同文件数；“N 个指纹”表示同一仓库/类型/引用存在多个索引指纹（常见于不同根目录或切块配置）。</div>
         </div>
       </details>
     </section>
@@ -743,13 +770,6 @@ function rel(tsSec) {
   return Math.floor(diff / 86400) + ' 天前';
 }
 const absTime = (tsSec) => tsSec ? new Date(tsSec * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
-function ttl(expiresAt) {
-  if (!expiresAt) return '永不';
-  const days = (expiresAt * 1000 - Date.now()) / 86400000;
-  if (days <= 0) return '已过期';
-  if (days < 1) return Math.max(1, Math.round(days * 24)) + ' 小时内';
-  return Math.round(days) + ' 天';
-}
 function friendlyNs(x) {
   const fp = String(x.chunkFp || '').slice(0, 8);
   const scope = x.kind === 'legacy' ? 'legacy' : ('#' + x.kind + (x.ref ? ':' + x.ref : ''));
@@ -787,6 +807,7 @@ function showTab(name) {
   if (name === 'keys') loadKeys();
   if (name === 'stats') { loadStats(STATS_DAYS); startStatsTimer(); } else { stopStatsTimer(); }
   if (name === 'logs') loadLogs();
+  if (name === 'scopes') { loadScopes(); startScopesTimer(); } else { stopScopesTimer(); }
   if (name === 'overview' || name === 'models') startRuntimeTimer(); else stopRuntimeTimer();
   if (name === 'overview' || name === 'scopes') refreshHealth();
   location.hash = name;
@@ -823,12 +844,11 @@ function renderOverview() {
     ['kNN 缓存', fmtNum(k.entries) + ' 个作用域 · ' + fmtBytes(k.bytes) + ' / ' + fmtBytes(k.maxBytes)],
     ['kNN 命中率', rate + ' <span class="faint">(' + fmtNum(hits) + ' / ' + fmtNum(hits + miss) + ' · 淘汰 ' + fmtNum(k.evictions) + ')</span>'],
   ]);
-  const used = (d.spaces || []).reduce((a, x) => a + (x.totalBytes || 0), 0);
+  const used = Number((sc && sc.totalBytes) || 0);
   kv($('#limits'), [
     ['已用 / 上限', fmtBytes(used) + ' / ' + (L.maxTotalGb ? L.maxTotalGb + ' GB' : '—')],
-    ['保留期', fmtNum(L.retentionDays) + ' 天'],
     ['每血统向量上限', fmtNum(L.maxVectorsPerLineage)],
-    ['作用域数 / 上限', fmtNum(sc.total) + ' / ' + fmtNum(L.maxScopes)],
+    ['作用域数', fmtNum(sc.total)],
     ['单次检索作用域', '≤ ' + fmtNum(L.maxSearchScopes)],
   ]);
   const tags = d.tags || [];
@@ -948,20 +968,17 @@ function overviewError(msg) {
   });
 }
 async function refreshHealth() {
-  // 并发去重：初始化时 showTab() 与显式调用可能同时触发，旧实现会重复请求 /health 两次。
+  // 概览/统计只拉 /health；作用域列表单独按页加载，避免全量列表参与每次轮询。
   if (REFRESH_INFLIGHT) return REFRESH_INFLIGHT;
   REFRESH_INFLIGHT = (async () => {
     try {
-      // 两个接口互不依赖 → 并行；串行时总耗时 = 两者之和
-      const [h, s] = await Promise.all([api('/health'), api('/v1/scopes')]);
+      const h = await api('/health');
       if (h.status !== 200 || !h.body) { overviewError('HTTP ' + h.status); return; }
       HEALTH = h.body;
       $('#refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
       if (HEALTH.admin && !HEALTH.admin.authRequired) banner('当前未强制 API Key：任何能访问此地址的人都能检索。建议到「API Key」页创建第一个 Key。', true);
       else banner('');
       renderOverview();
-      ROWS = (s.body && s.body.scopes) || [];
-      renderScopes();
     } catch (e) {
       overviewError((e && e.message) || e);
     }
@@ -988,41 +1005,164 @@ async function setupAdmin() {
 }
 
 // ---------------- 作用域 / 检索测试 ----------------
-let ROWS = [];
-function renderScopes() {
-  const q = ($('#filter').value || '').trim().toLowerCase();
-  const rows = ROWS.filter((x) => !q || [x.kind, x.ref, x.repoId, x.namespace].some((v) => String(v || '').toLowerCase().includes(q)));
-  $('#filtered').textContent = q ? '匹配 ' + rows.length + ' / ' + ROWS.length : '';
-  $('#scope-count').textContent = '(' + ROWS.length + ')';
-  const sel = $('#test-ns');
+let SCOPES = { rows: [], total: 0, offset: 0, limit: 50, hasMore: false, facets: { repos: [], kinds: {} } };
+let SCOPES_SELECTED = new Set();
+let SCOPES_TIMER = null;
+let SCOPES_INFLIGHT = null;
+let SCOPE_SEARCH_TIMER = null;
+function scopeQuery() {
+  return {
+    q: ($('#filter').value || '').trim(),
+    repoId: ($('#scope-repo-filter').value || ''),
+    kind: ($('#scope-kind-filter').value || ''),
+    sort: ($('#scope-sort').value || 'updated_at').split('|')[0],
+    order: ($('#scope-sort').value || 'updated_at|desc').split('|')[1] || 'desc',
+    limit: Number($('#scope-page-size').value || 50),
+    offset: Number(SCOPES.offset || 0),
+  };
+}
+function renderScopeFacets(facets) {
+  SCOPES.facets = facets || { repos: [], kinds: {} };
+  const sel = $('#scope-repo-filter');
   const cur = sel.value;
-  sel.innerHTML = ROWS.map((x) => '<option value="' + escapeHtml(x.namespace) + '">' + escapeHtml(x.kind + (x.ref ? ':' + x.ref : '') + ' · ' + (x.repoName || x.repoId)) + '</option>').join('');
-  if (cur && ROWS.some((x) => x.namespace === cur)) sel.value = cur;
-  if (!rows.length) { $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">' + (ROWS.length ? '没有匹配的作用域' : '还没有作用域') + '</td></tr>'; return; }
+  sel.innerHTML = '<option value="">全部仓库</option>' + (SCOPES.facets.repos || []).map((r) =>
+    '<option value="' + escapeHtml(r.repoId) + '">' + escapeHtml(r.repoName || r.repoId) + '（' + fmtNum(r.count) + '）</option>'
+  ).join('');
+  if (cur) sel.value = cur;
+}
+function updateScopeSelection() {
+  const boxes = $$('#scopes input[data-scope-select]');
+  const selected = boxes.filter((b) => SCOPES_SELECTED.has(b.value));
+  boxes.forEach((b) => {
+    const tr = b.closest('tr');
+    if (tr) tr.classList.toggle('is-selected', b.checked);
+  });
+  const all = $('#scope-check-all');
+  if (all) {
+    all.checked = boxes.length > 0 && selected.length === boxes.length;
+    all.indeterminate = selected.length > 0 && selected.length < boxes.length;
+  }
+  const btn = $('#btn-scope-delete-selected');
+  if (btn) {
+    btn.disabled = selected.length === 0;
+    btn.textContent = selected.length ? ('删除所选（' + selected.length + '）') : '删除所选';
+  }
+}
+function renderScopes() {
+  const rows = SCOPES.rows || [];
+  $('#scope-count').textContent = '（' + fmtNum(SCOPES.total) + '）';
+  $('#filtered').textContent = SCOPES.total ? ('共 ' + fmtNum(SCOPES.total) + ' 条') : '';
+  const start = SCOPES.offset + 1;
+  const end = SCOPES.offset + rows.length;
+  $('#scope-range').textContent = rows.length ? (start + '–' + end + ' / ' + fmtNum(SCOPES.total)) : '0 / 0';
+  $('#scope-page').textContent = rows.length ? (Math.floor(SCOPES.offset / SCOPES.limit) + 1 + ' / ' + Math.max(1, Math.ceil(SCOPES.total / SCOPES.limit))) : '0 / 0';
+  $('#scope-prev').disabled = SCOPES.offset <= 0;
+  $('#scope-next').disabled = !SCOPES.hasMore;
+  if (!rows.length) {
+    $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">没有匹配的作用域</td></tr>';
+    updateScopeSelection();
+    return;
+  }
   $('#scopes').innerHTML = rows.map((x) => {
     const pct = Math.round((x.coverage || 0) * 100);
     const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
     const repoCell = x.repoName
-      ? escapeHtml(x.repoName) + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(x.repoId || '') + '</span>'
-      : '<span class="mono">' + escapeHtml(x.repoId || '—') + '</span>';
-    return '<tr>'
-      + '<td>' + repoCell + '</td>'
+      ? '<span class="scope-repo" title="' + escapeHtml(x.repoName + ' · ' + x.repoId) + '">' + escapeHtml(x.repoName) + '</span>'
+      : '<span class="mono scope-repo" title="' + escapeHtml(x.repoId || '') + '">' + escapeHtml(x.repoId || '—') + '</span>';
+    const variant = Number(x.variantCount || 1) > 1
+      ? '<span class="scope-variant" title="同一仓库/类型/引用存在多个索引指纹，可能来自不同根目录或切块配置">' + x.variantCount + ' 个指纹</span>'
+      : '';
+    const files = Number(x.files || 0);
+    const checked = SCOPES_SELECTED.has(x.namespace) ? ' checked' : '';
+    return '<tr class="' + (checked ? 'is-selected' : '') + '">'
+      + '<td><input type="checkbox" data-scope-select value="' + escapeHtml(x.namespace) + '"' + checked + '></td>'
+      + '<td>' + repoCell + variant + '</td>'
       + '<td>' + chip(x.kind) + '</td>'
       + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
-      + '<td class="num">' + fmtNum(x.chunks) + '</td>'
+      + '<td class="num" title="' + fmtNum(x.chunks) + ' 块 / ' + fmtNum(files) + ' 文件">' + fmtNum(x.chunks) + ' / ' + fmtNum(files) + '</td>'
       + '<td class="num">' + fmtNum(x.vectors) + '</td>'
       + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
       + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
-      + '<td title="' + absTime(x.createdAt) + '">' + rel(x.createdAt) + '</td>'
-      + '<td>' + ttl(x.expiresAt) + '</td>'
-      + '<td>' + (x.pinned ? '<span class="chip ok">已钉住</span>' : '<span class="faint">—</span>') + '</td>'
-      + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span> '
-      + '<button class="copy" data-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
-      + '</tr>';
+      + '<td title="' + absTime(x.updatedAt) + '">' + rel(x.updatedAt) + '</td>'
+      + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span>'
+      + '<button class="copy" data-copy-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
+      + '<td class="scope-actions">'
+      + '<button class="ghost small" data-use-ns="' + escapeHtml(x.namespace) + '">用于检索</button>'
+      + '<button class="ghost small" data-delete-ns="' + escapeHtml(x.namespace) + '" title="删除该作用域及其孤儿内容">删除</button>'
+      + '</td></tr>';
   }).join('');
-  $$('button.copy').forEach((b) => {
-    b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.ns); toast('已复制命名空间'); } catch (e) { toast('复制失败（浏览器限制）'); } };
+  $$('#scopes input[data-scope-select]').forEach((b) => {
+    b.onchange = () => { if (b.checked) SCOPES_SELECTED.add(b.value); else SCOPES_SELECTED.delete(b.value); updateScopeSelection(); };
   });
+  $$('[data-copy-ns]').forEach((b) => {
+    b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copyNs); toast('已复制命名空间'); } catch (e) { toast('复制失败（浏览器限制）'); } };
+  });
+  $$('[data-use-ns]').forEach((b) => { b.onclick = () => { $('#test-ns').value = b.dataset.useNs; toast('已选择用于检索'); }; });
+  $$('[data-delete-ns]').forEach((b) => {
+    b.onclick = () => deleteScopes([b.dataset.deleteNs], '删除该作用域？');
+  });
+  updateScopeSelection();
+}
+async function loadScopes() {
+  if (SCOPES_INFLIGHT) return SCOPES_INFLIGHT;
+  const q = scopeQuery();
+  SCOPES.offset = q.offset;
+  SCOPES.limit = q.limit;
+  const params = new URLSearchParams({ limit: q.limit, offset: q.offset, sort: q.sort, order: q.order });
+  if (q.q) params.set('q', q.q);
+  if (q.repoId) params.set('repoId', q.repoId);
+  if (q.kind) params.set('kind', q.kind);
+  SCOPES_INFLIGHT = (async () => {
+    const r = await api('/v1/scopes?' + params.toString());
+    if (r.status !== 200 || !r.body) { toast('作用域加载失败：' + r.status); return; }
+    SCOPES.offset = Number(r.body.offset || 0);
+    SCOPES.limit = Number(r.body.limit || q.limit);
+    SCOPES.total = Number(r.body.total || 0);
+    SCOPES.hasMore = !!r.body.hasMore;
+    SCOPES.rows = r.body.scopes || [];
+    SCOPES_SELECTED = new Set([...SCOPES_SELECTED].filter((ns) => SCOPES.rows.some((x) => x.namespace === ns)));
+    if (!SCOPES.rows.length && SCOPES.total > 0 && SCOPES.offset > 0) {
+      SCOPES.offset = Math.max(0, Math.ceil(SCOPES.total / SCOPES.limit) - 1) * SCOPES.limit;
+      setTimeout(loadScopes, 0);
+      return;
+    }
+    renderScopeFacets(r.body.facets);
+    renderScopes();
+  })().finally(() => { SCOPES_INFLIGHT = null; });
+  return SCOPES_INFLIGHT;
+}
+function resetScopeOffset() {
+  SCOPES.offset = 0;
+  SCOPES_SELECTED.clear();
+  loadScopes();
+}
+function startScopesTimer() {
+  if (SCOPES_TIMER) return;
+  SCOPES_TIMER = setInterval(() => {
+    if (document.visibilityState === 'visible' && $('#auto') && $('#auto').checked && location.hash === '#scopes') loadScopes();
+  }, 15000);
+}
+function stopScopesTimer() {
+  if (SCOPES_TIMER) { clearInterval(SCOPES_TIMER); SCOPES_TIMER = null; }
+}
+async function deleteScopes(namespaces, promptText) {
+  const list = Array.from(new Set(namespaces || [])).filter(Boolean);
+  if (!list.length) return;
+  if (!confirm(promptText + '\n\n共 ' + list.length + ' 个作用域；删除后内容无法自动恢复。')) return;
+  let r;
+  if (list.length === 1) {
+    r = await api('/v1/scopes/' + encodeURIComponent(list[0]), { method: 'DELETE' });
+    if (r.status !== 200) { toast('删除失败：' + r.status); return; }
+    toast('已删除作用域');
+  } else {
+    r = await api('/v1/scopes/bulk-delete', { method: 'POST', body: JSON.stringify({ namespaces: list }) });
+    if (r.status !== 200) { toast('批量删除失败：' + r.status); return; }
+    const b = r.body || {};
+    toast('已删除 ' + (b.deleted || []).length + ' 个作用域' + ((b.failed || []).length ? ('，失败 ' + b.failed.length) : ''));
+  }
+  SCOPES_SELECTED.clear();
+  await refreshHealth();
+  await loadScopes();
 }
 async function searchTest() {
   const ns = $('#test-ns').value;
@@ -1515,31 +1655,28 @@ function shortNs(ns) {
   if (at > 0) return s.slice(0, at) + '…';
   return s.length > 18 ? s.slice(0, 18) + '…' : s;
 }
-function renderRuntime(health, scopesBody) {
-  const sc = (scopesBody && scopesBody.scopes) || [];
-  let chunks = 0, vectors = 0;
-  for (const s of sc) { chunks += Number(s.chunks || 0); vectors += Number(s.vectors || 0); }
-  // /v1/scopes 不返回字节数；存储占用取 /health 的 spaces[].totalBytes
-  const used = ((health && health.spaces) || []).reduce((a, x) => a + Number(x.totalBytes || 0), 0);
+function renderRuntime(health) {
+  const sc = (health && health.scopes) || {};
+  const chunks = Number(sc.chunks || 0), vectors = Number(sc.vectors || 0);
+  const used = Number(sc.totalBytes || 0);
   const backlog = Math.max(0, chunks - vectors);
-  const coverage = chunks ? (vectors / chunks) * 100 : 0;
+  const coverage = Number(sc.coverage || 0) * 100;
   const limits = (health && health.limits) || {};
   const maxGb = Number(limits.maxTotalGb || 0);
   const maxBytes = maxGb * 1024 * 1024 * 1024;
   const storagePct = maxBytes ? Math.min(100, (used / maxBytes) * 100) : 0;
-  const scopeMax = Number(limits.maxScopes || 0);
   const cats = (STATS && STATS.categories) || {};
   const biz = businessCats(cats); const sys = catOf(cats, 'system');
   let cards;
   if (!health) {
-    cards = [statCard('运行状态', '<span class="chip bad">不可用</span>', ''), statCard('作用域', fmtNum(sc.length), '')];
+    cards = [statCard('运行状态', '<span class="chip bad">不可用</span>', ''), statCard('作用域', fmtNum(sc.total), '')];
   } else {
     const g = health.governor || {};
     cards = [
       statCard('服务', '<span class="chip ' + (health.ready ? 'ok' : 'bad') + '"><span class="dot"></span>' + (health.ready ? 'ready' : '未就绪') + '</span>', ''),
       statCard('当前模型', '<span class="mono" style="font-size:11px">' + escapeHtml(health.tag || '—') + '</span>', ''),
       statCard('嵌入限速', (g.paused ? '已暂停' : '运行中') + ' · ' + fmtNum(g.rate) + '/s · batch ' + fmtNum(g.batch), ''),
-      statCard('作用域', fmtNum(sc.length) + (scopeMax ? ' / ' + fmtNum(scopeMax) : ''), '<span class="sub">平均覆盖 ' + coverage.toFixed(1) + '%</span>'),
+      statCard('作用域', fmtNum(sc.total), '<span class="sub">永久保留</span>'),
       statCard('存储', maxGb ? fmtBytes(used) + ' / ' + maxGb + ' GB' : fmtBytes(used), '<span class="sub">' + storagePct.toFixed(1) + '%</span>'),
       statCard('块 / 向量', fmtNum(chunks) + ' / ' + fmtNum(vectors), ''),
       statCard('嵌入积压', backlog > 0 ? fmtNum(backlog) + ' 块' : '0', backlog > 0 ? '<span class="sub">后台嵌入中</span>' : '<span class="sub">已全部完成</span>'),
@@ -1592,7 +1729,7 @@ async function loadStats(days) {
   STATS_DAYS = Number(days) || 7;
   $$('[data-days]').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === STATS_DAYS));
   const meta = $('#stats-meta'); if (meta) meta.textContent = '加载中…';
-  const [r, h, s] = await Promise.all([api('/v1/admin/stats?days=' + STATS_DAYS), api('/health'), api('/v1/scopes')]);
+  const [r, h] = await Promise.all([api('/v1/admin/stats?days=' + STATS_DAYS), api('/health')]);
   if (r.status !== 200 || !r.body) {
     $('#stat-cards').innerHTML = '<div class="empty">统计加载失败（' + r.status + '）</div>';
     if (meta) meta.textContent = '统计加载失败：' + r.status;
@@ -1605,7 +1742,7 @@ async function loadStats(days) {
   renderTrend();
   renderLatencyTrend();
   renderMix();
-  renderRuntime(h.status === 200 ? h.body : null, s.status === 200 ? s.body : null);
+  renderRuntime(h.status === 200 ? h.body : null);
   renderScopeTable();
   renderKeyTable();
   if (location.hash === '#stats') startStatsTimer();
@@ -1658,10 +1795,9 @@ async function loadLogs() {
 }
 
 // ---------------- 初始化 ----------------
-$('#btn-refresh').onclick = () => { refreshHealth(); if (location.hash === '#models') loadModels(); if (location.hash === '#stats') loadStats(STATS_DAYS); if (location.hash === '#keys') loadKeys(); if (location.hash === '#logs') loadLogs(); };
+$('#btn-refresh').onclick = () => { refreshHealth(); if (location.hash === '#scopes') loadScopes(); if (location.hash === '#models') loadModels(); if (location.hash === '#stats') loadStats(STATS_DAYS); if (location.hash === '#keys') loadKeys(); if (location.hash === '#logs') loadLogs(); };
 $('#btn-pause').onclick = () => action('pause');
 $('#btn-resume').onclick = () => action('resume');
-$('#btn-sweep').onclick = () => action('sweep');
 $('#btn-purge-tags').onclick = purgeTags;
 $('#btn-test').onclick = searchTest;
 $('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
@@ -1673,7 +1809,27 @@ $('#btn-reset-index').onclick = resetIndex;
 updateRoleHint();
 $('#btn-setup').onclick = setupAdmin;
 $('#btn-logs').onclick = loadLogs;
-$('#filter').oninput = renderScopes;
+$('#filter').oninput = () => {
+  clearTimeout(SCOPE_SEARCH_TIMER);
+  SCOPE_SEARCH_TIMER = setTimeout(() => { SCOPES.offset = 0; SCOPES_SELECTED.clear(); loadScopes(); }, 300);
+};
+$('#scope-repo-filter').onchange = resetScopeOffset;
+$('#scope-kind-filter').onchange = resetScopeOffset;
+$('#scope-sort').onchange = resetScopeOffset;
+$('#scope-page-size').onchange = resetScopeOffset;
+$('#btn-scope-refresh').onclick = loadScopes;
+$('#scope-prev').onclick = () => { if (SCOPES.offset > 0) { SCOPES.offset = Math.max(0, SCOPES.offset - SCOPES.limit); loadScopes(); } };
+$('#scope-next').onclick = () => { if (SCOPES.hasMore) { SCOPES.offset += SCOPES.limit; loadScopes(); } };
+$('#scope-check-all').onchange = () => {
+  const all = $('#scope-check-all').checked;
+  SCOPES_SELECTED = new Set();
+  $$('#scopes input[data-scope-select]').forEach((b) => {
+    b.checked = all;
+    if (all) SCOPES_SELECTED.add(b.value);
+  });
+  updateScopeSelection();
+};
+$('#btn-scope-delete-selected').onclick = () => deleteScopes([...SCOPES_SELECTED], '删除所选作用域？');
 $$('[data-days]').forEach((b) => { b.onclick = () => loadStats(b.dataset.days); });
 $('#btn-stats-refresh').onclick = () => loadStats(STATS_DAYS);
 $('#btn-stats-export').onclick = exportStatsCsv;
@@ -1690,7 +1846,7 @@ const INITIAL_TAB = (location.hash || '#overview').slice(1);
 showTab(INITIAL_TAB);
 if (INITIAL_TAB !== 'overview' && INITIAL_TAB !== 'scopes') refreshHealth();
 // 模型列表只在「模型」Tab 打开时拉取（冷启动指纹 ~1s，不再拖慢首页）
-setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && $('#auto').checked && (location.hash === '' || location.hash === '#overview' || location.hash === '#scopes')) refreshHealth(); }, 15000);
+setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && $('#auto').checked && (location.hash === '' || location.hash === '#overview')) refreshHealth(); }, 15000);
 </script>
 <div id="modal" class="modal-backdrop" aria-hidden="true">
   <div class="modal-card" role="dialog" aria-modal="true">
@@ -2039,15 +2195,11 @@ def build():
             state.update(rerank_ready=False, rerank_err=f"{type(e).__name__}: {e}")
             log("rerank unavailable: " + state["rerank_err"])
 
-    store = index_store.IndexStore(DB_PATH, scope_ttl=SCOPE_TTL)
+    store = index_store.IndexStore(DB_PATH)
     knn = _load("knn").KnnCache(store, KNN_MAX_BYTES)
     governor = _load("governor").EmbedGovernor(store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log)
     governor.start()
     log(f"index store ready: db={DB_PATH} rate={EMBED_RATE}/s batch={EMBED_BATCH} knnMax={KNN_MAX_BYTES}B")
-    if SCOPE_SWEEP:
-        # janitor：启动后延迟 SCOPE_SWEEP_FIRST_DELAY 再跑第一次（避开 warmup 抢 CPU），此后周期扫。
-        threading.Thread(target=_janitor_loop, name="scope-janitor", daemon=True).start()
-        log(f"scope janitor on: interval={SCOPE_SWEEP_INTERVAL}s firstDelay={SCOPE_SWEEP_FIRST_DELAY}s")
     if WARMUP:
         threading.Thread(target=_warmup, name="warmup", daemon=True).start()
 
@@ -2110,40 +2262,6 @@ def _warmup():
             log(f"warmup: knn {row['namespace'][:24]}… n={mat.shape[0]} {(_t.time() - t0) * 1000:.0f} ms")
     except Exception as e:
         log(f"warmup: knn 失败（忽略）{type(e).__name__}: {e}")
-
-
-def run_sweep(now=None):
-    """扫一遍过期 scope：删 scope → 失效 kNN → 对受影响 lineage 做 retention GC。
-
-    janitor 线程与 `POST /v1/admin/sweep` 共用这一条路径，保证两边行为一致。
-    """
-    now = int(time.time()) if now is None else int(now)
-    result = store.sweep_scopes(now)
-    for ns in result.get("deleted", []):
-        knn.invalidate(ns)
-        log(f"janitor: scope expired & deleted: {ns}")
-    gc_stats = {}
-    for lineage in result.get("lineages", []):
-        try:
-            stats = store.gc(lineage, RETENTION_DAYS)
-            gc_stats[lineage] = stats
-            log(f"janitor: gc lineage={lineage} blobs={stats['blobs']} vectors={stats['vectors']}")
-        except Exception as e:  # gc 失败不能影响其余 scope 的清理
-            log(f"janitor: gc failed lineage={lineage}: {type(e).__name__}: {e}")
-    out = {"deleted": result.get("deleted", []), "lineages": result.get("lineages", [])}
-    if gc_stats:
-        out["gc"] = gc_stats
-    return out
-
-
-def _janitor_loop():
-    time.sleep(SCOPE_SWEEP_FIRST_DELAY)
-    while True:
-        try:
-            run_sweep()
-        except Exception as e:
-            log(f"janitor sweep failed: {type(e).__name__}: {e}")
-        time.sleep(SCOPE_SWEEP_INTERVAL)
 
 
 # ------------------------------------------------------------------ 业务
@@ -2345,8 +2463,6 @@ def repo_status(namespace):
             "ref": repo["scope_ref"],
             "commit": repo["commit_sha"],
             "createdAt": repo["created_at"],
-            "expiresAt": repo["expires_at"],
-            "pinned": bool(repo["pinned"]),
         },
     }
     out.update(store.counts(namespace))
@@ -2355,18 +2471,18 @@ def repo_status(namespace):
     out["limits"] = {
         "maxVectorsPerLineage": MAX_VECTORS_PER_LINEAGE,
         "maxTotalGb": round(MAX_TOTAL_BYTES / 1024**3, 2),
-        "retentionDays": RETENTION_DAYS,
-        "maxScopes": MAX_SCOPES,
         "maxSearchScopes": MAX_SEARCH_SCOPES,
-        "scopeTtlDays": {k: v for k, v in SCOPE_TTL.items() if v is not None},
     }
     return out, 200
 
 
-def scope_list(repo_id=None, kind=None):
-    """GET /v1/scopes 的响应体：把 scope_overview() 映射成契约里的字段名。"""
+def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc", limit=50, offset=0):
+    """GET /v1/scopes 的响应体：分页 + 总数 + facets。"""
+    page = store.scope_page(
+        repo_id=repo_id, kind=kind, q=q, sort=sort, order=order, limit=limit, offset=offset,
+    )
     out = []
-    for it in store.scope_overview(repo_id=repo_id, kind=kind, limit=max(50, MAX_SCOPES)):
+    for it in page["scopes"]:
         scope = it.get("scope") or {}
         out.append({
             "namespace": it["namespace"],
@@ -2378,25 +2494,33 @@ def scope_list(repo_id=None, kind=None):
             "revision": it["revision"],
             "commit": scope.get("commit"),
             "chunks": it.get("chunks", 0),
+            "files": it.get("files", 0),
             "vectors": it.get("vectors", 0),
             "coverage": it.get("coverage", 0.0),
             "createdAt": scope.get("createdAt"),
-            "expiresAt": scope.get("expiresAt"),
-            "pinned": bool(scope.get("pinned")),
-            "ttlRemaining": it.get("ttlRemaining"),
+            "updatedAt": it.get("updatedAt"),
+            "variantCount": it.get("variantCount", 1),
+            "totalBytes": it.get("totalBytes", 0),
         })
-    return out
+    return {
+        "scopes": out,
+        "total": page["total"],
+        "offset": page["offset"],
+        "limit": page["limit"],
+        "hasMore": page["hasMore"],
+        "facets": page["facets"],
+    }
 
 
 def delete_scope(namespace):
-    """DELETE /v1/scopes/{ns}：删 scope + 失效 kNN + 对血统做 retention GC（共享内容不会被误删）。"""
+    """DELETE /v1/scopes/{ns}：删 scope + 失效 kNN + 立即回收孤儿内容（共享内容不会被误删）。"""
     result = store.delete_scope(namespace)
     if result.get("deleted"):
         knn.invalidate(namespace)
         lineage = result.get("lineage")
         if lineage:
             try:
-                store.gc(lineage, RETENTION_DAYS)
+                store.gc(lineage)
             except Exception as e:
                 log(f"delete scope gc failed lineage={lineage}: {type(e).__name__}: {e}")
         log(f"scope deleted: {namespace} chunks={result.get('chunks', 0)}")
@@ -2414,15 +2538,9 @@ def _scope_from_sync(req, ns=None):
         meta = None
         scope = req.get("scope")
         if isinstance(scope, dict):
-            ttl_days = scope.get("ttlDays")
-            if ttl_days is not None:
-                try:
-                    ttl_days = int(ttl_days)
-                except (TypeError, ValueError):
-                    raise index_store.ScopeFormatError("bad-ttl-days", f"ttlDays={ttl_days!r}")
             meta = {
                 "kind": scope.get("kind"), "ref": scope.get("ref"),
-                "commit": scope.get("commit"), "ttl_days": ttl_days,
+                "commit": scope.get("commit"),
             }
         return explicit.strip(), meta
     scope = req.get("scope")
@@ -2443,18 +2561,11 @@ def _scope_from_sync(req, ns=None):
         guess_repo, guess_fp = index_store.namespace_identity(ns)
         repo_id = repo_id or guess_repo
         chunk_fp = chunk_fp or guess_fp
-    ttl_days = scope.get("ttlDays")
-    if ttl_days is not None:
-        try:
-            ttl_days = int(ttl_days)
-        except (TypeError, ValueError):
-            raise index_store.ScopeFormatError("bad-ttl-days", f"ttlDays={ttl_days!r}")
     canonical = index_store.canonical_namespace(repo_id, chunk_fp, scope.get("kind"), scope.get("ref"))
     return canonical, {
         "kind": scope.get("kind"),
         "ref": scope.get("ref"),
         "commit": scope.get("commit"),
-        "ttl_days": ttl_days,
     }
 
 
@@ -2835,7 +2946,15 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query or "")
             repo_id = (q.get("repoId") or [None])[0] or None
             kind = (q.get("kind") or [None])[0] or None
-            return self._send(200, {"scopes": scope_list(repo_id, kind)})
+            text = (q.get("q") or [None])[0] or None
+            sort = (q.get("sort") or ["updated_at"])[0]
+            order = (q.get("order") or ["desc"])[0]
+            try:
+                limit = max(1, min(int((q.get("limit") or ["50"])[0]), 200))
+                offset = max(0, int((q.get("offset") or ["0"])[0]))
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "bad-pagination"})
+            return self._send(200, scope_list(repo_id, kind, text, sort, order, limit, offset))
         if path == "/v1/spaces":
             return self._send(200, {"spaces": store.scope_overview() if store else []})
         if path == "/v1/lineages/similar":
@@ -2970,10 +3089,7 @@ class Handler(BaseHTTPRequestHandler):
         info["limits"] = {
             "maxVectorsPerLineage": MAX_VECTORS_PER_LINEAGE,
             "maxTotalGb": round(MAX_TOTAL_BYTES / 1024**3, 2),
-            "retentionDays": RETENTION_DAYS,
-            "maxScopes": MAX_SCOPES,
             "maxSearchScopes": MAX_SEARCH_SCOPES,
-            "scopeTtlDays": {k: v for k, v in SCOPE_TTL.items() if v is not None},
         }
         return info
 
@@ -3079,12 +3195,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
                 if not self._repo_allowed(effective_ns):
                     return self._send(404, {"error": "not-found"})
-                existed = store.repo(effective_ns) is not None
-                if not existed and (scope_meta is not None or "#" in effective_ns):
-                    count = store.count_scopes()
-                    if count >= MAX_SCOPES:
-                        return self._send(507, {"error": "scope-cap", "count": count, "limit": MAX_SCOPES,
-                                                "hint": "DELETE /v1/scopes/{ns} 清理不用的快照，或调大 MAX_SCOPES"})
                 try:
                     payload = store.sync(effective_ns, body)
                 except Exception as e:
@@ -3105,14 +3215,12 @@ class Handler(BaseHTTPRequestHandler):
                     if scope_meta is not None:
                         store.register_scope(
                             effective_ns, scope_meta["kind"], scope_meta["ref"],
-                            commit_sha=scope_meta["commit"], ttl_days=scope_meta["ttl_days"],
-                            pinned=0 if not existed else None, new_row=not existed,
+                            commit_sha=scope_meta["commit"],
                         )
                     elif "#" in effective_ns:
                         meta = index_store.parse_scope_namespace(effective_ns)
                         store.register_scope(
                             effective_ns, meta["kind"], meta["token"], scope_ref=meta["scope_ref"],
-                            pinned=0 if not existed else None, new_row=not existed,
                         )
                 except index_store.ScopeFormatError as e:
                     return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
@@ -3213,20 +3321,19 @@ class Handler(BaseHTTPRequestHandler):
                 if repo:
                     out["revision"] = repo["revision"]
                 return self._send(200, out)
-            if path.startswith("/v1/scopes/") and path.endswith("/pin"):
-                ns = unquote(path[len("/v1/scopes/") : -len("/pin")])
-                if not store.repo(ns):
-                    return self._send(404, {"error": "unknown-namespace", "namespace": ns})
-                update_ttl = "ttlDays" in req
-                ttl_days = req.get("ttlDays")
-                if update_ttl and ttl_days is not None:
+            if path == "/v1/scopes/bulk-delete":
+                namespaces = req.get("namespaces")
+                if not isinstance(namespaces, list):
+                    return self._send(400, {"error": "namespaces list required"})
+                result = store.bulk_delete_scopes(namespaces)
+                for ns in result.get("deleted", []):
+                    knn.invalidate(ns)
+                for lineage in result.get("lineages", []):
                     try:
-                        ttl_days = int(ttl_days)
-                    except (TypeError, ValueError):
-                        return self._send(400, {"error": "bad-scope", "reason": "bad-ttl-days"})
-                row = store.pin_scope(ns, bool(req.get("pinned", True)), ttl_days=ttl_days, update_ttl=update_ttl)
-                return self._send(200, {"namespace": ns, "pinned": bool(row["pinned"]),
-                                        "expiresAt": row["expires_at"]})
+                        store.gc(lineage)
+                    except Exception as e:  # noqa: BLE001
+                        log(f"bulk delete gc failed lineage={lineage}: {type(e).__name__}: {e}")
+                return self._send(200, result)
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
                 if action == "keys":
@@ -3367,9 +3474,7 @@ class Handler(BaseHTTPRequestHandler):
                     lineage = req.get("lineage")
                     if not lineage:
                         return self._send(400, {"error": "lineage required"})
-                    return self._send(200, store.gc(lineage, req.get("retentionDays", RETENTION_DAYS)))
-                elif action == "sweep":
-                    return self._send(200, run_sweep())
+                    return self._send(200, store.gc(lineage))
                 elif action == "purge-tags":
                     # 换模型后旧 tag 的向量仍占空间：删掉"非当前 tag"的向量（正文/其他 tag 不动）
                     drop = req.get("tag")

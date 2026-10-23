@@ -58,7 +58,6 @@ class AppConfig:
     # 档3：作用域快照（repo=旧行为不变；branch=按目标分支；pr=按 MR，可选 head 临时作用域）
     index_scope_mode: str = "repo"
     index_pr_head: bool = False
-    index_pr_ttl_days: int = 14
 
     # 预算
     max_calls: int = 24
@@ -166,8 +165,7 @@ def load_config(env: dict | None = None) -> AppConfig:
         index_namespace_map=_parse_json_map(env_str("INDEX_NAMESPACE_MAP", "")),
         index_scope_mode=_parse_scope_mode(env_str("INDEX_SCOPE_MODE", "repo")),
         index_pr_head=env_bool("INDEX_PR_HEAD", False),
-        index_pr_ttl_days=max(0, env_int("INDEX_PR_TTL_DAYS", 14)),
-        max_calls=env_int("MAX_LLM_CALLS", 24),
+            max_calls=env_int("MAX_LLM_CALLS", 24),
         max_tokens_in=env_int("MAX_TOKENS_IN", 160_000),
         max_tokens_out=env_int("MAX_TOKENS_OUT", 20_000),
         review=review,

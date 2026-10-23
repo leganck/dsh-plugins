@@ -104,7 +104,7 @@ console.log('[0] 作用域规范')
   }
   check('safeRef 把非法字符压成 -、空结果用 x', safeRef('feat/x') === 'feat-x' && safeRef('中文分支') === 'x')
   check('main 的 ref 被忽略（固定 default）', refToken('main', 'dev') === 'default')
-  check('validateScope 保留原始分支名（token 只用于命名空间）', validateScope({ kind: 'branch', ref: 'feat/x', ttlDays: 7 }).ref === 'feat/x')
+  check('validateScope 保留原始分支名（token 只用于命名空间）', validateScope({ kind: 'branch', ref: 'feat/x' }).ref === 'feat/x')
 
   // 配置校验：DSH_HOME 必须先隔离 —— apply() 会写加载标记，不能碰真实 ~/.dsh
   process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-test-home-'))
@@ -125,7 +125,7 @@ console.log('[0] 作用域规范')
       return e
     }
   }
-  const ok = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'pr', ref: '01234', ttlDays: 7 }, readScopes: ['main-ns'] } })
+  const ok = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'pr', ref: '01234' }, readScopes: ['main-ns'] } })
   check('合法 remote.scope / readScopes → 通过', ok === null, ok?.message)
   check(
     '兼容写法：remote.namespace 与 scope 同时给（namespace 优先）→ 通过',
@@ -480,7 +480,7 @@ console.log('\n[11a] 远端作用域同步（syncRemote）')
     tag: null,
     fingerprint: 'fp-test',
     namespace: 'r1@fp-test#branch:feat-x-d6e256',
-    scope: { kind: 'branch', ref: 'feat/x', ttlDays: 14 },
+    scope: { kind: 'branch', ref: 'feat/x' },
     changedFiles: [],
     removed: [],
   })

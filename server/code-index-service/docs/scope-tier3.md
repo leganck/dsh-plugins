@@ -1,3 +1,6 @@
+> 历史文档：0.15.0 起作用域永久保留，已移除 scope TTL、janitor 自动删除、pin 和 MAX_SCOPES 配额；
+> 下文涉及 TTL/pin/配额/过期删除的段落仅为旧设计记录，以当前 README 为准。
+
 # 档 3 实施契约：快照作用域 + 多作用域检索 + 生命周期
 
 > 本文件是 `feat/scope-snapshots` 分支的**实现契约**（Lead 与各子系统共同遵守）。

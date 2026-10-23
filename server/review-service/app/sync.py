@@ -4,7 +4,7 @@
   POST /v1/namespaces/sync
     {repoId, chunkFp, url, tag, repoState, revision, mode:'full'|'diff',
      upsert:[{path, hash, chunks:[{hash,start,end}]}], remove:[path],
-     chunkCount, noEmbed, scope?:{kind, ref, commit?, ttlDays?}}
+     chunkCount, noEmbed, scope?:{kind, ref, commit?}}
     → {revision, unchanged, missing:[hash...], chunks, vectors, coverage, namespace?}
   POST /v1/namespaces/{namespace}/chunks   {bodies:[{hash, body}]}
   POST /v1/namespaces/{namespace}/embed    {rate?}   （触发服务端后台嵌入）

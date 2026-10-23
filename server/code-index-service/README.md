@@ -51,8 +51,9 @@ code-index-service/
 ```sql
 lineages(id, url_norm, created_at, last_seen)
 repos   (namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,
-         scope_kind, scope_ref, commit_sha, ttl_days, expires_at, pinned, created_at,
+         scope_kind, scope_ref, commit_sha, created_at,
          simhash_path, simhash_content, simhash_algo, simhash_files, simhash_at)
+         -- 历史列 ttl_days/expires_at/pinned 保留但不再读写
 blobs   (lineage_id, hash, body)                     -- 正文，血统内按内容哈希去重
 chunks  (namespace, lineage_id, path, start, end, hash)
 vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内容哈希去重
@@ -75,23 +76,22 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
     （`blobs`/`vectors`），绝不复制候选的 `chunks`/`path`。阈值 `SIMHASH_MIN_SIMILARITY=0.85`、
     `ADOPT_MIN_OVERLAP=0.80`。详见下文「跨血统冷启动复用」。
 - 上界：`MAX_VECTORS_PER_LINEAGE`（默认 50 万块）、`MAX_TOTAL_GB`（默认 20 GB）→ 超限 **507 + 可清理清单**，
-  不静默丢数据。`RETENTION_DAYS`（默认 30）控制"没人引用的 blob/vector 什么时候删"。
+  不静默丢数据。显式删除作用域后，无引用的 blob/vector 立即回收。
 
 ## 端点
 
 | 端点 | 说明 |
 |---|---|
-| `POST /v1/namespaces/sync` | **服务端计算 canonical namespace**。`{repoId, chunkFp, scope?{kind,ref,commit?,ttlDays?}, namespace?, repoState, revision?, mode:'diff'|'full', tag, url, lineage?, upsert[], remove[], simhash?, adopt?, reuse?}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace, adopted?, adoptError?}`。客户端首次同步不需要知道 namespace。 |
+| `POST /v1/namespaces/sync` | **服务端计算 canonical namespace**。`{repoId, chunkFp, scope?{kind,ref,commit?}, namespace?, repoState, revision?, mode:'diff'|'full', tag, url, lineage?, upsert[], remove[], simhash?, adopt?, reuse?}` → `{revision, unchanged, missing[], chunks, vectors, coverage, namespace, adopted?, adoptError?}`。客户端首次同步不需要知道 namespace。 |
 | `POST /v1/namespaces/resolve` | `{repoId, chunkFp, scope}` → `{namespace, exists, revision?}` |
 | `POST /v1/namespaces/{ns}/chunks` | 上传缺失正文（gzip、批量、幂等）→ `{accepted, deduped}` |
 | `POST /v1/namespaces/{ns}/embed` | 触发后台嵌入 |
-| `GET /v1/namespaces/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt,expiresAt,pinned}, limits}` |
+| `GET /v1/namespaces/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt}, limits}` |
 | `POST /v1/search` | `{namespace}` 或 `{namespaces:[{namespace,weight?}]}, query, k, tag?, rerank:{candidates}}` → `{hits[{hash,path,start,end,score,namespace,scope,rrf,rerankScore?}], ms{embed,knn,rerank}, coverage, byScope[]}` |
-| `GET /v1/scopes?repoId=&kind=` | 作用域清单：`{namespace, kind, ref, repoId, chunkFp, revision, commit, chunks, vectors, coverage, createdAt, expiresAt, pinned, ttlRemaining}` |
+| `GET /v1/scopes?limit=&offset=&q=&repoId=&kind=&sort=&order=` | 分页作用域清单：`{scopes:[{namespace,kind,ref,repoId,repoName,chunkFp,chunks,files,vectors,coverage,createdAt,updatedAt,variantCount,totalBytes}], total, offset, limit, hasMore, facets}` |
 | `POST /v1/scopes/resolve` | `{repoId, chunkFp, kind, ref, commit?}` → `{namespace, exists, revision?}`；非法 → `400 {error:'bad-scope', reason}` |
-| `POST /v1/scopes/{ns}/pin` | `{pinned, ttlDays?}` → `{namespace, pinned, expiresAt}`（`ttlDays:null` = 永久） |
-| `DELETE /v1/scopes/{ns}` | 删 scope + 对血统做 retention GC → `{deleted, chunks}`（幂等；未知 ns → `{deleted:false}`） |
-| `POST /v1/admin/pause` `/resume` `/rate` `/gc` `/sweep` | 治理 / `sweep` 立即跑一遍 janitor → `{deleted:[ns], lineages:[...], gc?}` |
+| `DELETE /v1/scopes/{ns}` | 删 scope + 立即回收孤儿内容 → `{deleted, chunks}`（幂等；未知 ns → `{deleted:false}`） |
+| `POST /v1/admin/pause` `/resume` `/rate` `/gc` | 治理 / 手动 GC |
 | `GET /v1/admin/models`、`POST /v1/admin/models/{name}/download` `/cancel` | **模型下载**：进度/速度、取消、失败重试、强制重传、断点续传、sha256 校验 |
 | `GET /v1/admin/runtime` | **运行时指标**：CPU/内存/GPU（nvidia-smi）与 ORT active/available providers；5s 轮询用 |
 | `POST /v1/admin/models/check` | **切换前预检**：`{kind:'embed'|'rerank', dir|name}` → `{warnings:[{code,level,message}], blocking, runtime, model}`；不加载 ONNX |
@@ -146,7 +146,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
     只在运行状态卡和日志页可见；不再展示原始端点表。
   - 延迟分位为桶上界近似（`usage_latency` 表按天累加，最多保留 90 天，即"≤X ms"）。
   - **按作用域**用量写 `usage_scope` 表（同样保留 90 天），从本版本开始累计；多作用域检索只计第一个写作用域。
-- **作用域**：快照表（块/向量/覆盖率/占用/TTL/命名空间）+ 检索测试。
+- **作用域**：永久快照分页表（块/文件/向量/覆盖率/占用/最近同步/命名空间）+ 检索测试。
 - **日志**：服务日志尾部。
 
 ### 模型下载与热切换（无需重启）
@@ -223,20 +223,17 @@ main → default ; branch → safe(ref)-sha1(ref)[:6] ; pr → int(ref) ; worktr
 legacy（不含 #）原样保留，scope_kind='legacy'、pinned=1、expires_at=null
 ```
 
-### TTL 与 janitor
+### 永久作用域
 
-| scope kind | 默认 TTL | 环境变量 |
-|---|---|---|
-| `main` / `legacy` | 永久（`expires_at=null`） | — |
-| `branch` | 30 天 | `SCOPE_TTL_BRANCH` |
-| `pr` | 14 天 | `SCOPE_TTL_PR` |
-| `worktree` | 1 天 | `SCOPE_TTL_WORKTREE` |
+作用域不再有过期时间或自动清理：`main / branch / pr / worktree / legacy` 全部永久保留。
+需要清理时由管理员在控制台勾选删除，或调用：
 
-`build()` 启动 daemon janitor：启动后延迟 30 s 先扫一次（避开 warmup），此后每 `SCOPE_SWEEP_INTERVAL`（默认 3600 s）扫一次；
-`SCOPE_SWEEP=0` 关闭。每次只删 `pinned=0 and expires_at is not null and expires_at <= now` 的 scope，
-删完 `knn.invalidate(ns)` 并对受影响 lineage 跑 `gc(lineage, RETENTION_DAYS)` ——
-**仍被其他 scope 引用的 blob/vector 不会被误删**（gc 按"血统内是否还有 chunks 引用"判定）。
-`pinned=1` 的 scope 永不被 janitor 删（legacy 迁移行默认 pinned）。
+```text
+DELETE /v1/scopes/{ns}
+POST   /v1/scopes/bulk-delete {"namespaces":[...]}
+```
+
+删除后立即回收该血统内已无任何 chunk 引用的 blob/vector；仍被其他作用域引用的内容不会删。
 
 ### 多作用域检索（`/v1/search`）
 
@@ -249,17 +246,14 @@ legacy（不含 #）原样保留，scope_kind='legacy'、pinned=1、expires_at=n
 
 只传 `namespace` 的旧请求等价于单元素 `namespaces`（走同一实现，旧字段全部保留）；
 `namespaces` 长度 > `MAX_SEARCH_SCOPES`（默认 4）→ `400 {error:'too-many-namespaces'}`。
-新建 scope 数超过 `MAX_SCOPES`（默认 200）→ `507 {error:'scope-cap', count, limit}`。
 
 ### 升级 / 回滚
 
-- **升级零手工步骤**：`IndexStore.__init__` 对旧 `repos` 表做幂等 `alter table` 补 7 列 + 建 `repos_scope` 索引；
-  老行回填 `scope_kind='legacy'`、`pinned=1`、`expires_at=null`、`created_at=updated_at`。
-  二次启动不会再把管理员显式 unpin 的 legacy 行重新钉住。
-  P3 又补了 5 个 `simhash_*` 列（同样幂等；旧客户端不写 → 保持 `null`，补列不会触发 legacy 重新 pin）。
+- **升级零手工步骤**：`IndexStore.__init__` 对旧 `repos` 表做幂等 `alter table` 补历史列；
+  老行回填 `scope_kind='legacy'`、`created_at=updated_at`。历史 `ttl_days/expires_at/pinned` 保留但不再读写。
+  P3 又补了 5 个 `simhash_*` 列（同样幂等；旧客户端不写 → 保持 `null`）。
 - **回滚**：换回旧镜像/旧插件即可 —— 多出的列旧代码不读不写；旧 DB 删列需要手工（SQLite 不支持 drop column 的旧版本，
   一般没必要回滚数据结构）。
-- 老客户端（0.10.1）继续只传 `namespace`：同步/检索/状态行为不变；janitor 只碰带 `expires_at` 的 scope，不会动 legacy 行。
 
 ## 跨血统冷启动复用（simhash 候选 + 精确哈希 adopt）
 
@@ -528,10 +522,6 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 | `RERANK_BATCH` / `RERANK_MAX_TOKENS` | `8` / `256` | 重排批与截断 |
 | `KNN_MAX_BYTES` | `2 GiB` | 内存矩阵 LRU 上限 |
 | `MAX_VECTORS_PER_LINEAGE` / `MAX_TOTAL_GB` | `500000` / `20` | 存储上界（超限 507） |
-| `RETENTION_DAYS` | `30` | 无人引用的 blob/vector 保留期（scope 删除/过期后的 GC 也用它） |
-| `SCOPE_TTL_BRANCH` / `SCOPE_TTL_PR` / `SCOPE_TTL_WORKTREE` | `30` / `14` / `1` | 快照 TTL（天）；`main`/`legacy` 永久 |
-| `SCOPE_SWEEP` / `SCOPE_SWEEP_INTERVAL` | `1` / `3600` | janitor 开关与周期（秒）；`SCOPE_SWEEP=0` 关闭 |
-| `MAX_SCOPES` | `200` | 全新 scope 配额，超限 507 |
 | `MAX_SEARCH_SCOPES` | `4` | 单次检索最多作用域数，超限 400 |
 | `WARMUP` | `1` | 启动后台预热（嵌入会话、重排内核、最大命名空间的 kNN 矩阵与计数）：把"重启后第一个查询"从 2.4 s 降到 **25 ms**；`0` 关闭 |
 | `ORT_THREADS` / `ORT_PROVIDERS` | `6` / `CUDA,CPU` | 执行提供者 |
@@ -546,9 +536,9 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 ## 自测
 
 ```bash
-python selftest.py     # 248 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
-                       # + 档 3：namespace 夹具、scope 注册/resolve/列表、legacy pinned 不被 sweep、
-                       #   TTL 过期删除、DELETE 后 GC 不误删共享内容、多 scope 去重/来源/权重/等价、配额 507、旧 DB 迁移
+python selftest.py     # 246 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+                       # + 档 3：namespace 夹具、scope 注册/resolve/分页列表、永久作用域、
+                       #   DELETE 后立即 GC 不误删共享内容、多 scope 去重/来源/权重/等价、bulk-delete、旧 DB 迁移
                        # + P3 simhash：schema 迁移、simhash 存取/非法值、相同/无关相似度、tag 过滤、overlap 计算、
                        #   只复制精确 hash+当前 tag、不复制 chunks、候选独有 hash 不可见、full+adopt 集成、
                        #   reuse=off/diff 不查询、adopt 失败不影响 sync、诊断接口鉴权
