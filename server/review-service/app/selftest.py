@@ -264,11 +264,25 @@ def test_llm() -> None:
     except ValueError:
         check("无 JSON 时抛 ValueError", True)
 
+    # 真实网关偶尔返回 prose；chat_json 应追加严格指令重试一次
+    class FlakyLLM(LLM):
+        def __init__(self):
+            super().__init__("http://replay")
+            self.calls = 0
+
+        def chat(self, messages, purpose, max_tokens=2000):
+            self.calls += 1
+            return "我先解释一下，不输出 JSON" if self.calls == 1 else '{"ok": true}'
+
+    flaky = FlakyLLM()
+    got = flaky.chat_json([{"role": "user", "content": "x"}], "reviewer")
+    check("chat_json 首次非 JSON 会严格重试", got == {"ok": True} and flaky.calls == 2, f"calls={flaky.calls} got={got}")
+
 
 # ---------------------------------------------------------------- 4) 流水线
 
 
-def _run_pipeline(replay: dict, *, budget_calls: int = 24):
+def _run_pipeline(replay: dict | None = None, *, llm=None, budget_calls: int = 24):
     from .clients import DictReader, IndexClient
     from .diff import parse_gitlab_diffs
     from .llm import Budget, LLM
@@ -284,7 +298,8 @@ def _run_pipeline(replay: dict, *, budget_calls: int = 24):
         def search(self, namespace, query, k=6, embed_text=None):  # noqa: D401
             return [{"path": "src/user.py", "start": 1, "end": 6, "score": 0.9}]
 
-    llm = LLM("http://replay", replay=replay, budget=Budget(max_calls=budget_calls))
+    if llm is None:
+        llm = LLM("http://replay", replay=replay, budget=Budget(max_calls=budget_calls))
     return run_review(
         mr={"title": "修用户接口", "author": {"name": "张三"}, "target_branch": "main"},
         diffs=gitlab_items(),
@@ -326,6 +341,24 @@ def test_pipeline() -> None:
     limited, _, _ = _run_pipeline(REPLAY_OK, budget_calls=1)
     check("预算超限 → 停止原因带 budget", limited.stopped_reason.startswith("budget:"), limited.stopped_reason)
     check("预算超限仍产出汇总（不静默失败）", "AI 评审" in limited.summary)
+
+    # Reviewer JSON 失败不能伪装成“没有发现问题”
+    from .llm import LLM
+
+    class BadReviewerLLM(LLM):
+        def __init__(self):
+            super().__init__("http://replay")
+
+        def chat_json(self, messages, purpose, max_tokens=2000):
+            if purpose == "planner":
+                return {"blocks": [{"theme": "全部变更", "files": ["src/user.py"], "focus": "边界"}]}
+            raise ValueError("模型输出里没有 JSON")
+
+    bad, _, _ = _run_pipeline(llm=BadReviewerLLM())
+    check("Reviewer 全失败 → stopped_reason 显式标记", bad.stopped_reason == "reviewer-block-error", bad.stopped_reason)
+    check("Reviewer 全失败 → block_errors 有记录", bool(bad.block_errors), str(bad.block_errors))
+    check("Reviewer 全失败 → 汇总明确提示不完整", "不完整" in bad.summary, bad.summary[-160:])
+    check("Reviewer 全失败 → 汇总 marker 仍在末尾", bad.summary.strip().endswith("<!-- ai-review-summary -->"), bad.summary[-100:])
 
 
 # ---------------------------------------------------------------- 5) 任务库
