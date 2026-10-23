@@ -650,7 +650,7 @@ function normalizeConfig(userRaw = {}) {
     // 这样不同分支各自一个快照，不需要每个 checkout 手写 scope.ref。
   } else if (cfg.remote.scope !== null) {
     if (typeof cfg.remote.scope !== 'object' || Array.isArray(cfg.remote.scope)) {
-      throw new ConfigError(`config.remote.scope 必须是对象（{kind, ref, ttlDays}）、字符串 "auto" 或 null，收到 ${Array.isArray(cfg.remote.scope) ? 'array' : typeof cfg.remote.scope}`)
+      throw new ConfigError(`config.remote.scope 必须是对象（{kind, ref}）、字符串 "auto" 或 null，收到 ${Array.isArray(cfg.remote.scope) ? 'array' : typeof cfg.remote.scope}`)
     }
     const unknownScope = Object.keys(cfg.remote.scope).filter((k) => !SCOPE_CONFIG_KEYS.includes(k))
     if (unknownScope.length) {
@@ -747,7 +747,7 @@ const fail = (message) => ({ content: [{ type: 'text', text: `错误：${message
 
 /**
  * 服务端时间戳既可能是秒也可能是毫秒（Python `time.time()` 是秒；JS 侧习惯毫秒）。
- * 按量级判断，避免把 2026 年显示成 1970 —— 这种展示错误会让人以为 TTL 坏了。
+ * 按量级判断，避免把 2026 年显示成 1970。
  */
 function formatEpoch(value) {
   const n = Number(value)
@@ -989,7 +989,7 @@ let reconcileTimer = null
     ...config.remote.readScopes,
   ])]
   /**
-   * 当前仓库的作用域信息（写作用域 / 要读的列表 / 来源 / TTL）。
+   * 当前仓库的作用域信息（写作用域 / 要读的列表 / 来源）。
    * 工具输出的 structuredContent 与文本行都从它派生，避免两处口径漂移。
    */
   const scopeInfoFor = (repoRoot, store) => {
@@ -1012,10 +1012,9 @@ let reconcileTimer = null
   /** 作用域的一行说明：只有配了新键才输出，旧配置的输出不变（不制造噪音） */
   const renderScopeLine = (info) => {
     if (!info.scope && !info.readScopes.length && info.source !== 'namespace') return null
-    const ttl = info.scope?.ttlDays ? `，TTL ${info.scope.ttlDays} 天` : ''
-    const write = info.namespace
+        const write = info.namespace
       ? (info.scope
-        ? `写作用域 ${describeScope(info.scope)}（${info.namespace}${ttl}）`
+        ? `写作用域 ${describeScope(info.scope)}（${info.namespace}）`
         : `写作用域 ${info.namespace}`)
       : (info.scope ? `写作用域 ${describeScope(info.scope)}（待服务端计算 namespace）` : null)
     if (!write && !info.readScopes.length) return null
@@ -1601,11 +1600,11 @@ let reconcileTimer = null
               ? `  向量位置：远端 ${config.remote.url}（本机只保留 BM25；命名空间在建库后由切块指纹确定）`
               : `  向量位置：远端 ${config.remote.url}（命名空间 ${scopeInfo.namespace || '待服务端 sync 返回'}；本机只保留 BM25）`
             : `  模式：纯关键词（本地 FTS5；vectors=${config.vectorsMode}${config.vectorsMode === 'auto' ? ' → 未配 remote.url' : ''}）`,
-          // 作用域说明：scope 配置了 TTL 就展示；本机还没建库时命名空间还没定（chunkFp=default）
+          // 作用域说明：本机还没建库时命名空间还没定（chunkFp=default）
           scopeLine && s.chunks > 0 ? scopeLine : null,
           scopeLine && s.chunks === 0 && (scopeInfo.scope || scopeInfo.readScopes.length)
             ? `  作用域：${[
-                scopeInfo.scope ? `写作用域 ${describeScope(scopeInfo.scope)}${scopeInfo.scope.ttlDays ? `（TTL ${scopeInfo.scope.ttlDays} 天）` : ''}` : null,
+                scopeInfo.scope ? `写作用域 ${describeScope(scopeInfo.scope)}` : null,
                 scopeInfo.readScopes.length ? `只读 ${scopeInfo.readScopes.length} 个：${scopeInfo.readScopes.join(', ')}` : null,
               ]
                 .filter(Boolean)
@@ -1630,14 +1629,11 @@ let reconcileTimer = null
               `  远端嵌入：${rs.paused ? '已暂停' : '运行中'}（${rs.rate} 块/s）；血统占用 ${((rs.totalBytes ?? 0) / 1048576).toFixed(0)} MB（向量上限 ${rs.limits?.maxVectorsPerLineage ?? '-'} / 血统）`,
             )
             if (rs.repoId) lines.push(`  血统：${rs.repoId}（追踪的远端：${normalizeRemoteUrl(gitOriginUrl(repoRoot)) || '无 git（本机血统）'}）`)
-            // 档 3 §4.2：status 响应里的 scope 是 TTL/pinned 的权威（本地配置只知道 ttlDays 意图）
+            // 服务端返回的 scope 元数据（无 TTL/pin）
             if (rs.scope && typeof rs.scope === 'object') {
               const scp = rs.scope
               const created = formatEpoch(scp.createdAt)
-              const expires = formatEpoch(scp.expiresAt)
               const bits = [
-                expires ? `到期 ${expires}` : '不过期',
-                scp.pinned ? 'pinned' : null,
                 scp.commit ? `commit ${String(scp.commit).slice(0, 8)}` : null,
                 created ? `创建 ${created}` : null,
               ].filter(Boolean)
@@ -1836,7 +1832,7 @@ let reconcileTimer = null
   /** 加载日志里的作用域摘要（档 3）：没配 scope/readScopes 时保持旧日志形态 */
   const scopeLog =
     config.vectors === 'remote' && config.remote.scope && config.remote.scope !== 'auto'
-      ? `，scope=${describeScope(config.remote.scope)}${config.remote.scope.ttlDays ? `(TTL ${config.remote.scope.ttlDays}d)` : ''}`
+      ? `，scope=${describeScope(config.remote.scope)}`
       : config.vectors === 'remote' && config.remote.namespace
         ? `，namespace=${config.remote.namespace}`
         : ''

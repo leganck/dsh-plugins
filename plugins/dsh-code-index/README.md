@@ -176,7 +176,6 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
       scope:                              # 未给 namespace 时按规范推导快照（0.11.0，可省略）
         kind: "branch"                    # main | branch | pr | worktree
         ref: "feat/x"                     # 分支名 / PR 号 / 工作树标识（main 可省）
-        ttlDays: 14                       # 可选；不写由服务端按 kind 的默认 TTL 决定
       readScopes: []                      # 额外**读取**的命名空间（如主干），只读、不写入
     vectors: "auto"                       # auto（默认：有 remote.url 即走远端）| remote | off（纯关键词）
     rerank: "off"                         # off | fast（top-10）| quality（top-20），远端重排
@@ -257,7 +256,7 @@ kind=worktree  -> refToken = sha1(ref)[:8]                  （命名空间里�
 ```yaml
 remote:
   url: "https://dsh-embed.example.com"
-  scope: { kind: branch, ref: "feat/refund-limit", ttlDays: 14 }
+  scope: { kind: branch, ref: "feat/refund-limit" }
   readScopes:
     - "r1234@fp1#main:default"        # 主干快照（只读）
 ```
@@ -266,7 +265,7 @@ remote:
 
 ```
 命中 8 条（通道 hybrid-remote；词项 refundOverLimit）
-  作用域：写作用域 branch:feat/refund-limit（r1234@fp1#branch:feat-refund-limit-9c1f2a，TTL 14 天）；只读 1 个：r1234@fp1#main:default
+  作用域：写作用域 branch:feat/refund-limit（r1234@fp1#branch:feat-refund-limit-9c1f2a）；只读 1 个：r1234@fp1#main:default
 [1] src/main/java/.../RefundLimit.java:81-120  (fts 1 / vec 2)
 ```
 
@@ -274,10 +273,9 @@ remote:
 返回 400/404，客户端**自动回退成单作用域（写作用域）重试一次**，并在结果里写明"已退回单作用域"。
 只有 1 个作用域时仍发旧协议 `{namespace}`，旧服务端零回归。
 
-**TTL / 生命周期**：`ttlDays` 只是把意图发给服务端；实际到期时间与 `pinned` 以
-`code_index_status` 里"远端作用域"一行为准（服务端按 kind 有默认 TTL：branch 30 天 / PR 14 天 /
-worktree 1 天，main 永久；`legacy` 只可能是旧数据）。`remote.namespace` / `remote.scope` / `remote.readScopes`
-都会记进加载标记 `_loaded.json`，重启后能确认"到底按哪个作用域在写"。
+**生命周期**：作用域在服务端永久保留，不再有 TTL 或自动清理；需要清理旧快照时由管理员在
+「作用域」页手动删除。`remote.namespace` / `remote.scope` / `remote.readScopes` 都会记进加载标记
+`_loaded.json`，重启后能确认"到底按哪个作用域在写"。
 
 **0.11.4 起 `remote.scope` 默认就是 `auto`**：未配置也会按 git 分支推导（main/master → `#main:default`，
 其余分支 → `#branch:<name>`；非 git 目录落到 `#main:default`），**不再写入 legacy 命名空间**

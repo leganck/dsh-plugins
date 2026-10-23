@@ -92,8 +92,6 @@ create table if not exists vectors (
 # ---------------------------------------------------------------- 作用域（档 3）
 # 规则见 docs/scope-tier3.md §2；夹具 scope_format.json 是本文件的验收标准。
 SCOPE_KINDS = ("legacy", "main", "branch", "pr", "worktree")
-# 默认 TTL（天）：main / legacy 永久。服务端可用环境变量覆盖后传给 IndexStore。
-DEFAULT_SCOPE_TTL = {"branch": 30, "pr": 14, "worktree": 1, "main": None, "legacy": None}
 
 # ---------------------------------------------------------------- simhash 候选（跨血统冷启动）
 # 客户端把整棵文件清单压成两个 64-bit simhash（path-aware / content-only）。
@@ -330,13 +328,8 @@ def _as_bool(value):
 
 
 class IndexStore:
-    def __init__(self, db_path, scope_ttl=None):
+    def __init__(self, db_path):
         self.db_path = db_path
-        # 每个 kind 的默认 TTL（天）；None = 永久。服务端用环境变量覆盖。
-        self.scope_ttl = dict(DEFAULT_SCOPE_TTL)
-        if scope_ttl:
-            for k, v in scope_ttl.items():
-                self.scope_ttl[k] = None if v is None else int(v)
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.lock = threading.RLock()
         # 计数/体积缓存：coverage 的 JOIN 计数在 16 万块上要 400 ms，而它在**每次查询**里都要用。
@@ -347,10 +340,8 @@ class IndexStore:
         self.db.execute("pragma journal_mode = wal")
         self.db.execute("pragma synchronous = normal")
         self.db.executescript(SCHEMA)
-        # 幂等迁移：早期 0.8.0 的库里 repos 没有 repo_state_chunks 这一列；
-        # 档 3 又加了 scope 相关 7 列。老库补齐后，legacy 行标成 pinned（永不被 janitor 删）。
+        # 幂等迁移：历史库补齐列；TTL/pinned 列保留但不再读写。
         cols = {r["name"] for r in self.db.execute("pragma table_info(repos)").fetchall()}
-        scope_added = False
         for name, ddl in (
             ("scope_kind", "text not null default 'legacy'"),
             ("scope_ref", "text"),
@@ -363,7 +354,6 @@ class IndexStore:
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
-                scope_added = True
         if "repo_state_chunks" not in cols:
             self.db.execute("alter table repos add column repo_state_chunks integer")
         # P3 simhash：只增不删的幂等列（旧库启动自动补齐；旧客户端不写 → 保持 null）。
@@ -377,13 +367,7 @@ class IndexStore:
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
-        # 只在"本次才补上 scope 列"的老库上做 legacy 回填：先 pinned/expires，再回填 created_at，
-        # 这样二次启动不会再把管理员显式 unpin 的 legacy 行重新钉上（幂等）。
-        if scope_added:
-            self.db.execute("update repos set pinned = 1 where scope_kind = 'legacy' and created_at is null")
-            self.db.execute("update repos set expires_at = null where scope_kind = 'legacy' and created_at is null")
         self.db.execute("update repos set created_at = updated_at where created_at is null")
-        self.db.execute("create index if not exists repos_scope on repos(scope_kind, expires_at)")
         self.db.commit()
 
     # ---------------------------------------------------------------- 血统 / 命名空间
@@ -407,15 +391,13 @@ class IndexStore:
         with self.lock:
             row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
             if not row:
-                # 行先按 namespace 反推 scope 元信息落库（legacy 行 pinned=1，protected 于 janitor）；
-                # 带 scope 的同步随后由 register_scope() 校准 kind/ref/TTL。
+                # 行先按 namespace 反推 scope 元信息落库；带 scope 的同步随后由 register_scope() 校准。
                 meta = parse_scope_namespace(namespace)
                 kind = meta["kind"]
                 self.db.execute(
                     "insert into repos(namespace, lineage_id, repo_id, repo_name, chunk_fp, revision, tag,"
-                    " repo_state, repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, ttl_days,"
-                    " expires_at, pinned, created_at)"
-                    " values (?,?,?,?,?,0,?,null,null,?,?,?,null,null,null,?,?)",
+                    " repo_state, repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, created_at)"
+                    " values (?,?,?,?,?,0,?,null,null,?,?,?,null,?)",
                     (
                         namespace,
                         lineage_id,
@@ -426,7 +408,6 @@ class IndexStore:
                         now,
                         kind,
                         meta["scope_ref"],
-                        1 if kind == "legacy" else 0,
                         now,
                     ),
                 )
@@ -474,15 +455,8 @@ class IndexStore:
             return int(cur.rowcount or 0)
 
     # ---------------------------------------------------------------- 作用域生命周期
-    def register_scope(self, namespace, kind, ref, commit_sha=None, ttl_days=None, pinned=None,
-                       scope_ref=None, new_row=None):
-        """写/更新 scope 元数据。
-
-        - `expires_at = now + (ttl_days ?? default_for(kind))`；kind=main/legacy 永远为 null；
-        - 已存在的行**不覆盖** pinned/expires_at（除非 ttl_days 显式给出）——sync 的增量语义；
-        - new_row=True 表示这是刚建出来的 repos 行（调用方在 sync 前判断过），此时落默认 TTL/pinned。
-        返回更新后的 repos 行。
-        """
+    def register_scope(self, namespace, kind, ref, commit_sha=None, scope_ref=None):
+        """写/更新 scope 元数据；作用域永久，不再计算 TTL/pin。"""
         now = int(time.time())
         kind = kind or "legacy"
         if kind not in SCOPE_KINDS:
@@ -496,59 +470,18 @@ class IndexStore:
                 lineage = self.ensure_lineage("", repo_id or "unknown")
                 self.db.execute(
                     "insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
-                    " repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, ttl_days, expires_at,"
-                    " pinned, created_at) values (?,?,?,?,0,null,null,null,?,?,?,?,null,null,?,?)",
+                    " repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, created_at)"
+                    " values (?,?,?,?,0,null,null,null,?,?,?,?,?)",
                     (namespace, lineage, repo_id or "unknown", chunk_fp or "default", now, kind, scope_ref,
-                     commit_sha, 1 if kind == "legacy" else 0, now),
+                     commit_sha, now),
                 )
                 self.db.commit()
                 row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-                new_row = True
-            if new_row is None:
-                new_row = False
             sets = ["scope_kind = ?", "scope_ref = ?", "updated_at = ?"]
             args = [kind, scope_ref, now]
             if commit_sha is not None:
                 sets.append("commit_sha = ?")
                 args.append(commit_sha)
-            # TTL：新行必须落默认/显式值；老行只有显式 ttlDays 才改（否则 pin 出来的永久态会被同步覆盖）
-            if new_row or ttl_days is not None:
-                if kind in ("main", "legacy"):
-                    expires_at = None
-                elif ttl_days is not None:
-                    expires_at = now + max(0, int(ttl_days)) * 86400
-                else:
-                    days = self.scope_ttl.get(kind)
-                    expires_at = None if days is None else now + int(days) * 86400
-                sets += ["expires_at = ?", "ttl_days = ?"]
-                args += [expires_at, max(0, int(ttl_days)) if ttl_days is not None else None]
-            if pinned is not None or new_row:
-                value = pinned if pinned is not None else (1 if kind == "legacy" else 0)
-                sets.append("pinned = ?")
-                args.append(1 if value else 0)
-            args.append(namespace)
-            self.db.execute(f"update repos set {', '.join(sets)} where namespace = ?", args)
-            self.db.commit()
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-        return dict(row) if row else None
-
-    def pin_scope(self, namespace, pinned, ttl_days=None, update_ttl=False):
-        """设置 pinned；update_ttl=True 时同时改 expires_at（ttl_days=None → 永久）。"""
-        now = int(time.time())
-        with self.lock:
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-            if row is None:
-                return None
-            sets = ["pinned = ?", "updated_at = ?"]
-            args = [1 if pinned else 0, now]
-            if update_ttl:
-                kind = row["scope_kind"] or "legacy"
-                if kind in ("main", "legacy") or ttl_days is None:
-                    expires_at = None
-                else:
-                    expires_at = now + max(0, int(ttl_days)) * 86400
-                sets += ["expires_at = ?", "ttl_days = ?"]
-                args += [expires_at, max(0, int(ttl_days)) if ttl_days is not None else None]
             args.append(namespace)
             self.db.execute(f"update repos set {', '.join(sets)} where namespace = ?", args)
             self.db.commit()
@@ -570,31 +503,41 @@ class IndexStore:
             self._invalidate()  # 删块 → 计数/体积缓存失效
         return {"deleted": True, "chunks": chunks, "lineage": row["lineage_id"]}
 
-    def expired_scopes(self, now=None):
-        now = int(time.time()) if now is None else int(now)
-        with self.lock:
-            rows = self.db.execute(
-                "select namespace, lineage_id from repos where pinned = 0 and expires_at is not null and expires_at <= ?",
-                (now,),
-            ).fetchall()
-        return [{"namespace": r["namespace"], "lineage_id": r["lineage_id"]} for r in rows]
-
-    def sweep_scopes(self, now=None):
-        """只删 pinned=0 且已过期的 scope；返回 {deleted:[ns...], lineages:[...]}。"""
-        expired = self.expired_scopes(now)
+    def bulk_delete_scopes(self, namespaces):
+        """批量删除作用域；返回 deleted/failed/lineages，调用方统一做 GC。"""
         deleted = []
+        failed = []
         lineages = []
-        for item in expired:
-            r = self.delete_scope(item["namespace"])
-            if not r.get("deleted"):
-                continue
-            deleted.append(item["namespace"])
-            if item["lineage_id"] and item["lineage_id"] not in lineages:
-                lineages.append(item["lineage_id"])
-        return {"deleted": deleted, "lineages": lineages}
+        total_chunks = 0
+        with self.lock:
+            for raw in namespaces or []:
+                ns = str(raw or "").strip()
+                if not ns:
+                    continue
+                row = self.db.execute("select lineage_id from repos where namespace = ?", (ns,)).fetchone()
+                if not row:
+                    failed.append({"namespace": ns, "error": "not-found"})
+                    continue
+                try:
+                    n = int(self.db.execute(
+                        "select count(*) as n from chunks where namespace = ?", (ns,)
+                    ).fetchone()["n"])
+                    self.db.execute("delete from chunks where namespace = ?", (ns,))
+                    self.db.execute("delete from repos where namespace = ?", (ns,))
+                    total_chunks += n
+                    deleted.append(ns)
+                    lineage = row["lineage_id"]
+                    if lineage and lineage not in lineages:
+                        lineages.append(lineage)
+                except Exception as e:  # noqa: BLE001
+                    failed.append({"namespace": ns, "error": f"{type(e).__name__}: {e}"})
+            self.db.commit()
+            if deleted:
+                self._invalidate()
+        return {"deleted": deleted, "failed": failed, "lineages": lineages, "chunks": total_chunks}
 
     def scope_overview(self, repo_id=None, kind=None, limit=50):
-        """overview() 的每一项再加 scope 元信息与 ttlRemaining（给 /v1/scopes 与 /health）。"""
+        """overview() 的每一项再加 scope 元信息（给历史 /v1/scopes 与 /health）。"""
         where = []
         args = []
         if repo_id:
@@ -613,24 +556,17 @@ class IndexStore:
         args.append(int(limit))
         with self.lock:
             rows = self.db.execute(sql, args).fetchall()
-        now = int(time.time())
         out = []
         for r in rows:
             item = dict(r)
             item.update(self.counts(r["namespace"]))
             item.update(self.lineage_bytes(r["lineage_id"]))
-            expires_at = r["expires_at"]
-            pinned = bool(r["pinned"])
             item["scope"] = {
                 "kind": r["scope_kind"] or "legacy",
                 "ref": r["scope_ref"],
                 "commit": r["commit_sha"],
                 "createdAt": r["created_at"],
-                "expiresAt": expires_at,
-                "pinned": pinned,
             }
-            item["pinned"] = pinned
-            item["ttlRemaining"] = None if expires_at is None else max(0, int(expires_at) - now)
             out.append(item)
         return out
 
@@ -638,15 +574,129 @@ class IndexStore:
         with self.lock:
             return int(self.db.execute("select count(*) as n from repos").fetchone()["n"])
 
-    def scope_stats(self):
-        """{total, byKind:{legacy,main,branch,pr,worktree}}（/health 的 scopes 汇总）。"""
+    def _scope_where(self, repo_id=None, kind=None, q=None):
+        where = []
+        args = []
+        if repo_id:
+            where.append("r.repo_id = ?")
+            args.append(str(repo_id))
+        if kind:
+            where.append("r.scope_kind = ?")
+            args.append(str(kind))
+        if q:
+            needle = "%" + str(q).strip().lower() + "%"
+            where.append("(lower(coalesce(r.repo_name,'')) like ? or lower(r.repo_id) like ?"
+                         " or lower(r.namespace) like ? or lower(coalesce(r.scope_ref,'')) like ?"
+                         " or lower(r.chunk_fp) like ?)")
+            args.extend([needle] * 5)
+        return where, args
+
+    def scope_page(self, repo_id=None, kind=None, q=None, sort="updated_at", order="desc",
+                   limit=50, offset=0):
+        """分页作用域列表 + 总数 + facets；只对当前页计算计数/占用。"""
+        sort_map = {
+            "updated_at": "r.updated_at",
+            "created_at": "r.created_at",
+            "repo_name": "coalesce(r.repo_name, r.repo_id)",
+            "scope_kind": "r.scope_kind",
+            "chunks": "chunks",
+        }
+        sort_col = sort_map.get(sort, sort_map["updated_at"])
+        direction = "asc" if str(order).lower() == "asc" else "desc"
+        where, args = self._scope_where(repo_id, kind, q)
+        clause = (" where " + " and ".join(where)) if where else ""
+        limit = max(1, min(int(limit), 200))
+        offset = max(0, int(offset))
+        count_sql = "select count(*) as n from repos r" + clause
+        data_sql = (
+            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks"
+            " from repos r" + clause + f" order by {sort_col} {direction}, r.namespace asc limit ? offset ?"
+        )
         with self.lock:
+            total = int(self.db.execute(count_sql, args).fetchone()["n"])
+            rows = self.db.execute(data_sql, [*args, limit, offset]).fetchall()
+            variant_rows = self.db.execute(
+                "select repo_id, scope_kind, coalesce(scope_ref,'') as scope_ref, count(*) as n"
+                " from repos group by repo_id, scope_kind, coalesce(scope_ref,'')"
+            ).fetchall()
+            repo_rows = self.db.execute(
+                "select repo_id, coalesce(repo_name,'') as repo_name, count(*) as n"
+                " from repos group by repo_id, coalesce(repo_name,'') order by n desc, repo_name asc"
+            ).fetchall()
+            kind_rows = self.db.execute(
+                "select scope_kind, count(*) as n from repos group by scope_kind"
+            ).fetchall()
+            facets_repos = [
+                {"repoId": r["repo_id"], "repoName": r["repo_name"] or r["repo_id"], "count": int(r["n"])}
+                for r in repo_rows
+            ]
+            facets_kinds = {k: 0 for k in SCOPE_KINDS}
+            for r in kind_rows:
+                key = r["scope_kind"] or "legacy"
+                facets_kinds[key] = facets_kinds.get(key, 0) + int(r["n"])
+            variants = {
+                (r["repo_id"], r["scope_kind"] or "legacy", r["scope_ref"] or ""): int(r["n"])
+                for r in variant_rows
+            }
+            items = []
+            for r in rows:
+                item = dict(r)
+                item.update(self.counts(r["namespace"]))
+                item.update(self.lineage_bytes(r["lineage_id"]))
+                item["files"] = int(self.db.execute(
+                    "select count(distinct path) as n from chunks where namespace = ?", (r["namespace"],)
+                ).fetchone()["n"])
+                item["updatedAt"] = r["updated_at"]
+                item["variantCount"] = variants.get(
+                    (r["repo_id"], r["scope_kind"] or "legacy", r["scope_ref"] or ""), 1
+                )
+                item["scope"] = {
+                    "kind": r["scope_kind"] or "legacy",
+                    "ref": r["scope_ref"],
+                    "commit": r["commit_sha"],
+                    "createdAt": r["created_at"],
+                }
+                items.append(item)
+        return {
+            "scopes": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "hasMore": offset + len(items) < total,
+            "facets": {"repos": facets_repos, "kinds": facets_kinds},
+        }
+
+    def scope_stats(self):
+        """全库作用域/块/向量/占用聚合（/health 与控制台概览）。"""
+        hit = self._cache.get(("scopetotals",))
+        if hit is not None:
+            return dict(hit)
+        with self.lock:
+            total = int(self.db.execute("select count(*) as n from repos").fetchone()["n"])
             rows = self.db.execute("select scope_kind, count(*) as n from repos group by scope_kind").fetchall()
-        by_kind = {k: 0 for k in SCOPE_KINDS}
-        for r in rows:
-            key = r["scope_kind"] or "legacy"
-            by_kind[key] = by_kind.get(key, 0) + int(r["n"])
-        return {"total": sum(by_kind.values()), "byKind": by_kind}
+            by_kind = {k: 0 for k in SCOPE_KINDS}
+            for r in rows:
+                key = r["scope_kind"] or "legacy"
+                by_kind[key] = by_kind.get(key, 0) + int(r["n"])
+            chunks = int(self.db.execute("select count(*) as n from chunks").fetchone()["n"])
+            vectors = int(self.db.execute(
+                "select count(*) as n from chunks c join repos r on r.namespace = c.namespace"
+                " join vectors v on v.lineage_id = c.lineage_id and v.tag = r.tag and v.hash = c.hash"
+            ).fetchone()["n"])
+            body_bytes = int(self.db.execute("select coalesce(sum(length(body)),0) as n from blobs").fetchone()["n"])
+            vector_bytes = int(self.db.execute("select coalesce(sum(length(v)),0) as n from vectors").fetchone()["n"])
+        out = {
+            "total": total,
+            "byKind": by_kind,
+            "chunks": chunks,
+            "vectors": vectors,
+            "coverage": round(vectors / chunks, 4) if chunks else 0.0,
+            "totalBytes": body_bytes + vector_bytes,
+            "bodyBytes": body_bytes,
+            "vectorBytes": vector_bytes,
+        }
+        self._cache[("scopetotals",)] = out
+        return dict(out)
 
     @staticmethod
     def _scope_ref_value(kind, ref):
@@ -1038,22 +1088,21 @@ class IndexStore:
             return [r["hash"] for r in self.db.execute(sql, args).fetchall()]
 
     # ---------------------------------------------------------------- 维护
-    def gc(self, lineage, retention_days=30):
-        """删掉"血统内已无任何块引用、且超过保留期"的 blob / vector。"""
-        cutoff = int(time.time()) - int(retention_days) * 86400
+    def gc(self, lineage):
+        """删掉"血统内已无任何块引用"的 blob / vector（显式删除后立即回收）。"""
         with self.lock:
             live = set(self.hashes_in_lineage(lineage))
             dead_b = [
                 r["hash"]
-                for r in self.db.execute("select hash, updated_at from blobs where lineage_id = ?", (lineage,)).fetchall()
-                if r["hash"] not in live and int(r["updated_at"]) <= cutoff
+                for r in self.db.execute("select hash from blobs where lineage_id = ?", (lineage,)).fetchall()
+                if r["hash"] not in live
             ]
             dead_v = [
                 (r["tag"], r["hash"])
                 for r in self.db.execute(
-                    "select tag, hash, updated_at from vectors where lineage_id = ?", (lineage,)
+                    "select tag, hash from vectors where lineage_id = ?", (lineage,)
                 ).fetchall()
-                if r["hash"] not in live and int(r["updated_at"]) <= cutoff
+                if r["hash"] not in live
             ]
             for h in dead_b:
                 self.db.execute("delete from blobs where lineage_id = ? and hash = ?", (lineage, h))

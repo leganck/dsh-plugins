@@ -59,13 +59,7 @@ os.environ.update(
     SERVER_LOG=os.path.join(TMP, "server.log"),
     EMBED_RATE="50",          # 自测要快；限流本身另有用例覆盖
     EMBED_BATCH="4",
-    RETENTION_DAYS="0",
-    # 档 3 的默认值钉死，避免外部环境变量让自测结果漂移
-    SCOPE_TTL_BRANCH="30",
-    SCOPE_TTL_PR="14",
-    SCOPE_TTL_WORKTREE="1",
-    SCOPE_SWEEP="1",
-    MAX_SCOPES="200",
+    # 作用域永久；不再有 TTL/janitor/配额
     MAX_SEARCH_SCOPES="4",
 )
 
@@ -255,7 +249,7 @@ def main():
     st, body4 = sync(NS, payload)
     check("删除后 chunks = 4", body4.get("chunks") == 4, body4)
     lid = req("GET", f"/v1/namespaces/{NS}/status")[1]["lineage"]
-    st, g = req("POST", "/v1/admin/gc", {"lineage": lid, "retentionDays": 0})
+    st, g = req("POST", "/v1/admin/gc", {"lineage": lid})
     check("GC 清掉了 2 个 blob", g.get("blobs") == 2, g)
     check("GC 清掉了 2 个向量", g.get("vectors") == 2, g)
 
@@ -388,9 +382,10 @@ def main():
     check("resolve 非法 ref → 400 bad-scope", st == 400 and res_bad.get("reason") == "pr-ref-not-numeric", res_bad)
     st, lst = req("GET", f"/v1/scopes?repoId={REPO}&kind=branch")
     item = next((x for x in lst.get("scopes", []) if x["namespace"] == NS_BR), None)
-    check("列表字段完整（kind/ref/TTL/coverage）",
+    check("列表字段完整（kind/ref/files/updatedAt/variantCount）",
           item is not None and item.get("kind") == "branch" and item.get("ref") == "feat/x"
-          and item.get("expiresAt") and (item.get("ttlRemaining") or 0) > 0 and item.get("pinned") is False,
+          and item.get("files") == 1 and item.get("updatedAt") and item.get("variantCount") == 1
+          and "expiresAt" not in item and "pinned" not in item,
           item)
     st, sst = req("GET", f"/v1/namespaces/{nsq(NS_BR)}/status")
     check("status 带 scope 元数据",
@@ -400,7 +395,7 @@ def main():
     check("health 顶层 scopes 汇总", hh.get("scopes", {}).get("byKind", {}).get("branch", 0) >= 1
           and hh["scopes"].get("total", 0) >= 1, hh.get("scopes"))
 
-    print("\n[17] legacy 命名空间 pinned，janitor 不删")
+    print("\n[17] legacy 命名空间永久保留")
     LEG = "legacy-demo@fp1"
     st, lg = req("POST", "/v1/namespaces/sync", {
         "namespace": LEG,
@@ -409,26 +404,21 @@ def main():
         "remove": [],
     })
     check("legacy 同步成功", st == 200, (st, lg))
-    st, sw = req("POST", "/v1/admin/sweep", {})
-    check("sweep 不删 legacy", LEG not in sw.get("deleted", []), sw)
     st, lstt = req("GET", f"/v1/namespaces/{nsq(LEG)}/status")
-    check("legacy = pinned + 无过期时间", lstt.get("scope", {}).get("kind") == "legacy"
-          and lstt["scope"].get("pinned") is True and lstt["scope"].get("expiresAt") is None, lstt.get("scope"))
+    check("legacy 作用域无 TTL/pin 字段", lstt.get("scope", {}).get("kind") == "legacy"
+          and "expiresAt" not in lstt.get("scope", {}) and "pinned" not in lstt.get("scope", {}),
+          lstt.get("scope"))
 
-    print("\n[18] TTL 过期 → sweep 删除")
-    check("build() 已启动 janitor 线程", any(t.name == "scope-janitor" for t in threading.enumerate()))
+    print("\n[18] 作用域永久：PR 不再过期/自动删除")
     NS_PR = istore.canonical_namespace(REPO, "fp1", "pr", "42")
     st, sp = scope_sync(NS_PR, {"p.java": [("hp1", "class P { }", 1, 3)]}, "pr-1",
                         {"kind": "pr", "ref": "42"}, repo_id=REPO, url=URL2)
-    check("PR scope 创建（默认 TTL）", st == 200 and sp.get("namespace") == NS_PR, (st, sp))
-    st, pinr = req("POST", f"/v1/scopes/{nsq(NS_PR)}/pin", {"pinned": False, "ttlDays": 0})
-    check("pin 可把 TTL 改成 0（立即过期）", st == 200 and pinr.get("expiresAt") is not None, pinr)
+    check("PR scope 创建成功", st == 200 and sp.get("namespace") == NS_PR, (st, sp))
+    st, prst = req("GET", f"/v1/namespaces/{nsq(NS_PR)}/status")
+    check("PR 作用域没有过期时间", prst.get("scope", {}).get("kind") == "pr"
+          and "expiresAt" not in prst.get("scope", {}), prst.get("scope"))
     st, sw2 = req("POST", "/v1/admin/sweep", {})
-    check("过期 scope 被删除", NS_PR in sw2.get("deleted", []), sw2)
-    st, lst2 = req("GET", "/v1/scopes")
-    check("/v1/scopes 里已消失", all(x["namespace"] != NS_PR for x in lst2.get("scopes", [])))
-    st, hs2 = req("GET", "/health")
-    check("/health.spaces 里已消失", all(s["namespace"] != NS_PR for s in hs2.get("spaces", [])))
+    check("sweep 端点已移除", st == 404, st)
 
     print("\n[19] DELETE scope 后 GC 不误删被其他 scope 引用的内容")
     REPO3 = "wt"
@@ -511,16 +501,17 @@ def main():
           and all(k in one_old.get("ms", {}) for k in ("embed", "knn"))
           and all("score" in h for h in one_old.get("hits", [])))
 
-    print("\n[21] MAX_SCOPES 配额 → 507")
-    old_max = server.MAX_SCOPES
-    server.MAX_SCOPES = server.store.count_scopes()
-    NS_QUOTA = istore.canonical_namespace("quota", "fp1", "branch", "new")
-    st, q = scope_sync(NS_QUOTA, {"q.java": [("hq1", "quota probe", 1, 2)]}, "q-1",
-                       {"kind": "branch", "ref": "new"}, repo_id="quota",
-                       url="https://git.example.com/team/quota.git")
-    check("新建 scope 超限 → 507 scope-cap", st == 507 and q.get("error") == "scope-cap", (st, q))
-    check("配额响应带 count/limit", q.get("count") == server.MAX_SCOPES and q.get("limit") == server.MAX_SCOPES, q)
-    server.MAX_SCOPES = old_max
+    print("\n[21] 作用域无上限 + 分页字段")
+    check("服务端不再有 MAX_SCOPES", not hasattr(server, "MAX_SCOPES"))
+    st, page = req("GET", "/v1/scopes?limit=2&offset=0&sort=repo_name&order=asc")
+    check("分页返回 total/offset/limit/hasMore/facets",
+          st == 200 and isinstance(page.get("total"), int) and page.get("limit") == 2
+          and page.get("offset") == 0 and "hasMore" in page and "facets" in page, page)
+    check("分页最多返回 2 条", len(page.get("scopes", [])) <= 2, len(page.get("scopes", [])))
+    st, bulk = req("POST", "/v1/scopes/bulk-delete", {"namespaces": [NS_PR]})
+    check("bulk-delete 删除成功", st == 200 and NS_PR in (bulk.get("deleted") or []), bulk)
+    check("删除后不再出现在分页里",
+          all(x["namespace"] != NS_PR for x in req("GET", "/v1/scopes?limit=200")[1].get("scopes", [])))
 
     print("\n[22] 旧 DB 启动即幂等迁移")
     old_db = os.path.join(TMP, "legacy-db", "index.db")
@@ -547,8 +538,8 @@ def main():
     conn.close()
     m1 = istore.IndexStore(old_db)
     row = m1.repo("old@fp")
-    check("老库补列后 legacy/pinned/no-expiry",
-          row["scope_kind"] == "legacy" and row["pinned"] == 1 and row["expires_at"] is None, row)
+    check("老库补列后 legacy 可读且不再依赖 pinned/expiry",
+          row["scope_kind"] == "legacy" and row["created_at"] == 1000, row)
     check("created_at 回填 updated_at", row["created_at"] == 1000, row.get("created_at"))
     simhash_cols = {"simhash_path", "simhash_content", "simhash_algo", "simhash_files", "simhash_at"}
     check("老库幂等补上 simhash 5 列（值保持 null）",
@@ -557,12 +548,8 @@ def main():
           simhash_cols <= {r["name"] for r in m1.db.execute("pragma table_info(repos)").fetchall()})
     m1.close()
     m2 = istore.IndexStore(old_db)
-    check("二次启动迁移幂等", m2.repo("old@fp")["pinned"] == 1)
-    m2.pin_scope("old@fp", False)
+    check("二次启动迁移幂等", m2.repo("old@fp")["created_at"] == 1000)
     m2.close()
-    m3 = istore.IndexStore(old_db)
-    check("显式 unpin 不会被二次迁移重新钉住", m3.repo("old@fp")["pinned"] == 0)
-    m3.close()
 
     print("\n[23] sync 显式 tag=null → 服务端补默认 tag（review-service 旧 payload 回归）")
     NS_NULL = istore.canonical_namespace("nulltag", "fp1", "branch", "feat/n")
@@ -597,7 +584,7 @@ def main():
     st, html, ctype = req_raw("/admin")
     check("/admin → 200 text/html", st == 200 and "text/html" in ctype, (st, ctype))
     check("页面包含标题与关键区块",
-          "code-index-service · 控制台" in html and "作用域（快照）" in html and "/v1/scopes" in html
+          "code-index-service · 控制台" in html and "作用域（永久快照）" in html and "/v1/scopes" in html
           and "API Key" in html and "概览" in html)
     st, html_slash, _ = req_raw("/admin/")
     check("/admin/ 同样可用", st == 200 and "code-index-service" in html_slash)

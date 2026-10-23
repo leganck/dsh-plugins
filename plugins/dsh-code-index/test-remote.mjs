@@ -196,8 +196,8 @@ console.log('\n[2] 作用域命名规范（scope_format.json 夹具）')
   check('pr 的 ref 按 int 归一（去前导零）', refToken('pr', '007') === '7')
   check(
     'validateScope 返回原始分支名（token 只出现在命名空间里）',
-    validateScope({ kind: 'branch', ref: ' feat/x ', ttlDays: 14 }).ref === 'feat/x',
-    JSON.stringify(validateScope({ kind: 'branch', ref: ' feat/x ', ttlDays: 14 })),
+    validateScope({ kind: 'branch', ref: ' feat/x ' }).ref === 'feat/x',
+    JSON.stringify(validateScope({ kind: 'branch', ref: ' feat/x ' })),
   )
 }
 
@@ -281,7 +281,7 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   // ---- 4a. scope 推导 → 路径/ payload ----
   const stub = await makeIndexStub({ mode: 'legacy400' })
   const a = fakeCtx()
-  apply(a.ctx, cfgOf({ remote: { url: stub.url, scope: { kind: 'branch', ref: 'feat/x', ttlDays: 14 }, readScopes: ['r-main@fp#main:default'] } }))
+  apply(a.ctx, cfgOf({ remote: { url: stub.url, scope: { kind: 'branch', ref: 'feat/x' }, readScopes: ['r-main@fp#main:default'] } }))
   const indexTool = a.registry.get('code_index')
   const searchTool = a.registry.get('code_search')
   const built = await indexTool.execute({ path: repo }, { cwd: repo })
@@ -295,11 +295,11 @@ console.log('\n[4] 插件作用域：推导 / sync payload / 多作用域回退'
   )
   check('同步路径用推导出的分支命名空间（#branch:feat-x-d6e256）', /#branch:feat-x-d6e256$/.test(sync1.namespace), sync1.namespace)
   check(
-    'sync payload 带 scope（kind/ref/ttlDays）',
-    sync1.body.scope?.kind === 'branch' && sync1.body.scope.ref === 'feat/x' && sync1.body.scope.ttlDays === 14,
+    'sync payload 带 scope（kind/ref）',
+    sync1.body.scope?.kind === 'branch' && sync1.body.scope.ref === 'feat/x' && !('ttlDays' in sync1.body.scope),
     JSON.stringify(sync1.body.scope),
   )
-  check('code_index 输出带作用域与 TTL（写作用域 branch:feat/x，TTL 14 天）', /作用域：写作用域 branch:feat\/x/.test(builtText) && /TTL 14 天/.test(builtText), builtText.slice(0, 300))
+  check('code_index 输出带作用域（写作用域 branch:feat/x）', /作用域：写作用域 branch:feat\/x/.test(builtText) && !/TTL/.test(builtText), builtText.slice(0, 300))
   check('code_index structuredContent 带 scope.namespaces（写 + 读）', built.structuredContent?.scope?.namespaces?.length === 2, JSON.stringify(built.structuredContent?.scope))
 
   // ---- 4b. 旧服务端 400 → 回退单作用域（只重试一次） ----
@@ -459,7 +459,7 @@ console.log('\n[6] 配置校验（apply 会大声失败）')
   const e15 = tryApply({ advanced: { remoteTimeoutMs: 10 } })
   check('remoteTimeoutMs 过小 → 拒绝', e15 && /remoteTimeoutMs/.test(e15.message), e15?.message)
   // ---- 档 3 作用域配置（remote.namespace / remote.scope / remote.readScopes）----
-  const e16 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'branch', ref: 'feat/x', ttlDays: 14 } } })
+  const e16 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'branch', ref: 'feat/x' } } })
   check('合法 remote.scope → 通过', e16 === null, e16?.message)
   const e17 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'nope', ref: 'x' } } })
   check('未知 scope.kind → 拒绝并点名作用域类型', e17 && /未知作用域类型/.test(e17.message), e17?.message)
@@ -470,7 +470,7 @@ console.log('\n[6] 配置校验（apply 会大声失败）')
   const e20 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'main', bogus: 1 } } })
   check('scope 未知键 → 拒绝并点名 remote.scope.bogus', e20 && /remote\.scope\.bogus/.test(e20.message), e20?.message)
   const e21 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', scope: { kind: 'main', ttlDays: 0 } } })
-  check('ttlDays 非正整数 → 拒绝', e21 && /ttlDays/.test(e21.message), e21?.message)
+  check('ttlDays 已移除 → 未知配置项', e21 && /remote\.scope\.ttlDays/.test(e21.message), e21?.message)
   const e22 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', readScopes: 'main' } })
   check('readScopes 非数组 → 拒绝', e22 && /readScopes/.test(e22.message), e22?.message)
   const e23 = tryApply({ vectors: 'remote', remote: { url: 'https://h.example', readScopes: [''] } })

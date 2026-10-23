@@ -668,12 +668,12 @@ def test_scope_config() -> None:
     def load(env: dict):
         return load_config({**env, "DATA_DIR": tempfile.mkdtemp(prefix="review-scope-cfg-")})
 
-    cfg_repo = load({"INDEX_SCOPE_MODE": "", "INDEX_PR_HEAD": "0", "INDEX_PR_TTL_DAYS": "14"})
+    cfg_repo = load({"INDEX_SCOPE_MODE": "", "INDEX_PR_HEAD": "0"})
     check("默认 INDEX_SCOPE_MODE=repo、INDEX_PR_HEAD=0", cfg_repo.index_scope_mode == "repo" and cfg_repo.index_pr_head is False, f"{cfg_repo.index_scope_mode}/{cfg_repo.index_pr_head}")
     cfg_branch = load({"INDEX_SCOPE_MODE": "branch"})
     check("INDEX_SCOPE_MODE=branch 解析", cfg_branch.index_scope_mode == "branch")
-    cfg_pr = load({"INDEX_SCOPE_MODE": "pr", "INDEX_PR_HEAD": "1", "INDEX_PR_TTL_DAYS": "7"})
-    check("INDEX_SCOPE_MODE=pr + INDEX_PR_HEAD + TTL", cfg_pr.index_scope_mode == "pr" and cfg_pr.index_pr_head is True and cfg_pr.index_pr_ttl_days == 7, f"{cfg_pr.index_scope_mode}/{cfg_pr.index_pr_head}/{cfg_pr.index_pr_ttl_days}")
+    cfg_pr = load({"INDEX_SCOPE_MODE": "pr", "INDEX_PR_HEAD": "1"})
+    check("INDEX_SCOPE_MODE=pr + INDEX_PR_HEAD", cfg_pr.index_scope_mode == "pr" and cfg_pr.index_pr_head is True, f"{cfg_pr.index_scope_mode}/{cfg_pr.index_pr_head}")
     cfg_bad = load({"INDEX_SCOPE_MODE": "wat"})
     check("非法 INDEX_SCOPE_MODE 退回 repo", cfg_bad.index_scope_mode == "repo")
 
@@ -684,7 +684,7 @@ def test_scope_config() -> None:
     plan_pr_off = scope_plan(load({"INDEX_SCOPE_MODE": "pr", "INDEX_PR_HEAD": "0"}), 123, "main")
     check("pr 模式默认只有 base 作用域", plan_pr_off["base"]["kind"] == "branch" and plan_pr_off["head"] is None, str(plan_pr_off))
     plan_pr = scope_plan(cfg_pr, 123, "main", base_commit="b" * 40, head_commit="h" * 40)
-    check("pr+INDEX_PR_HEAD=1：head → pr:<iid>（带 TTL/commit）", plan_pr["head"] == {"kind": "pr", "ref": "123", "ttlDays": 7, "commit": "h" * 40}, str(plan_pr["head"]))
+    check("pr+INDEX_PR_HEAD=1：head → pr:<iid>（带 commit）", plan_pr["head"] == {"kind": "pr", "ref": "123", "commit": "h" * 40}, str(plan_pr["head"]))
     check("pr 模式 base 作用域带 base commit", plan_pr["base"] == {"kind": "branch", "ref": "main", "commit": "b" * 40}, str(plan_pr["base"]))
     check("scope_label：legacy 与 kind:ref", scope_label(None) == "legacy" and scope_label(plan_pr["head"]) == "pr:123")
 
@@ -817,8 +817,7 @@ def test_scope_sync() -> None:
                 index_api_key="",
                 index_scope_mode="pr",
                 index_pr_head=True,
-                index_pr_ttl_days=7,
-                index_repo_prefix="r",
+                        index_repo_prefix="r",
                 index_chunk_fp="fp",
                 index_sync_min_interval=600,
             )
@@ -833,7 +832,7 @@ def test_scope_sync() -> None:
             check("worker 用服务端 resolve 的 namespace 做 sync body", [c[2].get("namespace") for c in srv2.calls_matching("/sync")] == ["ns-base", "ns-head"], str([c[2].get("namespace") for c in srv2.calls_matching("/sync")]))
             sync_payloads = [c[2] for c in srv2.calls_matching("/sync")]
             check("base sync 带 branch scope", sync_payloads[0].get("scope") == {"kind": "branch", "ref": "release/1.0"}, str(sync_payloads[0].get("scope")))
-            check("head sync 带 pr scope + ttlDays", sync_payloads[1].get("scope") == {"kind": "pr", "ref": "123", "ttlDays": 7}, str(sync_payloads[1].get("scope")))
+            check("head sync 带 pr scope", sync_payloads[1].get("scope") == {"kind": "pr", "ref": "123"}, str(sync_payloads[1].get("scope")))
             check("resolve 请求体符合契约（repoId/chunkFp/kind/ref）", resolve_calls[0][2] == {"repoId": "r-7", "chunkFp": "fp", "kind": "branch", "ref": "release/1.0"}, str(resolve_calls[0][2]))
             state = worker.index_state.get("7", "release/1.0") or {}
             from .index_state import scope_part

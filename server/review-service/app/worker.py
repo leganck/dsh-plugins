@@ -68,7 +68,7 @@ def scope_plan(
     - repo   ：base/head 都为 None → 完全走旧行为，不向服务端发 scope；
     - branch ：base = {"kind":"branch","ref":target_branch}；
     - pr     ：base = {"kind":"branch","ref":target_branch}；
-               `INDEX_PR_HEAD=1` 时 head = {"kind":"pr","ref":str(iid),"ttlDays":N}。
+               `INDEX_PR_HEAD=1` 时 head = {"kind":"pr","ref":str(iid)}。
 
     commit 可选（`/v1/scopes/resolve` 与 sync.scope 都接受）；拿不到就不带。
     """
@@ -87,7 +87,6 @@ def scope_plan(
         head: dict = {
             "kind": "pr",
             "ref": str(int(iid)),
-            "ttlDays": int(getattr(cfg, "index_pr_ttl_days", 14) or 14),
         }
         if head_commit:
             head["commit"] = str(head_commit)
