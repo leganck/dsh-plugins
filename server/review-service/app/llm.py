@@ -100,25 +100,33 @@ def _json_mode_unsupported(err: HttpError) -> bool:
     旧实现只要 400 且请求带 response_format 就回退，会把上下文超长、
     max_tokens 非法等真正的请求错误掩盖成“网关不支持 JSON mode”。
     work-log 对 prompt_cache_key 的能力探测也是按错误文本判定的。
+
+    注意不能把 `invalid_request_error` 当成“invalid response_format”：
+    很多 400 都带这个通用 type。
     """
     body = (err.body or "").lower()
     if "response_format" not in body and "response format" not in body:
         return False
+    # OpenAI 的 JSON mode 要求 messages 里出现 json 字样；这是 prompt 约束，
+    # 不是网关能力，但先关闭 response_format 再让 prompt 兜底是安全的。
+    if "prompt must contain" in body or "word 'json'" in body or 'word "json"' in body:
+        return True
     return any(
-        marker in body
-        for marker in (
-            "unsupported",
-            "unrecognized",
-            "unknown",
-            "not supported",
-            "extra field",
-            "unexpected",
-            "invalid",
-            "不支持",
-            "不识别",
-            "未知",
-            "无效",
-            "多余",
+        phrase in body
+        for phrase in (
+            "response_format is not supported",
+            "response_format not supported",
+            "response_format is unsupported",
+            "response_format unsupported",
+            "response_format is not allowed",
+            "response_format not allowed",
+            "response_format is unknown",
+            "response_format unknown",
+            "response_format is unrecognized",
+            "response_format unrecognized",
+            "invalid response_format",
+            "response_format is invalid",
+            "response_format: invalid",
         )
     )
 
