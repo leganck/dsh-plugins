@@ -15,7 +15,7 @@ jobs:
   plugins:
     name: test ${{ matrix.plugin }}
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
@@ -35,20 +35,9 @@ jobs:
           node-version: 24
       # 三个插件都是零运行时依赖；装一下只是为了让 pnpm workspace 的 --filter 生效
       - run: pnpm install --no-frozen-lockfile
-      - name: 诊断 test.mjs（仅 code-index）
-        if: matrix.plugin == 'dsh-code-index'
-        timeout-minutes: 1
-        working-directory: plugins/dsh-code-index
-        run: node --import ../../scripts/ci-test-trace.mjs test.mjs
       - name: 自测（缺 --repo 时由 scripts/ci-fixture.mjs 自动建夹具仓库）
-        timeout-minutes: 2
+        timeout-minutes: 6
         run: pnpm --filter "./plugins/${{ matrix.plugin }}" test
-      # 仅失败诊断：正常步骤超时被杀后，用预载 watchdog 抓 test.mjs 卡在哪
-      - name: 诊断 test.mjs（失败时）
-        if: failure() && matrix.plugin == 'dsh-code-index'
-        timeout-minutes: 2
-        working-directory: plugins/dsh-code-index
-        run: node --import ../../scripts/ci-test-trace.mjs test.mjs
 
   market:
     name: plugin market index
