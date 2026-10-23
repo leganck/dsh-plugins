@@ -86,6 +86,7 @@ class ReviewOutcome:
     stopped_reason: str = ""
     diff_fp: str = ""
     seconds: float = 0.0
+    block_errors: list[dict] = field(default_factory=list)  # Reviewer block 失败（模型输出不可解析等）
     namespaces: list[str] = field(default_factory=list)  # 档3：本次检索用到的作用域
 
 
@@ -423,20 +424,18 @@ def run_review(
                 worktree=worktree,
                 settings=ctx_settings,
             )
-            try:
-                return review_block(
-                    llm,
-                    mr,
-                    block,
-                    files_by_path,
-                    guidelines=guidelines,
-                    contexts=contexts,
-                    static_findings=[s for s in static_findings if s.get("path") in set(block["files"])],
-                    settings=settings,
-                )
-            except ValueError as e:
-                say(f"block「{block['theme']}」评审输出不可解析，跳过：{e}")
-                return []
+            # 不在这里吞掉 ValueError：让 map_limited 记录为失败 block，
+            # 后面显式写入 block_errors / stopped_reason，避免“模型输出坏了但 job done”。
+            return review_block(
+                llm,
+                mr,
+                block,
+                files_by_path,
+                guidelines=guidelines,
+                contexts=contexts,
+                static_findings=[s for s in static_findings if s.get("path") in set(block["files"])],
+                settings=settings,
+            )
 
         blocks = outcome.plan["blocks"]
         block_results = map_limited(
@@ -448,7 +447,9 @@ def run_review(
                 all_candidates.extend(found)
                 say(f"block「{block['theme']}」：候选 {len(found)} 条")
             else:
-                say(f"block「{block['theme']}」失败：{res['error']}")
+                err = str(res.get("error") or "unknown")
+                outcome.block_errors.append({"theme": block.get("theme", ""), "error": err})
+                say(f"block「{block['theme']}」失败：{err}")
 
         outcome.candidates = all_candidates[: settings.max_candidates]
 
@@ -542,6 +543,21 @@ def run_review(
                 mr, files, skips, outcome.validation, model=settings.model
             )
 
+    if outcome.block_errors:
+        # Reviewer 全部失败时不能伪装成“没有发现问题”。保留 done 便于继续汇总，
+        # 但 stopped_reason + summary 必须明确告诉使用者这次评审不完整。
+        if not outcome.stopped_reason and not outcome.candidates:
+            outcome.stopped_reason = "reviewer-block-error"
+        titles = "、".join(f"「{e['theme']}」" for e in outcome.block_errors[:4])
+        more = f" 等 {len(outcome.block_errors)} 个" if len(outcome.block_errors) > 4 else ""
+        warning = f"> ⚠️ 有 {len(outcome.block_errors)} 个 Reviewer block 失败（{titles}{more}），本次评审结果不完整。"
+        marker = "<!-- ai-review-summary -->"
+        # 汇总 marker 必须在最后：发布层用它识别同一条汇总 note 并复用它。
+        if marker in outcome.summary:
+            outcome.summary = outcome.summary.replace(marker, warning + "\n\n" + marker, 1)
+        else:
+            outcome.summary = (outcome.summary + "\n\n" + warning + "\n\n" + marker).strip()
+
     outcome.seconds = round(time.monotonic() - t0, 2)
     return outcome
 
@@ -587,6 +603,7 @@ def outcome_payload(outcome: ReviewOutcome) -> dict:
     return {
         "diff_fp": outcome.diff_fp,
         "stopped_reason": outcome.stopped_reason,
+        "block_errors": outcome.block_errors,
         "plan": outcome.plan,
         "namespaces": outcome.namespaces,
         "candidates": len(outcome.candidates),
