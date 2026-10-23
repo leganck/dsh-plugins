@@ -482,4 +482,8 @@ console.log('\n[6] 配置校验（apply 会大声失败）')
 }
 
 console.log(`\n通过 ${pass}，失败 ${fail}`)
-process.exitCode = fail === 0 ? 0 : 1
+// Linux CI 上部分 watcher/timer 可能在测试结束后仍保持事件循环，导致 pnpm 永远等不到
+// test-remote 退出（本地 Windows 不触发）。这里在输出落盘后显式退出，避免下一段测试被卡住。
+const exitCode = fail === 0 ? 0 : 1
+process.exitCode = exitCode
+process.stdout.write('', () => process.exit(exitCode))
