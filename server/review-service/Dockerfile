@@ -36,6 +36,12 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
  && chown -R app:app /app /data
 
 USER 10001:10001
+
+# tree-sitter-language-pack 1.22.1 默认在**首次 get_parser() 时**从 GitHub Release
+# 下载 parsers manifest；生产/内网没有 GitHub 出口时，graph 会降级为“缺少语法 go”。
+# 在构建阶段预下载评审用到的 8 种语法到 /home/app/.cache，运行期完全离线。
+RUN python -c "from tree_sitter_language_pack import download; download(['python','javascript','typescript','tsx','java','go','rust','groovy'])"
+
 VOLUME ["/data"]
 EXPOSE 8000
 
