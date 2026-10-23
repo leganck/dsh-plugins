@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -29,6 +30,24 @@ GIT_ENV = {
     "GIT_SSH_COMMAND": "ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new",
 }
 
+
+def git_auth_env(token: str = "") -> dict:
+    """私有 GitLab 的 git HTTP 认证（不把 token 写进 remote URL / 日志）。
+
+    GitLab 接受 PAT 作为 HTTP Basic 密码（username=oauth2）。通过
+    `GIT_CONFIG_COUNT/KEY/VALUE` 注入 http.extraHeader，clone/fetch 都生效，
+    且远端 URL 保持干净；token 只存在于子进程环境。
+    """
+    if not token:
+        return {}
+    basic = base64.b64encode(f"oauth2:{token}".encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+    }
+
+
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -44,8 +63,8 @@ def _safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)[:80] or "repo"
 
 
-def _run(args: list[str], *, cwd: str | None = None, timeout: float = 600.0) -> str:
-    env = {**os.environ, **GIT_ENV}
+def _run(args: list[str], *, cwd: str | None = None, timeout: float = 600.0, extra_env: dict | None = None) -> str:
+    env = {**os.environ, **GIT_ENV, **(extra_env or {})}
     proc = subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -62,10 +81,11 @@ def _run(args: list[str], *, cwd: str | None = None, timeout: float = 600.0) -> 
 
 
 class MirrorManager:
-    def __init__(self, mirrors_dir: str, worktrees_dir: str, *, timeout: float = 600.0):
+    def __init__(self, mirrors_dir: str, worktrees_dir: str, *, timeout: float = 600.0, git_token: str = ""):
         self.mirrors_dir = os.path.abspath(mirrors_dir)
         self.worktrees_dir = os.path.abspath(worktrees_dir)
         self.timeout = timeout
+        self._git_env = git_auth_env(git_token)
         os.makedirs(self.mirrors_dir, exist_ok=True)
         os.makedirs(self.worktrees_dir, exist_ok=True)
 
@@ -92,7 +112,7 @@ class MirrorManager:
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
             log(f"克隆镜像：{git_url} → {path}")
-            _run(["clone", "--mirror", "--no-recurse-submodules", git_url, path], timeout=self.timeout)
+            _run(["clone", "--mirror", "--no-recurse-submodules", git_url, path], timeout=self.timeout, extra_env=self._git_env)
         return path
 
     def fetch(self, project_key: str, refspecs: list[str]) -> None:
@@ -101,7 +121,7 @@ class MirrorManager:
         if not os.path.isdir(mirror):
             raise RuntimeError(f"镜像仓不存在：{mirror}（先 ensure_mirror）")
         with _lock_for(project_key):
-            _run(["--git-dir", mirror, "fetch", "--prune", "origin", *refspecs], timeout=self.timeout)
+            _run(["--git-dir", mirror, "fetch", "--prune", "origin", *refspecs], timeout=self.timeout, extra_env=self._git_env)
 
     def fetch_merge_request(self, project_key: str, mr_iid: int, target_branch: str) -> None:
         refspecs = [f"+refs/merge-requests/{mr_iid}/head:refs/mr/{mr_iid}"]

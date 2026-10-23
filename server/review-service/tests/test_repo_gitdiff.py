@@ -118,6 +118,17 @@ def main() -> int:
     removed = mm.gc(ttl_days=1)
     check("14. GC 删除过期镜像、保留在用的", removed == 1 and not os.path.isdir(stale) and mm.exists("7"), f"removed={removed}")
 
+    # 私有仓 git 认证：PAT 只进子进程环境，不写 remote URL/日志
+    auth_mm = MirrorManager(os.path.join(tmp, "auth-mirrors"), os.path.join(tmp, "auth-worktrees"), git_token="test-token")
+    auth_env = auth_mm._git_env
+    check(
+        "15. 私有仓认证只注入 git http header，不落 URL",
+        auth_env.get("GIT_CONFIG_KEY_0") == "http.extraHeader"
+        and str(auth_env.get("GIT_CONFIG_VALUE_0", "")).startswith("Authorization: Basic ")
+        and "test-token" not in str(auth_env.get("GIT_CONFIG_VALUE_0", "")),
+        str(auth_env.get("GIT_CONFIG_KEY_0")),
+    )
+
     print(f"\n通过 {PASS}，失败 {len(FAILS)}")
     if FAILS:
         print("失败项：")
