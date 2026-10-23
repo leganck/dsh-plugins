@@ -32,9 +32,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          # 24.17.0 是本地/WSL 已验证通过的版本；24.21 上 dsh-code-index 的
-          # test.mjs 会在 CI 中无输出挂起（24.17 同套测试 105 通过）。先钉住已验证版本。
-          node-version: 24.17.0
+          node-version: 24
       # 三个插件都是零运行时依赖；装一下只是为了让 pnpm workspace 的 --filter 生效
       - run: pnpm install --no-frozen-lockfile
       - name: 自测（缺 --repo 时由 scripts/ci-fixture.mjs 自动建夹具仓库）
@@ -50,9 +48,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          # 24.17.0 是本地/WSL 已验证通过的版本；24.21 上 dsh-code-index 的
-          # test.mjs 会在 CI 中无输出挂起（24.17 同套测试 105 通过）。先钉住已验证版本。
-          node-version: 24.17.0
+          node-version: 24
       # 索引必须与 plugins/* 一致：版本号、commit、展示信息任何一处漂移都会在这里失败
       - name: index.json 与插件一致
         run: node market/build-index.mjs --check
@@ -70,9 +66,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          # 24.17.0 是本地/WSL 已验证通过的版本；24.21 上 dsh-code-index 的
-          # test.mjs 会在 CI 中无输出挂起（24.17 同套测试 105 通过）。先钉住已验证版本。
-          node-version: 24.17.0
+          node-version: 24
       - name: 装 js-yaml（真解析，而不是结构 lint）
         run: npm i --no-save js-yaml
       - run: node scripts/check-yaml.mjs
