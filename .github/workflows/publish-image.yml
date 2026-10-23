@@ -148,7 +148,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: server/code-index-service
-          file: Dockerfile.app
+          file: server/code-index-service/Dockerfile.app
           platforms: ${{ env.PLATFORM }}
           build-args: |
             BASE_IMAGE=${{ env.IMAGE }}:base-${{ needs.meta.outputs.base_hash }}-${{ matrix.flavor }}
