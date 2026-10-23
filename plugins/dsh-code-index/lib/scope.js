@@ -23,6 +23,7 @@
  *    客户端继续用原来的 `repo@fp` 就能找到它，零迁移步骤。
  * 3. 校验失败抛出带 `reason` 的 `ScopeError`：调用方（配置校验）要把键路径翻译成 ConfigError，
  *    测试也要能按 reason 断言（夹具的 invalid_cases 就是这么用的）。
+ * 4. 作用域没有 TTL/pin：服务端永久保留，只能显式删除。
  */
 import crypto from 'node:crypto'
 
@@ -30,7 +31,7 @@ import crypto from 'node:crypto'
 export const SCOPE_KINDS = ['main', 'branch', 'pr', 'worktree']
 
 /** 用户可写的作用域配置键 */
-export const SCOPE_CONFIG_KEYS = ['kind', 'ref', 'ttlDays']
+export const SCOPE_CONFIG_KEYS = ['kind', 'ref']
 
 /** ref 里的合法字符（其余连续字符压成 "-"） */
 const REF_SAFE_RE = /[^A-Za-z0-9._-]+/g
@@ -142,14 +143,13 @@ export function normalizeNamespace(namespace) {
 /**
  * 校验并规范化用户配置里的 `remote.scope`。
  *
- * 返回 `{kind, ref, ttlDays}`：main 的 ref 固定为 `"default"`；pr 的 ref 归一成数字串；
- * `ttlDays` 未给时为 null（= 由服务端按 kind 的默认 TTL 决定，客户端不猜）。
+ * 返回 `{kind, ref}`：main 的 ref 固定为 `"default"`；pr 的 ref 归一成数字串。
  * @param {unknown} input
- * @returns {{kind:string, ref:string, ttlDays:number|null}}
+ * @returns {{kind:string, ref:string}}
  */
 export function validateScope(input) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    throw new ScopeError(`作用域配置必须是对象（{kind, ref, ttlDays}），收到 ${Array.isArray(input) ? 'array' : typeof input}`, {
+    throw new ScopeError(`作用域配置必须是对象（{kind, ref}），收到 ${Array.isArray(input) ? 'array' : typeof input}`, {
       reason: 'bad-scope',
     })
   }
@@ -173,17 +173,7 @@ export function validateScope(input) {
     const text = requireRef(kind, input.ref)
     ref = kind === 'pr' ? String(Number(text)) : text
   }
-  let ttlDays = input.ttlDays ?? null
-  if (ttlDays !== null) {
-    if (!Number.isInteger(ttlDays) || ttlDays < 1) {
-      throw new ScopeError(`ttlDays 必须是 >= 1 的整数或 null，收到 ${JSON.stringify(ttlDays)}`, {
-        reason: 'bad-ttl',
-        kind,
-        ref,
-      })
-    }
-  }
-  return { kind, ref, ttlDays }
+  return { kind, ref }
 }
 
 /**

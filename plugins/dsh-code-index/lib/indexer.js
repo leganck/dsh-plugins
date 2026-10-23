@@ -101,7 +101,7 @@ export async function buildIndex({
    * 远端索引（`vectorStore: 'remote'` 时传入）：
    *   { client, repoId, url, tag, namespace?, scope?, uploadBatch? }
    * namespace / scope 是档 3 的作用域：namespace 决定写入哪个快照（客户端用 lib/scope.js 推导），
-   * scope 随 sync payload 交给服务端注册元数据（kind/ref/ttlDays）。
+   * scope 随 sync payload 交给服务端注册元数据（kind/ref）。
    * 传了就**不做本地嵌入**，改为把块清单/正文推给服务端、由服务端算向量。
    */
   remote = null,
@@ -364,7 +364,7 @@ export function computeRepoState(store) {
  * @param {import('./store.js').Store} o.store
  * @param {object} o.client createRemoteIndex() 的返回值
  * @param {string} [o.namespace] 显式 namespace（通常是远程配置的逃生口）；省略时由服务端按 repoId/chunkFp/scope 计算
- * @param {{kind:string, ref:string, ttlDays?:number|null}|null} [o.scope]
+ * @param {{kind:string, ref:string}|null} [o.scope]
  *   作用域元数据：有配置时随 payload 发给服务端（`POST /v1/namespaces/sync`）
  */
 export async function syncRemote({
@@ -403,7 +403,6 @@ export async function syncRemote({
           scope: {
             kind: (scope || { kind: 'main', ref: 'default' }).kind,
             ref: (scope || { kind: 'main', ref: 'default' }).ref,
-            ...(scope?.ttlDays === undefined || scope?.ttlDays === null ? {} : { ttlDays: scope.ttlDays }),
           },
         }
       : {}),
