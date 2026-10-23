@@ -64,6 +64,65 @@ def request_sha(messages: list[dict], purpose: str) -> str:
     return sha1(purpose + "\n" + dump(messages))[:16]
 
 
+def _message_text(data: dict) -> str:
+    """从 chat response 的 message.content 取文本。
+
+    OpenAI Chat 的 content 正常是字符串，但兼容网关也可能返回 content parts
+    数组（例如 [{"type":"text","text":"..."}]）。work-log 的 contentText
+    同样不假设一定是字符串；这里显式展平，避免把合法回答当成空响应。
+    """
+    try:
+        content = data["choices"][0]["message"].get("content")
+    except (KeyError, IndexError, TypeError, AttributeError) as e:
+        raise RuntimeError(f"模型响应格式异常：{dump(data)[:300]}") from e
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+        return "".join(parts)
+    return str(content)
+
+
+def _json_mode_unsupported(err: HttpError) -> bool:
+    """只在错误体明确指向 response_format 时才回退。
+
+    旧实现只要 400 且请求带 response_format 就回退，会把上下文超长、
+    max_tokens 非法等真正的请求错误掩盖成“网关不支持 JSON mode”。
+    work-log 对 prompt_cache_key 的能力探测也是按错误文本判定的。
+    """
+    body = (err.body or "").lower()
+    if "response_format" not in body and "response format" not in body:
+        return False
+    return any(
+        marker in body
+        for marker in (
+            "unsupported",
+            "unrecognized",
+            "unknown",
+            "not supported",
+            "extra field",
+            "unexpected",
+            "invalid",
+            "不支持",
+            "不识别",
+            "未知",
+            "无效",
+            "多余",
+        )
+    )
+
+
 def estimate_tokens(text: str) -> int:
     """粗略估算：中英混排按 3 字符/token；只用于"没有 usage 字段"的兜底与预算预估。"""
     return max(1, len(text) // 3) if text else 0
@@ -137,20 +196,27 @@ class LLM:
         try:
             data = retry(call, attempts=3, what="chat/completions")
         except HttpError as e:
-            if e.status == 400 and "response_format" in payload:
-                # 只探测一次：网关不支持 JSON mode 时，后续所有调用都改用 prompt 约束，
-                # 不再重复付一次 400 往返。这与 work-log 的模型能力缓存同一思路。
+            if e.status == 400 and "response_format" in payload and _json_mode_unsupported(e):
+                # 只有错误体明确说 response_format 不支持时才关闭；并记住能力，
+                # 后续调用不再重复探测。work-log 的 prompt_cache_key 也是这个策略。
                 self._json_mode_rejected = True
-                log("服务端不支持 response_format；后续调用改用 prompt 级 JSON 约束")
+                log(f"服务端不支持 response_format，已缓存该能力：{(e.body or '')[:160]}")
                 payload.pop("response_format", None)
                 data = retry(call, attempts=3, what="chat/completions(no-json)")
             else:
                 raise
 
-        try:
-            content = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError) as e:
-            raise RuntimeError(f"模型响应格式异常：{dump(data)[:300]}") from e
+        content = _message_text(data)
+        # 200 + 空 content 是另一种“模型请求停滞”，work-log 用
+        # responseHasModelContent 显式识别并重试；这里做一次有界重试。
+        empty_retries = 0
+        while not content.strip() and empty_retries < 2:
+            empty_retries += 1
+            self.budget.check()
+            log(f"模型返回空内容，重试第 {empty_retries} 次：{purpose}")
+            data = retry(call, attempts=3, what="chat/completions(empty)")
+            content = _message_text(data)
+
         usage = (data.get("usage") or {}) if isinstance(data, dict) else {}
         tin = int(usage.get("prompt_tokens") or estimate_tokens("\n".join(m.get("content", "") for m in messages)))
         tout = int(usage.get("completion_tokens") or estimate_tokens(content))
