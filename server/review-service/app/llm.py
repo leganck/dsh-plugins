@@ -91,6 +91,9 @@ class LLM:
         self.temperature = temperature
         self.timeout = timeout
         self.json_mode = json_mode
+        # 某些 OpenAI 兼容网关（含公司 newapi）不支持 response_format；
+        # 首次 400 后永久关闭，避免每个 Planner/Reviewer/Verifier 调用都重复 400。
+        self._json_mode_rejected = False
         self.replay = replay
         self.transcript = transcript if transcript is not None else []
         self.budget = budget or Budget()
@@ -119,7 +122,7 @@ class LLM:
             "temperature": self.temperature,
             "max_tokens": max_tokens,
         }
-        if self.json_mode:
+        if self.json_mode and not self._json_mode_rejected:
             payload["response_format"] = {"type": "json_object"}
 
         def call() -> dict:
@@ -135,7 +138,10 @@ class LLM:
             data = retry(call, attempts=3, what="chat/completions")
         except HttpError as e:
             if e.status == 400 and "response_format" in payload:
-                log("服务端不支持 response_format，去掉后重试")
+                # 只探测一次：网关不支持 JSON mode 时，后续所有调用都改用 prompt 约束，
+                # 不再重复付一次 400 往返。这与 work-log 的模型能力缓存同一思路。
+                self._json_mode_rejected = True
+                log("服务端不支持 response_format；后续调用改用 prompt 级 JSON 约束")
                 payload.pop("response_format", None)
                 data = retry(call, attempts=3, what="chat/completions(no-json)")
             else:
@@ -155,9 +161,31 @@ class LLM:
         return content
 
     def chat_json(self, messages: list[dict], purpose: str, max_tokens: int = 2000):
-        """要求 JSON 且解析；解析失败抛 ValueError（调用方决定丢弃还是重试）。"""
+        """要求 JSON 且解析；真实调用失败时做一次“严格 JSON”重试。
+
+        - replay 模式保持原语义：回放内容不合法就直接抛，便于夹具精确断言；
+        - 真实网关不支持 response_format 时，第一次输出可能是 markdown/解释；
+          追加一条明确的修复指令再请求一次，避免 Reviewer/Verifier 静默丢弃。
+        """
         content = self.chat(messages, purpose, max_tokens=max_tokens)
-        return extract_json_object(content)
+        try:
+            return extract_json_object(content)
+        except ValueError as first:
+            if self.replay is not None:
+                raise
+            log(f"{purpose} 输出不是合法 JSON，追加严格指令重试一次")
+            repair = list(messages) + [{
+                "role": "user",
+                "content": (
+                    "你上一条输出不是合法 JSON。请重新回答，只返回一个 JSON 对象；"
+                    "不要 markdown 围栏、不要解释、不要在 JSON 前后加任何文字。"
+                ),
+            }]
+            retry_content = self.chat(repair, f"{purpose}:json-retry", max_tokens=max_tokens)
+            try:
+                return extract_json_object(retry_content)
+            except ValueError as second:
+                raise ValueError(f"{purpose} 输出不是合法 JSON（已重试）: {second}") from first
 
 
 # ---------------------------------------------------------------- 回放夹具
