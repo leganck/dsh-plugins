@@ -15,6 +15,7 @@ jobs:
   plugins:
     name: test ${{ matrix.plugin }}
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +36,7 @@ jobs:
       # 三个插件都是零运行时依赖；装一下只是为了让 pnpm workspace 的 --filter 生效
       - run: pnpm install --no-frozen-lockfile
       - name: 自测（缺 --repo 时由 scripts/ci-fixture.mjs 自动建夹具仓库）
+        timeout-minutes: 6
         run: pnpm --filter "./plugins/${{ matrix.plugin }}" test
 
   market:

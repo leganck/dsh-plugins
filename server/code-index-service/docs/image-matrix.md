@@ -10,14 +10,19 @@
 | `latest-cpu` | CPU 运行时 + bge-base-zh-v1.5 | 默认推荐（开箱即用） |
 | `latest-gpu` | GPU 运行时（CUDA 12 + ORT 1.19.2）+ bge | 大规模建库 / 高并发 |
 | `base-cpu` / `base-gpu` | 只有运行时（无模型） | 配合挂载：jina / 重排 / 自定义模型 |
-| ~~`latest-cpu-rerank` / `latest-gpu-rerank`~~ | **deprecated**（保留 1 个版本周期） | 重排改为挂载 `model-rerank`，缺省自动降级 |
+| `base-<12位Dockerfile哈希>-cpu` / `-gpu` | 不可变运行时底座 | app 镜像直接 `FROM` 它，跳过 apt/pip |
+| ~~`latest-cpu-rerank` / `latest-gpu-rerank`~~ | **已停止发布** | 重排改为挂载 `model-rerank`，缺省自动降级 |
 
 ## 版本 pin（每次 release 才产生）
 
 ```
 server-vX.Y.Z-cpu / server-vX.Y.Z-gpu                    # 应用层
-server-vX.Y.Z-base-cpu / server-vX.Y.Z-base-gpu          # 底座（一般不用）
+base-<12位Dockerfile哈希>-cpu / -gpu                     # 不可变底座（app 构建用）
 ```
+
+发布流程已拆成两层：`publish-image` 先检查 base 指纹标签，已存在就跳过
+`apt + pip install`；app job 只 `FROM base` 并 COPY 当前代码 + 模型。普通服务端/UI
+改动不再重装 CUDA 依赖。
 
 需要"精确到某次构建"时用 **digest**，不再推 `sha-*` 标签。
 
@@ -28,7 +33,7 @@ server-vX.Y.Z-base-cpu / server-vX.Y.Z-base-gpu          # 底座（一般不用
 | `latest-jina-cpu` / `latest-jina-gpu`、`dsh-embed-jina-v*` | 模型不该进镜像矩阵 | `latest-*`（或 `base-*`）+ `compose.jina.yaml` + Release 资产 |
 | `jina-cpu` / `jina-gpu` 简写别名 | 与 `latest-jina-*` 重复 | —— |
 | `sha-*` | 每次构建 +2~4，永不过期 | `server-v*` 或 digest |
-| `latest-*-rerank` | 与模型挂载重复 | `compose.models.yaml` 挂 `model-rerank` |
+| `latest-*-rerank` | 与模型挂载重复；发布矩阵已移除 | `compose.models.yaml` 挂 `model-rerank` |
 
 > 已存在的旧标签仍可拉取（**冻结**，不再更新）。清理需要 `write:packages` 权限：
 > `gh auth refresh -h github.com -s write:packages` 后按下面命令删除，或在 GitHub Packages 页面手动删。
@@ -61,8 +66,8 @@ gh api /users/leganck/packages/container/dsh-embed/versions --paginate \
 ```
 latest-cpu / latest-gpu / latest-cpu-rerank / latest-gpu-rerank   # 通道（rerank 待下线）
 base-cpu / base-gpu                                                # 运行时底座
-server-v0.1.0-{cpu,gpu,cpu-rerank,gpu-rerank}                       # 应用版本 pin
-server-v0.1.0-base-{cpu,gpu}                                        # 底座版本 pin
+server-v0.1.0-{cpu,gpu}                                          # 应用版本 pin
+
 sha-1c212a5-{cpu,gpu,cpu-rerank,gpu-rerank}                         # 与 server-v0.1.0-* 同一版本，无法单独删
 ```
 

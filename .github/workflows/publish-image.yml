@@ -4,20 +4,24 @@ name: publish-image
 #
 # 触发：
 #   - 打 tag（server-v0.1.0 这种）→ 发布正式标签
-#   - 手动 workflow_dispatch → 只构建 + 冒烟；勾 push 才推（默认推 :edge-*）
+#   - 手动 workflow_dispatch → 构建 + 冒烟；勾 push 才推正式 app 标签
 #
-# 分层策略（直接影响拉取体积与构建时间）：
-#   job base  → 只构建运行时底座（cpu / gpu），推 base-*；模型与代码更新时不重建
-#   job app   → FROM base，叠模型层，出 4 个变体：
-#               latest-cpu / latest-gpu / latest-cpu-rerank / latest-gpu-rerank
+# 分层策略（0.15.0 起，给发布提速）：
+#   job base → 只构建运行时底座（cpu / gpu），按 **Dockerfile 指纹**打 tag；
+#              如果 base-<hash>-<flavor> 已存在，直接跳过构建。
+#   job app  → FROM 已发布的 base，只 COPY 当前代码 + 模型；普通服务端/UI 改动
+#              不再重新 apt + pip install。
 #
-# 发布门禁：推之前必须先在容器里跑 `FAKE_EMBED=1 python selftest.py` 通过。
+# 模型仍然内置在 app 镜像里（生产行为不变）；embed-rerank 变体已在 0.14 标为
+# deprecated，0.15 起不再随每次发布构建；需要时手动执行：
+#   docker buildx build --build-arg BASE_IMAGE=... --build-context models=... \
+#     -f Dockerfile --target embed-rerank .
 #
 # 标签策略（2026-10 起，见 docs/image-matrix.md）：
 #   - 通道：latest-{cpu,gpu}（模型内置）、base-{cpu,gpu}（运行时）
 #   - 版本 pin：server-vX.Y.Z-<变体>
-#   - **不再推 sha-***（每次构建都涨、价值低）；精确版本请用 server-v* 或 digest
-#   - latest-*-rerank 变体 **deprecated**：重排模型改为挂载（见 compose.models.yaml），保留 1 个版本周期
+#   - base 指纹：base-<12位 dockerfile hash>-<flavor>（app 使用的不可变底座）
+#   - **不再推 sha-***；精确版本请用 server-v* 或 digest
 
 on:
   push:
@@ -26,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       push:
-        description: '构建完成后推送到 GHCR'
+        description: '构建完成后推送 app/latest 标签（base 指纹标签始终推送）'
         type: boolean
         default: false
 
@@ -45,12 +49,16 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       push: ${{ steps.v.outputs.push }}
+      base_hash: ${{ steps.v.outputs.base_hash }}
     steps:
+      # hashFiles 需要工作区里有 Dockerfile；meta 只跑几秒，checkout 是值得的
+      - uses: actions/checkout@v4
       - id: v
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           DISPATCH_PUSH: ${{ inputs.push }}
+          BASE_HASH: ${{ hashFiles('server/code-index-service/Dockerfile') }}
         run: |
           if [ "$REF_TYPE" = "tag" ]; then
             echo "version=${REF_NAME#server-v}" >> "$GITHUB_OUTPUT"
@@ -59,10 +67,12 @@ jobs:
             echo "version=edge" >> "$GITHUB_OUTPUT"
             echo "push=$DISPATCH_PUSH" >> "$GITHUB_OUTPUT"
           fi
+          echo "base_hash=${BASE_HASH:0:12}" >> "$GITHUB_OUTPUT"
 
   base:
     needs: meta
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -71,13 +81,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
-        if: needs.meta.outputs.push == 'true'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # 只构建底座目标：模型不进这一层，代码/模型更新时这里命中缓存
+
+      # base 是 app 的不可变底座：只有 Dockerfile 依赖层变化时才重建。
+      # 指纹 tag 一旦存在就跳过 apt/pip，这是 5~6 分钟的主要节省点。
+      - id: base
+        name: check base (${{ matrix.flavor }})
+        run: |
+          REF="$IMAGE:base-${{ needs.meta.outputs.base_hash }}-${{ matrix.flavor }}"
+          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: build base (${{ matrix.flavor }})
+        if: steps.base.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
           context: server/code-index-service
@@ -86,33 +108,29 @@ jobs:
           build-args: |
             FLAVOR=${{ matrix.flavor }}
             VERSION=${{ needs.meta.outputs.version }}
-          load: true
-          tags: dsh-embed:base-${{ matrix.flavor }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:base-${{ matrix.flavor }}
+            ${{ env.IMAGE }}:base-${{ needs.meta.outputs.base_hash }}-${{ matrix.flavor }}
           cache-from: type=gha,scope=base-${{ matrix.flavor }}
           cache-to: type=gha,scope=base-${{ matrix.flavor }},mode=max
-      - name: push base (${{ matrix.flavor }})
-        if: needs.meta.outputs.push == 'true'
-        run: |
-          refs="base-${{ matrix.flavor }}"
-          if [ "${{ needs.meta.outputs.version }}" != "edge" ]; then
-            refs="$refs server-v${{ needs.meta.outputs.version }}-base-${{ matrix.flavor }}"
-          fi
-          for r in $refs; do
-            docker tag dsh-embed:base-${{ matrix.flavor }} "$IMAGE:$r"
-            docker push "$IMAGE:$r"
-          done
 
   app:
     needs: [meta, base]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         flavor: [cpu, gpu]
-        target: [embed, embed-rerank]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # 模型缓存：键跟着 fetch 脚本的模型清单变；命中时省掉 ~750 MB 下载
       - uses: actions/cache@v4
@@ -120,35 +138,27 @@ jobs:
           path: server/code-index-service/models
           key: dsh-embed-models-v1-${{ hashFiles('server/code-index-service/scripts/fetch-models.mjs') }}
 
-      - name: fetch models (${{ matrix.target }})
+      - name: fetch models (embed)
         working-directory: server/code-index-service
         run: |
-          if [ "${{ matrix.target }}" = "embed" ]; then
-            node scripts/fetch-models.mjs --only embed
-          else
-            node scripts/fetch-models.mjs --only embed,rerank
-          fi
-          node scripts/fetch-models.mjs --check --only embed,rerank || node scripts/fetch-models.mjs --check --only embed
+          node scripts/fetch-models.mjs --only embed
+          node scripts/fetch-models.mjs --check --only embed
 
-      - name: build (${{ matrix.flavor }} / ${{ matrix.target }})
+      - name: build app (${{ matrix.flavor }})
         uses: docker/build-push-action@v6
         with:
           context: server/code-index-service
-          target: ${{ matrix.target }}
+          file: Dockerfile.app
           platforms: ${{ env.PLATFORM }}
           build-args: |
-            FLAVOR=${{ matrix.flavor }}
+            BASE_IMAGE=${{ env.IMAGE }}:base-${{ needs.meta.outputs.base_hash }}-${{ matrix.flavor }}
             VERSION=${{ needs.meta.outputs.version }}
           build-contexts: |
             models=server/code-index-service/models
           load: true
           tags: dsh-embed:smoke
-          # 两个 cache 作用域：自己的 app 层 + base 依赖层（否则每个 app job 都会把
-          # Dockerfile 的 base 阶段（apt + 1.5GB pip install）重建一遍，GPU 单次 ~5 分钟）
-          cache-from: |
-            type=gha,scope=app-${{ matrix.flavor }}-${{ matrix.target }}
-            type=gha,scope=base-${{ matrix.flavor }}
-          cache-to: type=gha,scope=app-${{ matrix.flavor }}-${{ matrix.target }},mode=max
+          cache-from: type=gha,scope=app-${{ matrix.flavor }}-embed
+          cache-to: type=gha,scope=app-${{ matrix.flavor }}-embed,mode=max
 
       # 门禁：容器内自测（不需要模型，FAKE_EMBED=1），失败就绝不发布
       - name: smoke test (selftest.py in container)
@@ -160,22 +170,12 @@ jobs:
           docker run --rm --entrypoint sh dsh-embed:smoke -c \
             'ls -l /models/model/model*.onnx /models/model/tokenizer.json >/dev/null && echo "模型就位"'
 
-      - uses: docker/login-action@v3
-        if: needs.meta.outputs.push == 'true'
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: push (${{ matrix.flavor }} / ${{ matrix.target }})
+      - name: push (${{ matrix.flavor }} / embed)
         if: needs.meta.outputs.push == 'true'
         run: |
-          # embed-rerank → latest-<flavor>-rerank；embed → latest-<flavor>
-          suffix="${{ matrix.flavor }}"
-          [ "${{ matrix.target }}" = "embed-rerank" ] && suffix="$suffix-rerank"
-          refs="latest-$suffix"
+          refs="latest-${{ matrix.flavor }}"
           if [ "${{ needs.meta.outputs.version }}" != "edge" ]; then
-            refs="$refs server-v${{ needs.meta.outputs.version }}-$suffix"
+            refs="$refs server-v${{ needs.meta.outputs.version }}-${{ matrix.flavor }}"
           fi
           for r in $refs; do
             docker tag dsh-embed:smoke "$IMAGE:$r"
