@@ -688,7 +688,7 @@ ADMIN_HTML = r"""<!doctype html>
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>类型</th><th>引用</th><th>仓库</th><th class="num">块</th><th class="num">向量</th><th>覆盖率</th>
+            <th>仓库</th><th>类型</th><th>引用</th><th class="num">块</th><th class="num">向量</th><th>覆盖率</th>
             <th class="num">占用</th><th>创建</th><th>过期</th><th>保护</th><th>命名空间</th>
           </tr></thead>
           <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
@@ -1002,10 +1002,13 @@ function renderScopes() {
   $('#scopes').innerHTML = rows.map((x) => {
     const pct = Math.round((x.coverage || 0) * 100);
     const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
+    const repoCell = x.repoName
+      ? escapeHtml(x.repoName) + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(x.repoId || '') + '</span>'
+      : '<span class="mono">' + escapeHtml(x.repoId || '—') + '</span>';
     return '<tr>'
+      + '<td>' + repoCell + '</td>'
       + '<td>' + chip(x.kind) + '</td>'
       + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
-      + '<td>' + (x.repoName ? escapeHtml(x.repoName) + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(x.repoId || '') + '</span>' : '<span class="mono">' + escapeHtml(x.repoId || '—') + '</span>') + '</td>'
       + '<td class="num">' + fmtNum(x.chunks) + '</td>'
       + '<td class="num">' + fmtNum(x.vectors) + '</td>'
       + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
