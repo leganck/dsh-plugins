@@ -208,6 +208,7 @@ def _enrich_stats(data):
                 "repoName": known.get("repo_name"),
                 "kind": scope.get("kind") or "main",
                 "ref": scope.get("ref"),
+                "root": scope.get("root"),
                 "chunks": known.get("chunks"),
                 "vectors": known.get("vectors"),
                 "coverage": known.get("coverage"),
@@ -491,6 +492,7 @@ ADMIN_HTML = r"""<!doctype html>
   .scope-table tr.scope-group .caret { display:inline-block; width:14px; color:var(--faint); }
   .scope-table tr.scope-child td:first-child { padding-left:26px; }
   .scope-table tr.scope-child.dup-identity td { background:color-mix(in srgb, var(--bad-bg) 28%, transparent); }
+  .scope-root { display:inline-block; margin-left:6px; padding:1px 6px; border-radius:999px; background:var(--blue-bg); color:var(--blue); font-size:10.5px; white-space:nowrap; }
   .scope-dup-badge { display:inline-flex; align-items:center; padding:1px 6px; border-radius:999px; background:var(--bad-bg); color:var(--bad); font-size:10.5px; margin-left:5px; white-space:nowrap; }
   @media (max-width:760px) {
     .scope-toolbar { display:grid; grid-template-columns:1fr 1fr; }
@@ -714,7 +716,7 @@ ADMIN_HTML = r"""<!doctype html>
         <table class="model-table scope-table">
           <thead><tr>
             <th style="width:32px"><input id="scope-check-all" type="checkbox" title="选择当前页"></th>
-            <th>仓库</th><th>类型</th><th>引用</th><th class="num">块 / 文件</th><th class="num">向量</th><th>覆盖率</th>
+            <th>仓库</th><th>类型</th><th>引用 / 根</th><th class="num">块 / 文件</th><th class="num">向量</th><th>覆盖率</th>
             <th class="num">占用</th><th>最近同步</th><th>命名空间</th><th style="width:150px;text-align:right">操作</th>
           </tr></thead>
           <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
@@ -1080,7 +1082,11 @@ function scopeRowHtml(x, { groupMode = false, extraClass = '' } = {}) {
     + '<td><input type="checkbox" data-scope-select value="' + escapeHtml(x.namespace) + '"' + checked + '></td>'
     + '<td>' + repoCell + variant + dup + '</td>'
     + '<td>' + chip(x.kind) + '</td>'
-    + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
+    + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>')
+      + (x.root
+        ? ' <span class="scope-root" title="只索引了仓库的这个子目录（命名空间带 ~root:，与仓库根的主快照并存）">📁 ' + escapeHtml(x.root) + '</span>'
+        : '')
+      + '</td>'
     + '<td class="num" title="' + fmtNum(x.chunks) + ' 块 / ' + fmtNum(files) + ' 文件">' + fmtNum(x.chunks) + ' / ' + fmtNum(files) + '</td>'
     + '<td class="num">' + fmtNum(x.vectors) + '</td>'
     + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
@@ -2358,8 +2364,8 @@ def _namespaces_from_request(raw, single):
 
 def _hit_scope(repo):
     if not repo:
-        return {"kind": "main", "ref": None}
-    return {"kind": repo["scope_kind"] or "main", "ref": repo["scope_ref"]}
+        return {"kind": "main", "ref": None, "root": None}
+    return {"kind": repo["scope_kind"] or "main", "ref": repo["scope_ref"], "root": repo.get("root_rel")}
 
 
 def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
@@ -2523,6 +2529,7 @@ def repo_status(namespace):
         "scope": {
             "kind": repo["scope_kind"] or "main",
             "ref": repo["scope_ref"],
+            "root": repo.get("root_rel"),
             "commit": repo["commit_sha"],
             "createdAt": repo["created_at"],
         },
@@ -2550,6 +2557,7 @@ def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc",
             "namespace": it["namespace"],
             "kind": scope.get("kind") or "main",
             "ref": scope.get("ref"),
+            "root": scope.get("root"),
             "repoId": it["repo_id"],
             "repoName": it.get("repo_name"),
             "repoUrl": it.get("lineageUrl") or "",
@@ -2612,6 +2620,7 @@ def _scope_from_sync(req, ns=None):
         if isinstance(scope, dict):
             meta = {
                 "kind": scope.get("kind"), "ref": scope.get("ref"),
+                "root": index_store.normalize_root(scope.get("root")) or None,
                 "commit": scope.get("commit"),
             }
         return explicit.strip(), meta
@@ -2633,10 +2642,14 @@ def _scope_from_sync(req, ns=None):
         guess_repo, guess_fp = index_store.namespace_identity(ns)
         repo_id = repo_id or guess_repo
         chunk_fp = chunk_fp or guess_fp
-    canonical = index_store.canonical_namespace(repo_id, chunk_fp, scope.get("kind"), scope.get("ref"))
+    root_rel = index_store.normalize_root(scope.get("root"))
+    canonical = index_store.canonical_namespace(
+        repo_id, chunk_fp, scope.get("kind"), scope.get("ref"), root=root_rel,
+    )
     return canonical, {
         "kind": scope.get("kind"),
         "ref": scope.get("ref"),
+        "root": root_rel or None,
         "commit": scope.get("commit"),
     }
 
@@ -3287,7 +3300,7 @@ class Handler(BaseHTTPRequestHandler):
                     if scope_meta is not None:
                         store.register_scope(
                             effective_ns, scope_meta["kind"], scope_meta["ref"],
-                            commit_sha=scope_meta["commit"],
+                            commit_sha=scope_meta["commit"], root_rel=scope_meta.get("root"),
                         )
                     elif "#" in effective_ns:
                         meta = index_store.parse_scope_namespace(effective_ns)
@@ -3382,7 +3395,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/scopes/resolve":
                 try:
                     ns = index_store.canonical_namespace(
-                        req.get("repoId"), req.get("chunkFp"), req.get("kind"), req.get("ref")
+                        req.get("repoId"), req.get("chunkFp"), req.get("kind"), req.get("ref"),
+                        root=req.get("root"),
                     )
                 except index_store.ScopeFormatError as e:
                     return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})

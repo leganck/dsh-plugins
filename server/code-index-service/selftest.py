@@ -11,7 +11,7 @@
   ⑬ 未知命名空间 → 404                           ⑭ /health 自述
 
 档 3（快照作用域）：
-  ⑮ namespace 规范夹具（scope_format.json 三组 cases）
+  ⑮ namespace 规范夹具（scope_format.json 三组 cases，含 ~root 维度）
   ⑯ scope 注册 / resolve / 列表 / status / health 汇总
   ⑰ legacy 旧格式已废弃（sync 400 legacy-not-supported）
   ⑱ 作用域永久：不再有过期/自动删除（sweep 端点已移除）
@@ -350,19 +350,23 @@ def main():
             fixture = json.load(f)
         bad = []
         for c in fixture["cases"]:
-            got = istore.canonical_namespace(c["repoId"], c["chunkFp"], c["kind"], c["ref"])
+            got = istore.canonical_namespace(
+                c["repoId"], c["chunkFp"], c["kind"], c["ref"], root=c.get("root"),
+            )
             if got != c["expect"]:
                 bad.append((c["expect"], got))
-        check("cases：7 条 canonical namespace 全一致", not bad, bad[:2])
+        check(f"cases：{len(fixture['cases'])} 条 canonical namespace 全一致（含 ~root 维度）", not bad, bad[:2])
         bad = []
         for c in fixture["invalid_cases"]:
             try:
-                istore.canonical_namespace(c["repoId"], c["chunkFp"], c["kind"], c["ref"])
+                istore.canonical_namespace(
+                    c["repoId"], c["chunkFp"], c["kind"], c["ref"], root=c.get("root"),
+                )
                 bad.append((c["reason"], "没有报错"))
             except istore.ScopeFormatError as e:
                 if e.reason != c["reason"]:
                     bad.append((c["reason"], e.reason))
-        check("invalid_cases：6 条 reason 全对", not bad, bad[:2])
+        check(f"invalid_cases：{len(fixture['invalid_cases'])} 条 reason 全对", not bad, bad[:2])
         bad = []
         for c in fixture["legacy_cases"]:
             try:
@@ -401,6 +405,30 @@ def main():
     st, hh = req("GET", "/health")
     check("health 顶层 scopes 汇总", hh.get("scopes", {}).get("byKind", {}).get("branch", 0) >= 1
           and hh["scopes"].get("total", 0) >= 1, hh.get("scopes"))
+
+    print("\n[16b] 子目录根维度（~root，L2）")
+    NS_ROOT = istore.canonical_namespace(REPO, "fp1", "main", "default", root="plugins/dsh-code-index")
+    check("canonical 带 ~root 后缀", NS_ROOT.endswith("~root:ff3b34eb"), NS_ROOT)
+    check("root 归一：反斜杠/尾斜杠等价",
+          istore.canonical_namespace(REPO, "fp1", "main", "default", root="plugins\\dsh-code-index\\") == NS_ROOT)
+    st, sr = scope_sync(NS_ROOT, {"r.java": [("hr1", "class R { }", 1, 3)]}, "root-1",
+                        {"kind": "main", "ref": "default", "root": "plugins/dsh-code-index"},
+                        repo_id=REPO, url=URL2)
+    check("带 root 的 sync 成功", st == 200 and sr.get("namespace") == NS_ROOT, (st, sr))
+    st, lroot = req("GET", f"/v1/scopes?repoId={REPO}&q=plugins")
+    root_item = next((x for x in lroot.get("scopes", []) if x["namespace"] == NS_ROOT), None)
+    check("列表返回 root 相对路径", root_item is not None and root_item.get("root") == "plugins/dsh-code-index",
+          root_item.get("root") if root_item else None)
+    st, rst = req("GET", f"/v1/namespaces/{nsq(NS_ROOT)}/status")
+    check("status 带 root", rst.get("scope", {}).get("root") == "plugins/dsh-code-index", rst.get("scope"))
+    st, res_root = req("POST", "/v1/scopes/resolve",
+                       {"repoId": REPO, "chunkFp": "fp1", "kind": "main", "ref": "default",
+                        "root": "plugins/dsh-code-index"})
+    check("resolve 能算出带 root 的 namespace",
+          st == 200 and res_root.get("exists") is True and res_root.get("namespace") == NS_ROOT, res_root)
+    st, bad_root = req("POST", "/v1/scopes/resolve",
+                       {"repoId": REPO, "chunkFp": "fp1", "kind": "main", "ref": "default", "root": "../x"})
+    check("非法 root → 400 invalid-root", st == 400 and bad_root.get("reason") == "invalid-root", bad_root)
 
     print("\n[17] legacy 旧格式已废弃（同步直接 400，不再入账）")
     LEG = "legacy-demo@fp1"

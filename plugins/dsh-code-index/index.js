@@ -32,7 +32,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch, gitToplevel } from './lib/repo.js'
 import { normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
-import { RepoRegistry, pruneNestedRepos } from './lib/repo-registry.js'
+import { RepoRegistry } from './lib/repo-registry.js'
 import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
 import { resolveAllowedRoots, isInsideRoots } from './lib/workspace-roots.js'
 import z from '@deepseek-ai/schemastery'
@@ -41,7 +41,7 @@ import z from '@deepseek-ai/schemastery'
 const PARSER_GROUPS = GROUP_NAMES.filter((g) => g.startsWith('parser'))
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-22.1'
+export const BUILD = '2026-11-05.2'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -867,16 +867,8 @@ function applyInner(ctx, rawConfig = {}) {
   const stores = new Map()
 /** 已索引仓库注册表：DSH 重启后恢复 watcher，而不是等下一次手动 code_index */
 const repoRegistry = new RepoRegistry(bootDir())
-/**
- * 注册表去重：同一个 git 仓库被"仓库根"和"子目录"各注册一次时，两者共用
- * (repoId, kind, ref)、只有 chunkFp 不同 → 服务端会出现两行同名 main 作用域。
- * 启动时删掉"git 顶层已在注册表里"的子目录条目（子目录内容本来就被根覆盖）。
- */
-;(() => {
-  for (const root of pruneNestedRepos(repoRegistry, gitToplevel)) {
-    ctx.logger?.info?.(`dsh-code-index: 子目录 ${root} 已并入仓库根索引，移出自动同步注册表`)
-  }
-})()
+// L2 起子目录索引是**合法且可区分**的（命名空间带 `~root:<sha8>`），所以不再在启动时
+// 把子目录注册并入仓库根 —— 需要清理历史重复时用 lib/repo-registry.js 的 pruneNestedRepos()。
 /** repoRoot -> AutoSyncEntry；同进程内去重 */
 const autoEntries = new Map()
 let reconcileTimer = null
@@ -983,11 +975,17 @@ let reconcileTimer = null
   /** `remote.scope: "auto"`：按当前 git 分支推导；detached 时解析指向 HEAD 的分支，解析不到才回退 main:default */
   const autoScopeFor = (repoRoot) => {
     const b = gitBranch(repoRoot)
+    // 子目录索引：root = 相对 git 顶层的路径（仓库根为空）。带 root 维度后子目录与仓库根
+    // 可以并存，且控制台能看出该行只覆盖了一个子目录（命名空间 `~root:<sha8>`）。
+    const top = gitToplevel(repoRoot)
+    const rel = top ? path.relative(top, repoRoot) : ''
+    const root = rel && !rel.startsWith('..') ? rel.split(path.sep).join('/') : ''
+    const withRoot = (scope) => (root ? { ...scope, root } : scope)
     // 没有 git 也写到 main:default（repoId 已由本地路径哈希区分），不再产生 legacy 命名空间
-    if (!b.name) return { kind: 'main', ref: 'default' }
+    if (!b.name) return withRoot({ kind: 'main', ref: 'default' })
     // main/master 一律写 main:default；detached（rebase 等）解析出的真分支名照分支处理
-    if (b.name === 'main' || b.name === 'master') return { kind: 'main', ref: 'default' }
-    return { kind: 'branch', ref: b.name }
+    if (b.name === 'main' || b.name === 'master') return withRoot({ kind: 'main', ref: 'default' })
+    return withRoot({ kind: 'branch', ref: b.name })
   }
   const effectiveScopeFor = (repoRoot) =>
     config.remote.scope === 'auto' ? autoScopeFor(repoRoot) : config.remote.scope
@@ -1175,8 +1173,7 @@ let reconcileTimer = null
         const top = gitToplevel(repoRoot)
         const relTop = top ? path.relative(top, repoRoot) : ''
         const subdirHint = (top && relTop && !relTop.startsWith('..'))
-          ? `  提示：索引的是仓库子目录（${relTop}），作用域与仓库根共用；`
-            + `不需要独立索引时只索引根目录 ${top}，可避免列表出现同一仓库的重复指纹行`
+          ? `  子目录索引：root=${relTop.replace(/\\/g, '/')}（命名空间带 ~root:，与仓库根 ${top} 的主快照并存）`
           : null
         const lines = [
           `索引完成（${r.mode}）${repoRoot}`,

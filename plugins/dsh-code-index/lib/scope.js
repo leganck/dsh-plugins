@@ -30,8 +30,8 @@ import crypto from 'node:crypto'
 /** 合法的作用域类型（与 §2 契约一致，追加值必须先改服务端与服务端夹具） */
 export const SCOPE_KINDS = ['main', 'branch', 'pr', 'worktree']
 
-/** 用户可写的作用域配置键 */
-export const SCOPE_CONFIG_KEYS = ['kind', 'ref']
+/** 用户可写的作用域配置键（root：子目录索引根，L2 新增） */
+export const SCOPE_CONFIG_KEYS = ['kind', 'ref', 'root']
 
 /** ref 里的合法字符（其余连续字符压成 "-"） */
 const REF_SAFE_RE = /[^A-Za-z0-9._-]+/g
@@ -117,6 +117,57 @@ export function refToken(kind, ref) {
   return String(Number(text))
 }
 
+/**
+ * 把「索引根相对 git 顶层的子目录路径」归一成命名空间里用的形式。
+ *
+ * 规则与服务端 `index_store.normalize_root()` 逐条一致（同一份 scope_format.json 夹具验收）：
+ * - null/空/`.`/`/` → `''`（仓库根，不写 root 维度）；
+ * - 反斜杠统一成 `/`，去掉空段与 `./`；
+ * - 绝对路径（`/x`、`C:/x`）与 `..` 段 → 抛 `invalid-root`。
+ *
+ * 为什么需要 root 维度：子目录是**同一分支的另一个扫描根**，不是新快照；
+ * 带 `~root:<sha8>` 后子目录与仓库根可以并存，控制台也能看出哪行只覆盖了一个子目录。
+ * @param {unknown} root
+ * @returns {string} 归一后的相对路径（仓库根为空串）
+ */
+export function normalizeRoot(root) {
+  if (root === null || root === undefined) return ''
+  const text = String(root).trim().replace(/\\/g, '/')
+  if (!text || text === '.' || text === './') return ''
+  if (text.startsWith('/')) {
+    throw new ScopeError(`root 必须是相对路径：「${text}」`, { reason: 'invalid-root' })
+  }
+  const parts = text.split('/').filter((p) => p && p !== '.')
+  if (parts.some((p) => p === '..')) {
+    throw new ScopeError(`root 不能包含 '..'：「${text}」`, { reason: 'invalid-root' })
+  }
+  if (parts.length && /^[A-Za-z]:$/.test(parts[0])) {
+    throw new ScopeError(`root 必须是相对路径：「${text}」`, { reason: 'invalid-root' })
+  }
+  return parts.join('/')
+}
+
+/** 子目录根 → 8 位 sha1（命名空间 `~root:` 后缀）；仓库根返回 `''`。 */
+export function rootToken(root) {
+  const rel = normalizeRoot(root)
+  return rel ? sha1Hex(rel).slice(0, 8) : ''
+}
+
+/** 命名空间里的 kind 缩写：worktree 写成 wt（与夹具一致） */
+const NS_KIND = { main: 'main', branch: 'branch', pr: 'pr', worktree: 'wt' }
+
+/**
+ * 客户端版 canonical namespace（与服务端 `canonical_namespace()` 逐条一致）：
+ * `<repoId>@<chunkFp>#<nsKind>:<refToken>[~root:<sha8>]`。
+ *
+ * 正式同步仍由服务端计算，这里只用于本地展示/夹具验收，防止两端规则漂移。
+ */
+export function canonicalNamespace(repoId, chunkFp, kind, ref, root = null) {
+  const base = `${repoId}@${chunkFp}#${NS_KIND[kind] ?? kind}:${refToken(kind, ref)}`
+  const rt = rootToken(root)
+  return rt ? `${base}~root:${rt}` : base
+}
+
 /** legacy 命名空间 = 不含 `#` 的旧格式（`repo@fp`），原样保留、不做规范化 */
 export function isLegacyNamespace(namespace) {
   return typeof namespace === 'string' && namespace.length > 0 && !namespace.includes('#')
@@ -173,14 +224,19 @@ export function validateScope(input) {
     const text = requireRef(kind, input.ref)
     ref = kind === 'pr' ? String(Number(text)) : text
   }
-  return { kind, ref }
+  const root = normalizeRoot(input.root)
+  const out = { kind, ref }
+  if (root) out.root = root
+  return out
 }
 
 /**
- * 一句话展示作用域（日志/工具输出用）：`branch:feat/x`、`pr:1234`。
- * @param {{kind:string, ref:string}} scope
+ * 一句话展示作用域（日志/工具输出用）：`branch:feat/x`、`pr:1234`；
+ * 子目录索引再带 ` ~root:plugins/dsh-code-index`。
+ * @param {{kind:string, ref:string, root?:string}} scope
  */
 export function describeScope(scope) {
   if (!scope || !scope.kind) return '（无作用域）'
-  return `${scope.kind}:${scope.ref}`
+  const base = `${scope.kind}:${scope.ref}`
+  return scope.root ? `${base} ~root:${scope.root}` : base
 }

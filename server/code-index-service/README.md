@@ -219,8 +219,9 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 namespace 规范（`index_store.canonical_namespace()`，与 `scope_format.json` 夹具一致）：
 
 ```
-"{repoId}@{chunkFp}#{kind}:{refToken}"
+"{repoId}@{chunkFp}#{kind}:{refToken}[~root:{sha8}]"
 main → default ; branch → safe(ref)-sha1(ref)[:6] ; pr → int(ref) ; worktree → sha1(ref)[:8]
+root → 子目录索引根相对 git 顶层的路径，sha1(路径)[:8]；仓库根不写这个后缀
 legacy（不含 #）已废弃：sync 直接 400 legacy-not-supported，启动时清理旧行
 ```
 
@@ -236,9 +237,12 @@ POST   /v1/scopes/bulk-delete {"namespaces":[...]}
 
 删除后立即回收该血统内已无任何 chunk 引用的 blob/vector；仍被其他作用域引用的内容不会删。
 
-> **同一仓库出现多行"main"**：通常是同一个 git 仓库被两个根目录各建了一次索引
-> （仓库根 + 子目录），它们的 `(repoId, kind, ref)` 相同、只有 `chunkFp` 不同。
-> 插件会在 `code_index` 输出里提示"索引的是仓库子目录"；不需要独立索引时只索引仓库根即可。
+> **同一仓库的子目录索引（root 维度，0.15.3）**：索引根是 git 仓库的子目录时，客户端在
+> `scope.root` 里带上相对顶层路径，服务端把它编码成命名空间的 `~root:<sha8>` 后缀，
+> 同时把可读路径存进 `repos.root_rel` 供控制台展示。于是「仓库根的主快照」与「子目录的
+> 部分快照」可以并存且不混淆：`/v1/scopes` 每行多一个 `root` 字段，控制台在「引用 / 根」列
+> 显示 📁 子目录。`root` 只接受相对路径（拒绝 `..`、绝对盘符），非法值返回 `400 bad-scope`
+> （`reason: invalid-root`）。
 > 另一个常见来源是 detached HEAD（rebase 期间）—— 旧插件会把 short sha 当分支名写成
 > `#branch:<sha8>`；0.15.2 起改为解析"指向 HEAD 的分支"，解析不到才回退 `main:default`。
 

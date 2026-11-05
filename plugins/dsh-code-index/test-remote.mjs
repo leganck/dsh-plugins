@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-remote-home-'))
 
 const { endpointsOf, createRemoteReranker, createRemoteIndex, RemoteError } = await import('./lib/remote.js')
-const { normalizeNamespace, refToken, safeRef, validateScope } = await import('./lib/scope.js')
+const { normalizeNamespace, refToken, safeRef, validateScope, canonicalNamespace, normalizeRoot } = await import('./lib/scope.js')
 const { apply } = await import('./index.js')
 
 let pass = 0
@@ -184,6 +184,12 @@ console.log('\n[2] 作用域命名规范（scope_format.json 夹具）')
     check(`读取夹具 ${fixturePath}`, false, `本测试需要在 monorepo 里跑：${e.message}`)
   }
   if (fixture) {
+    const badCanon = []
+    for (const c of fixture.cases) {
+      const got = canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref, c.root)
+      if (got !== c.expect) badCanon.push({ expect: c.expect, got })
+    }
+    check(`canonical 夹具 ${fixture.cases.length} 条全一致（含 ~root）`, badCanon.length === 0, JSON.stringify(badCanon[0] ?? ''))
     for (const c of fixture.legacy_cases) {
       const got = normalizeNamespace(c.namespace)
       check(`legacy 命名空间原样保留（${c.namespace.slice(0, 22)}…）`, got === c.expect, `实际 ${got}`)

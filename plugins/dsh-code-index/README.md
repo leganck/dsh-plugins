@@ -237,15 +237,17 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 （内容层按哈希复用不会重嵌，但"这个快照包含哪些块"会被换掉）。0.11.0 用快照命名空间解决：
 
 ```
-canonical_namespace(repoId, chunkFp, kind, ref) = "<repoId>@<chunkFp>#<kind>:<refToken>"
+canonical_namespace(repoId, chunkFp, kind, ref, root?) = "<repoId>@<chunkFp>#<kind>:<refToken>[~root:<sha8>]"
 
 kind=main      -> refToken = "default"                      （ref 忽略；主干只有一份）
 kind=branch    -> refToken = safe(ref) + "-" + sha1(ref)[:6] （safe：非法字符压成 "-"，空则 "x"）
 kind=pr        -> refToken = str(int(ref))                  （ref 必须是纯数字）
 kind=worktree  -> refToken = sha1(ref)[:8]                  （命名空间里写作 #wt:）
+root           -> 子目录索引根相对 git 顶层的路径；sha1(路径)[:8]；仓库根不写
 ```
 
-示例：`r1234@fp1#branch:feat-x-d6e256`、`r1234@fp1#pr:1234`、`r1234@fp1#main:default`。
+示例：`r1234@fp1#branch:feat-x-d6e256`、`r1234@fp1#pr:1234`、`r1234@fp1#main:default`、
+`r1234@fp1#main:default~root:ff3b34eb`（只索引了 `plugins/dsh-code-index` 子目录）。
 
 **命名空间优先级**：`remote.namespace`（显式覆盖）> `remote.scope` 推导 > 旧默认 `<repoId>@<切块指纹>`。
 `remote.namespace` 与 `remote.scope` 同时给时以 `namespace` 为准（`scope` 只用于展示）。
@@ -255,9 +257,11 @@ kind=worktree  -> refToken = sha1(ref)[:8]                  （命名空间里�
 `git for-each-ref --points-at HEAD refs/heads/` 找"指向 HEAD 的分支"：唯一命中就沿用该分支名；
 真找不到（裸 checkout 提交）才回退 `main:default`。
 
-**子目录索引**：同一个 git 仓库的根目录和子目录共用 `(repoId, kind, ref)`，只有 `chunkFp`
-不同 → 服务端会显示两行同名作用域。`code_index` 在检测到"索引的是仓库子目录"时会输出提示；
-不需要独立索引时只索引仓库根即可。
+**子目录索引（0.15.3，root 维度）**：索引根是 git 仓库的子目录时，自动带上 `root`（相对顶层路径），
+命名空间变成 `…~root:<sha8>`。于是「仓库根的主快照」与「子目录的部分快照」可以**并存**、互不覆盖，
+控制台的 `引用 / 根` 列会标出 📁 子目录。想只索引大仓的一个模块（更快、块更少）时用这个；
+想索引整仓就传仓库根。同一仓库里两个根的快照是两份独立作用域，检索时按 `remote.scope`/`readScopes`
+自己选要读哪个。
 
 **多作用域读取**：分支上查询时，通常还想看主干已有的实现 —— 把主干的命名空间放进 `readScopes`，
 `code_search` 会一次检索 `[写作用域, ...readScopes]`（去重保序），服务端结果再按内容哈希合并：

@@ -17,8 +17,10 @@
 ## 2. namespace / scope 规范（硬契约）
 
 ```
-canonical_namespace(repoId, chunkFp, kind, ref) =
-  "{repoId}@{chunkFp}#{kind}:{refToken}"
+canonical_namespace(repoId, chunkFp, kind, ref, root=None) =
+  "{repoId}@{chunkFp}#{kind}:{refToken}[~root:{sha8}]"
+
+root（L2，0.15.3）：子目录索引根相对 git 顶层的路径 → sha1(path)[:8]；仓库根不写后缀。
 
 kind ∈ {main, branch, pr, worktree}
 refToken:
