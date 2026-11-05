@@ -206,7 +206,7 @@ def _enrich_stats(data):
             scope = known.get("scope") or {}
             item.update({
                 "repoName": known.get("repo_name"),
-                "kind": scope.get("kind") or "legacy",
+                "kind": scope.get("kind") or "main",
                 "ref": scope.get("ref"),
                 "chunks": known.get("chunks"),
                 "vectors": known.get("vectors"),
@@ -485,6 +485,13 @@ ADMIN_HTML = r"""<!doctype html>
   .scope-variant { display:inline-flex; align-items:center; padding:1px 6px; border-radius:999px; background:var(--warn-bg); color:var(--warn); font-size:10.5px; margin-left:5px; white-space:nowrap; }
   .scope-table tr.is-selected td { background:color-mix(in srgb,var(--blue-bg) 50%,transparent); }
   .scope-table input[type=checkbox] { cursor:pointer; }
+  /* 按仓库分组：组头可折叠，子行缩进，重复身份标红 */
+  .scope-table tr.scope-group td { background:color-mix(in srgb, var(--bg) 88%, var(--card)); cursor:pointer; user-select:none; font-size:12.5px; }
+  .scope-table tr.scope-group:hover td { background:color-mix(in srgb, var(--bg) 70%, var(--card)); }
+  .scope-table tr.scope-group .caret { display:inline-block; width:14px; color:var(--faint); }
+  .scope-table tr.scope-child td:first-child { padding-left:26px; }
+  .scope-table tr.scope-child.dup-identity td { background:color-mix(in srgb, var(--bad-bg) 28%, transparent); }
+  .scope-dup-badge { display:inline-flex; align-items:center; padding:1px 6px; border-radius:999px; background:var(--bad-bg); color:var(--bad); font-size:10.5px; margin-left:5px; white-space:nowrap; }
   @media (max-width:760px) {
     .scope-toolbar { display:grid; grid-template-columns:1fr 1fr; }
     .scope-toolbar input[type=search] { grid-column:1/-1; max-width:none !important; }
@@ -690,12 +697,13 @@ ADMIN_HTML = r"""<!doctype html>
         <select id="scope-repo-filter" title="按仓库筛选"><option value="">全部仓库</option></select>
         <select id="scope-kind-filter" title="按类型筛选">
           <option value="">全部类型</option><option value="main">main</option><option value="branch">branch</option>
-          <option value="pr">pr</option><option value="worktree">worktree</option><option value="legacy">legacy</option>
+          <option value="pr">pr</option><option value="worktree">worktree</option>
         </select>
         <select id="scope-sort" title="排序">
           <option value="updated_at|desc">最近同步 ↓</option><option value="created_at|desc">创建时间 ↓</option>
           <option value="repo_name|asc">仓库名 ↑</option><option value="chunks|desc">块数 ↓</option>
         </select>
+        <label title="按仓库名把当前页合并成组；组内 main→branch→pr→worktree"><input id="group-repo" type="checkbox" checked> 按仓库分组</label>
         <label><input id="auto" type="checkbox" checked> 每 15 秒自动刷新</label>
         <span class="faint" id="filtered"></span>
         <span class="spacer"></span>
@@ -1048,6 +1056,91 @@ function updateScopeSelection() {
     btn.textContent = selected.length ? ('删除所选（' + selected.length + '）') : '删除所选';
   }
 }
+const SCOPE_KIND_ORDER = { main: 0, branch: 1, pr: 2, worktree: 3 };
+const SCOPE_GROUP_COLLAPSED = new Set();
+function scopeGroupName(x) { return x.repoName || x.repoId || '（未知仓库）'; }
+function scopeRowHtml(x, { groupMode = false, extraClass = '' } = {}) {
+  const pct = Math.round((x.coverage || 0) * 100);
+  const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
+  const repoCell = groupMode
+    ? '<span class="faint mono" style="font-size:11px" title="' + escapeHtml(x.repoId || '') + '">└ ' + escapeHtml(x.repoId || '—') + '</span>'
+    : (x.repoName
+      ? '<span class="scope-repo" title="' + escapeHtml(x.repoName + ' · ' + x.repoId) + '">' + escapeHtml(x.repoName) + '</span>'
+      : '<span class="mono scope-repo" title="' + escapeHtml(x.repoId || '') + '">' + escapeHtml(x.repoId || '—') + '</span>');
+  const variant = Number(x.variantCount || 1) > 1
+    ? '<span class="scope-variant" title="同一仓库/类型/引用存在多个索引指纹，可能来自不同根目录或切块配置">' + x.variantCount + ' 个指纹</span>'
+    : '';
+  const dup = x.duplicateIdentity
+    ? '<span class="scope-dup-badge" title="同一仓库存在多个 repoId：通常来自读不到 git origin 时回退成路径哈希；删除非 canonical 的那个即可">重复身份</span>'
+    : '';
+  const files = Number(x.files || 0);
+  const checked = SCOPES_SELECTED.has(x.namespace) ? ' checked' : '';
+  const klasses = [checked ? 'is-selected' : '', extraClass || ''].filter(Boolean).join(' ');
+  return '<tr class="' + klasses + '">'
+    + '<td><input type="checkbox" data-scope-select value="' + escapeHtml(x.namespace) + '"' + checked + '></td>'
+    + '<td>' + repoCell + variant + dup + '</td>'
+    + '<td>' + chip(x.kind) + '</td>'
+    + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
+    + '<td class="num" title="' + fmtNum(x.chunks) + ' 块 / ' + fmtNum(files) + ' 文件">' + fmtNum(x.chunks) + ' / ' + fmtNum(files) + '</td>'
+    + '<td class="num">' + fmtNum(x.vectors) + '</td>'
+    + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
+    + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
+    + '<td title="' + absTime(x.updatedAt) + '">' + rel(x.updatedAt) + '</td>'
+    + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span>'
+    + '<button class="copy" data-copy-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
+    + '<td class="scope-actions">'
+    + '<button class="ghost small" data-use-ns="' + escapeHtml(x.namespace) + '">用于检索</button>'
+    + '<button class="ghost small" data-delete-ns="' + escapeHtml(x.namespace) + '" title="删除该作用域及其孤儿内容">删除</button>'
+    + '</td></tr>';
+}
+function scopeGroupHtml(rows) {
+  const byName = new Map();
+  rows.forEach((x) => {
+    const k = scopeGroupName(x);
+    if (!byName.has(k)) byName.set(k, []);
+    byName.get(k).push(x);
+  });
+  const names = [...byName.keys()].sort((a, b) => byName.get(b).length - byName.get(a).length || a.localeCompare(b));
+  return names.map((name) => {
+    const items = byName.get(name).slice().sort((a, b) => {
+      const ka = SCOPE_KIND_ORDER[a.kind] ?? 9;
+      const kb = SCOPE_KIND_ORDER[b.kind] ?? 9;
+      if (ka !== kb) return ka - kb;
+      return Number(b.updatedAt || 0) - Number(a.updatedAt || 0);
+    });
+    const ids = [...new Set(items.map((x) => x.repoId).filter(Boolean))];
+    const dups = items.filter((x) => x.duplicateIdentity).length;
+    const collapsed = SCOPE_GROUP_COLLAPSED.has(name);
+    const chunks = items.reduce((s, x) => s + Number(x.chunks || 0), 0);
+    const head = '<tr class="scope-group" data-group="' + escapeHtml(name) + '"><td colspan="11">'
+      + '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span> <b>' + escapeHtml(name) + '</b>'
+      + ' <span class="faint mono" style="font-size:11px">' + ids.map((v) => escapeHtml(v)).join(', ') + '</span>'
+      + ' <span class="faint">· ' + items.length + ' 条 · ' + fmtNum(chunks) + ' 块</span>'
+      + (dups ? '<span class="scope-dup-badge" title="同一仓库存在多个 repoId（常见于读不到 git origin 时回退路径哈希）">重复身份 ×' + dups + '</span>' : '')
+      + '</td></tr>';
+    if (collapsed) return head;
+    return head + items.map((x) => scopeRowHtml(x, { groupMode: true, extraClass: 'scope-child' + (x.duplicateIdentity ? ' dup-identity' : '') })).join('');
+  }).join('');
+}
+function bindScopeRowEvents() {
+  $$('#scopes input[data-scope-select]').forEach((b) => {
+    b.onchange = () => { if (b.checked) SCOPES_SELECTED.add(b.value); else SCOPES_SELECTED.delete(b.value); updateScopeSelection(); };
+  });
+  $$('[data-copy-ns]').forEach((b) => {
+    b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copyNs); toast('已复制命名空间'); } catch (e) { toast('复制失败（浏览器限制）'); } };
+  });
+  $$('[data-use-ns]').forEach((b) => { b.onclick = () => { $('#test-ns').value = b.dataset.useNs; toast('已选择用于检索'); }; });
+  $$('[data-delete-ns]').forEach((b) => {
+    b.onclick = () => deleteScopes([b.dataset.deleteNs], '删除该作用域？');
+  });
+  $$('tr.scope-group').forEach((tr) => {
+    tr.onclick = () => {
+      const key = tr.dataset.group;
+      if (SCOPE_GROUP_COLLAPSED.has(key)) SCOPE_GROUP_COLLAPSED.delete(key); else SCOPE_GROUP_COLLAPSED.add(key);
+      renderScopes();
+    };
+  });
+}
 function renderScopes() {
   const rows = SCOPES.rows || [];
   $('#scope-count').textContent = '（' + fmtNum(SCOPES.total) + '）';
@@ -1063,46 +1156,14 @@ function renderScopes() {
     updateScopeSelection();
     return;
   }
-  $('#scopes').innerHTML = rows.map((x) => {
-    const pct = Math.round((x.coverage || 0) * 100);
-    const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
-    const repoCell = x.repoName
-      ? '<span class="scope-repo" title="' + escapeHtml(x.repoName + ' · ' + x.repoId) + '">' + escapeHtml(x.repoName) + '</span>'
-      : '<span class="mono scope-repo" title="' + escapeHtml(x.repoId || '') + '">' + escapeHtml(x.repoId || '—') + '</span>';
-    const variant = Number(x.variantCount || 1) > 1
-      ? '<span class="scope-variant" title="同一仓库/类型/引用存在多个索引指纹，可能来自不同根目录或切块配置">' + x.variantCount + ' 个指纹</span>'
-      : '';
-    const files = Number(x.files || 0);
-    const checked = SCOPES_SELECTED.has(x.namespace) ? ' checked' : '';
-    return '<tr class="' + (checked ? 'is-selected' : '') + '">'
-      + '<td><input type="checkbox" data-scope-select value="' + escapeHtml(x.namespace) + '"' + checked + '></td>'
-      + '<td>' + repoCell + variant + '</td>'
-      + '<td>' + chip(x.kind) + '</td>'
-      + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
-      + '<td class="num" title="' + fmtNum(x.chunks) + ' 块 / ' + fmtNum(files) + ' 文件">' + fmtNum(x.chunks) + ' / ' + fmtNum(files) + '</td>'
-      + '<td class="num">' + fmtNum(x.vectors) + '</td>'
-      + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
-      + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
-      + '<td title="' + absTime(x.updatedAt) + '">' + rel(x.updatedAt) + '</td>'
-      + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span>'
-      + '<button class="copy" data-copy-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
-      + '<td class="scope-actions">'
-      + '<button class="ghost small" data-use-ns="' + escapeHtml(x.namespace) + '">用于检索</button>'
-      + '<button class="ghost small" data-delete-ns="' + escapeHtml(x.namespace) + '" title="删除该作用域及其孤儿内容">删除</button>'
-      + '</td></tr>';
-  }).join('');
-  $$('#scopes input[data-scope-select]').forEach((b) => {
-    b.onchange = () => { if (b.checked) SCOPES_SELECTED.add(b.value); else SCOPES_SELECTED.delete(b.value); updateScopeSelection(); };
-  });
-  $$('[data-copy-ns]').forEach((b) => {
-    b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copyNs); toast('已复制命名空间'); } catch (e) { toast('复制失败（浏览器限制）'); } };
-  });
-  $$('[data-use-ns]').forEach((b) => { b.onclick = () => { $('#test-ns').value = b.dataset.useNs; toast('已选择用于检索'); }; });
-  $$('[data-delete-ns]').forEach((b) => {
-    b.onclick = () => deleteScopes([b.dataset.deleteNs], '删除该作用域？');
-  });
+  const grouped = $('#group-repo') ? $('#group-repo').checked : true;
+  $('#scopes').innerHTML = grouped
+    ? scopeGroupHtml(rows)
+    : rows.map((x) => scopeRowHtml(x)).join('');
+  bindScopeRowEvents();
   updateScopeSelection();
 }
+function toggleGroupRepo() { renderScopes(); }
 async function loadScopes() {
   if (SCOPES_INFLIGHT) return SCOPES_INFLIGHT;
   const q = scopeQuery();
@@ -1817,6 +1878,7 @@ $('#scope-repo-filter').onchange = resetScopeOffset;
 $('#scope-kind-filter').onchange = resetScopeOffset;
 $('#scope-sort').onchange = resetScopeOffset;
 $('#scope-page-size').onchange = resetScopeOffset;
+$('#group-repo').onchange = toggleGroupRepo;
 $('#btn-scope-refresh').onclick = loadScopes;
 $('#scope-prev').onclick = () => { if (SCOPES.offset > 0) { SCOPES.offset = Math.max(0, SCOPES.offset - SCOPES.limit); loadScopes(); } };
 $('#scope-next').onclick = () => { if (SCOPES.hasMore) { SCOPES.offset += SCOPES.limit; loadScopes(); } };
@@ -2296,8 +2358,8 @@ def _namespaces_from_request(raw, single):
 
 def _hit_scope(repo):
     if not repo:
-        return {"kind": "legacy", "ref": None}
-    return {"kind": repo["scope_kind"] or "legacy", "ref": repo["scope_ref"]}
+        return {"kind": "main", "ref": None}
+    return {"kind": repo["scope_kind"] or "main", "ref": repo["scope_ref"]}
 
 
 def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
@@ -2459,7 +2521,7 @@ def repo_status(namespace):
         "tag": repo["tag"],
         "repoState": repo["repo_state"],
         "scope": {
-            "kind": repo["scope_kind"] or "legacy",
+            "kind": repo["scope_kind"] or "main",
             "ref": repo["scope_ref"],
             "commit": repo["commit_sha"],
             "createdAt": repo["created_at"],
@@ -2486,10 +2548,12 @@ def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc",
         scope = it.get("scope") or {}
         out.append({
             "namespace": it["namespace"],
-            "kind": scope.get("kind") or "legacy",
+            "kind": scope.get("kind") or "main",
             "ref": scope.get("ref"),
             "repoId": it["repo_id"],
             "repoName": it.get("repo_name"),
+            "repoUrl": it.get("lineageUrl") or "",
+            "duplicateIdentity": bool(it.get("duplicateIdentity")),
             "chunkFp": it["chunk_fp"],
             "revision": it["revision"],
             "commit": scope.get("commit"),
@@ -2535,6 +2599,14 @@ def _scope_from_sync(req, ns=None):
     """
     explicit = req.get("namespace")
     if isinstance(explicit, str) and explicit.strip():
+        ns_str = explicit.strip()
+        if "#" not in ns_str:
+            # 旧格式（无 #）已废弃：不再静默入账，直接 400，
+            # 避免永久作用域里继续堆积无法判 kind 的行。
+            raise index_store.ScopeFormatError(
+                "legacy-not-supported",
+                f"namespace 不含 #（旧格式已废弃）：{ns_str}；请改传 scope={{kind,ref}}",
+            )
         meta = None
         scope = req.get("scope")
         if isinstance(scope, dict):
