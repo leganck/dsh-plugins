@@ -314,6 +314,12 @@ const noIndex = await search.execute({ query: 'x', path: repo }, { cwd: repo })
 check('未建库时提示先建索引', /还没有索引/.test(noIndex.content[0].text), noIndex.content[0].text.slice(0, 80))
 const outside = await search.execute({ query: 'x', path: os.homedir() }, { cwd: repo })
 check('工作空间外的路径被拒绝', /工作空间|允许路径/.test(outside.content[0].text), outside.content[0].text.slice(0, 80))
+// 显式点名工作区外的 git 仓库 → 放行（对齐 Cursor 的“点名即授权”；无需配置文件）
+const outsideGit = fs.mkdtempSync(path.join(os.tmpdir(), 'outside-git-'))
+fs.mkdirSync(path.join(outsideGit, '.git'), { recursive: true })
+const outsideGitOut = await search.execute({ query: 'x', path: outsideGit }, { cwd: repo })
+check('工作区外的 git 仓库：显式点名放行', !/工作空间/.test(outsideGitOut.content[0].text), outsideGitOut.content[0].text.slice(0, 80))
+check('放行后仍要求先建索引', /还没有索引/.test(outsideGitOut.content[0].text), outsideGitOut.content[0].text.slice(0, 80))
 
 // ---------- status_only ----------
 console.log('\n[3] code_index（status_only）')

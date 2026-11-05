@@ -101,18 +101,26 @@ export function resolveAllowedRoots({ workspaceRoot = null, sessionCwd = process
   addRoot(byKey, sessionCwd)
   if (sessionCwd) sources.push('cwd')
 
-  let definitionFile = null
-  try {
-    definitionFile = findWorkspaceDefinition(sessionCwd)
-  } catch {
-    /* ignore */
+  // 定义文件：**会话 cwd 与 workspace 根两个起点都要找**。
+  // 典型场景：单个工作区（如 D:\DeepSeek Project\default workspace）里要引用 D:\Code 下的仓库，
+  // 此时会话 cwd 可能是 DSH profile 目录（不在工作区内），只看 cwd 会找不到定义文件。
+  const definitionFiles = []
+  for (const start of [sessionCwd, workspaceRoot]) {
+    if (!start) continue
+    let file = null
+    try {
+      file = findWorkspaceDefinition(start)
+    } catch {
+      /* ignore */
+    }
+    if (file && !definitionFiles.includes(file)) definitionFiles.push(file)
   }
-  if (definitionFile) {
+  for (const definitionFile of definitionFiles) {
     try {
       const raw = JSON.parse(fs.readFileSync(definitionFile, 'utf8'))
       const def = normalizeWorkspaceDefinition(raw, { baseDir: path.dirname(definitionFile), file: definitionFile })
       for (const r of def.roots) addRoot(byKey, r)
-      sources.push('multiroot')
+      if (!sources.includes('multiroot')) sources.push('multiroot')
     } catch (e) {
       warnings.push(`${definitionFile} 解析失败：${String(e?.message ?? e)}`)
     }
@@ -124,7 +132,8 @@ export function resolveAllowedRoots({ workspaceRoot = null, sessionCwd = process
   return {
     roots: [...byKey.values()],
     sources: [...new Set(sources)],
-    definitionFile,
+    definitionFile: definitionFiles[0] ?? null,
+    definitionFiles,
     warnings,
   }
 }

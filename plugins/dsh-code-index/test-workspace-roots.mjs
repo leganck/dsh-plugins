@@ -79,5 +79,15 @@ try {
 }
 check('不存在目录拒绝', threw2)
 
+console.log('\n[5] 定义文件在 workspace，但会话 cwd 在 workspace 之外（单工作区 + 外部代码）')
+fs.writeFileSync(def, JSON.stringify({ version: 1, roots: [{ path: other }] }))
+const profileCwd = path.join(tmp, 'profile-dir') // 模拟 DSH profile 目录：不在 workspace 下
+fs.mkdirSync(profileCwd, { recursive: true })
+const odd = resolveAllowedRoots({ workspaceRoot: workspace, sessionCwd: profileCwd })
+check('cwd 在 workspace 外也能找到定义文件', odd.definitionFile === def, String(odd.definitionFile))
+check('外部代码目录被放开', isInsideRoots(other, odd.roots), JSON.stringify(odd.roots))
+check('workspace 仍在允许范围', isInsideRoots(workspace, odd.roots))
+check('未声明的目录仍拒绝', !isInsideRoots(outside, odd.roots))
+
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 if (fail) process.exitCode = 1

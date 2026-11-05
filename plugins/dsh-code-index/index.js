@@ -29,7 +29,7 @@ import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strate
 import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 import { normalizeRelPrefix } from './lib/scan.js'
-import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch } from './lib/repo.js'
+import { repoIdentity, gitBranch } from './lib/repo.js'
 import { normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
 import { RepoRegistry } from './lib/repo-registry.js'
@@ -41,7 +41,7 @@ import z from '@deepseek-ai/schemastery'
 const PARSER_GROUPS = GROUP_NAMES.filter((g) => g.startsWith('parser'))
 
 /** 行为变更时递增，写入索引 meta 便于判断库是新是老 */
-export const BUILD = '2026-10-22.1'
+export const BUILD = '2026-11-05.1'
 export const SCHEMA_VERSION = 1
 
 /**
@@ -127,6 +127,11 @@ const REMOTE_DEFAULTS = {
   /** ---- 以下只对 vectorStore: 'remote' 有意义 ---- */
   /** 血统标识覆盖（默认由 git origin URL 推导；fork/镜像想共用一份向量时用它或 lineage） */
   repoId: null,
+  /**
+   * 读不到 git origin（repoId 只能按路径哈希）时是否**拒绝**远端同步。
+   * 默认 false：仅告警并回退本机血统（会与服务端 canonical 血统分裂，慎用）。
+   */
+  strictRepoId: false,
   /** 命名空间覆盖（默认 `<repoId>@<切块指纹>`；给了它的优先级最高） */
   namespace: null,
   /**
@@ -145,6 +150,9 @@ const REMOTE_DEFAULTS = {
   /** 每批上传的正文条数 */
   uploadBatch: 256,
 }
+
+/** 同一仓库「无 git origin」的告警只打一次，避免每次同步刷屏。 */
+const LOCAL_IDENTITY_WARNED = new Set()
 
 /**
  * 用户配置面（0.10.0，remote-only）：只保留 6 个键。
@@ -624,6 +632,9 @@ function normalizeConfig(userRaw = {}) {
   if (cfg.remote.repoId !== null && typeof cfg.remote.repoId !== 'string') {
     throw new ConfigError(`config.remote.repoId 必须是字符串或 null，收到 ${typeof cfg.remote.repoId}`)
   }
+  if (typeof cfg.remote.strictRepoId !== 'boolean') {
+    throw new ConfigError(`config.remote.strictRepoId 必须是布尔值，收到 ${typeof cfg.remote.strictRepoId}`)
+  }
   if (cfg.remote.lineage !== null && typeof cfg.remote.lineage !== 'string') {
     throw new ConfigError(`config.remote.lineage 必须是字符串或 null，收到 ${typeof cfg.remote.lineage}`)
   }
@@ -941,13 +952,50 @@ let reconcileTimer = null
     })
   }
 
-  function assertAllowed(repoRoot, exec) {
+  /**
+   * 工作区外的显式路径是否可信（对齐 Cursor 的「点名即授权」语义）：
+   * - 是 git 仓库（有 .git 目录/文件）→ 可信；
+   * - 或注册表里已建过索引（<DSH_HOME>/code-index/repos.json）。
+   * 只看**调用方显式传的 path**；默认用会话 cwd 时仍受工作区边界约束。
+   */
+  function explicitExternalReason(repoRoot) {
+    try {
+      if (fs.existsSync(path.join(repoRoot, '.git'))) return 'git'
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (repoRegistry.get(path.resolve(repoRoot))) return 'indexed'
+    } catch {
+      /* ignore */
+    }
+    return ''
+  }
+
+  const explicitExternalWarned = new Set()
+
+  function assertAllowed(repoRoot, exec, { explicit = false } = {}) {
     if (exec?.trusted) return
     const info = allowedRootsFor(exec)
     if (isInsideRoots(repoRoot, info.roots)) return
+    if (explicit) {
+      const reason = explicitExternalReason(repoRoot)
+      if (reason) {
+        if (!explicitExternalWarned.has(repoRoot)) {
+          explicitExternalWarned.add(repoRoot)
+          ctx.logger?.info?.(
+            `dsh-code-index: 显式指定工作区外仓库 ${repoRoot}（${reason === 'git' ? 'git 仓库' : '已建过索引'}），按「点名」放行`,
+          )
+        }
+        return
+      }
+    }
     const where = info.definitionFile ? `；多根定义 ${info.definitionFile}` : ''
     throw new Error(
-      `路径不在当前工作空间内：${repoRoot}\n允许路径：${info.roots.join(', ') || '（无）'}${where}`,
+      `路径不在当前工作空间内：${repoRoot}\n允许路径：${info.roots.join(', ') || '（无）'}${where}`
+      + '\n解决办法：① 显式传一个 git 仓库的绝对路径（工作区外也放行）；'
+      + '② 把会话/工作区切到该仓库目录；'
+      + '③ 需要长期多根再用 .dshworkspace.json（可选）：{"version":1,"roots":[{"path":"D:/Code"}]}。',
     )
   }
 
@@ -1056,7 +1104,7 @@ let reconcileTimer = null
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '仓库根目录（绝对路径）。省略则用当前会话工作目录。' },
+        path: { type: 'string', description: '仓库根目录（绝对路径）。省略则用当前会话工作目录。工作区外的 git 仓库也可以显式指定（点名即放行，无需配置文件）。' },
         mode: { type: 'string', enum: ['incremental', 'full'], description: 'full = 先清空再重建；默认 incremental。' },
         status_only: { type: 'boolean', description: '只统计变化数量，不写入索引。' },
         max_embed: {
@@ -1073,7 +1121,7 @@ let reconcileTimer = null
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         if (!fs.existsSync(repoRoot)) return fail(`目录不存在：${repoRoot}`)
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: !!(args.path && String(args.path).trim()) })
         const { store, dbPath } = storeFor(repoRoot)
 
         if (args.status_only) {
@@ -1124,6 +1172,19 @@ let reconcileTimer = null
         const embedder = null
         const keywordOnly = !remoteMode
         const keywordReason = ''
+        // 血统身份：解析一次，repoId 与 payload.url 必须来自**同一次**解析，
+        // 否则会出现「repoId 来自 fork、url 来自 upstream」→ 服务端 lineage 与 repoId 对不上。
+        const identity = remoteMode ? repoIdentity(repoRoot, config.remote.repoId) : null
+        if (identity && identity.source === 'path') {
+          const msg = `仓库 ${repoRoot} 没有可读的 git origin，repoId 只能按路径哈希（${identity.repoId}）：`
+            + '远端索引会形成独立血统，其他机器/目录无法共享同一份向量。'
+            + '修好 git remote，或配置 remote.repoId 指定固定血统。'
+          if (config.remote.strictRepoId) throw new ConfigError(msg)
+          if (!LOCAL_IDENTITY_WARNED.has(repoRoot)) {
+            LOCAL_IDENTITY_WARNED.add(repoRoot)
+            ctx.logger?.warn?.(`dsh-code-index: ${msg}`)
+          }
+        }
         const r = await buildIndex({
           store,
           repoRoot,
@@ -1142,8 +1203,8 @@ let reconcileTimer = null
           remote: remoteMode
             ? {
                 client: getRemoteIndex(),
-                repoId: repoIdOf(repoRoot, config.remote.repoId),
-                url: gitOriginUrl(repoRoot),
+                repoId: identity.repoId,
+                url: identity.url,
                 lineage: config.remote.lineage,
                 // 服务端是 canonical namespace 的唯一实现：客户端不再传本地推导的 namespace。
                 // 只有显式 remote.namespace 才作为输入；否则传 repoId/chunkFp/scope，由服务端计算。
@@ -1339,6 +1400,8 @@ let reconcileTimer = null
       '在本仓库的代码索引里做混合检索（本地关键词 BM25 + 远端语义向量，RRF 融合），返回排好序的「文件:行 + 片段」。'
       + '第一次查询前需要先跑 code_index。适合“XX 逻辑在哪实现 / 哪个文件处理了 YY”这类问题；'
       + '查找确切字符串（日志、错误码原文）用 grep 更快。vectors=off 时退化为纯关键词。'
+      + '触发时机：要改代码但不确定实现在哪个文件/类、或跨模块找入口时，先用 code_map/code_search 定位，再 read 精读；'
+      + '已知确切符号名/文件路径时直接 grep/read，不要绕索引。'
       + '中文自然语言查询请先自行翻译成英文关键词/标识符，或直接中英混合（可先用 code_map/grep 找真实符号名）；纯中文 query 的跨语言召回较弱。',
     isConcurrencySafe: () => true,
     parameters: {
@@ -1348,7 +1411,7 @@ let reconcileTimer = null
           type: 'string',
           description: '自然语言问题或关键词组合。中文查询建议附带英文关键词/标识符（中英混合召回最好）；纯中文的跨语言召回较弱。',
         },
-        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
+        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。工作区外的 git 仓库也可以显式指定（点名即放行）。' },
         top_k: { type: 'integer', description: '返回条数，默认 10。' },
         mode: { type: 'string', enum: ['auto', 'fts', 'vector'], description: '检索通道，默认 auto（混合）。' },
         current_file: {
@@ -1368,7 +1431,7 @@ let reconcileTimer = null
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         // 白名单必须在打开/创建索引库之前校验，否则会在任意路径下建出 .dsh-index
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: !!(args.path && String(args.path).trim()) })
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         if (s.chunks === 0) {
@@ -1546,7 +1609,11 @@ let reconcileTimer = null
           const model = r.rerank.modelFile ? `，${r.rerank.backend}/${r.rerank.modelFile}` : ''
           lines.push(`  重排：${config.rerank}（${r.rerank.candidates} 个候选，${r.rerank.ms} ms${model}${where}）`)
         } else if (r.rerank) {
-          lines.push(`  重排未生效：${r.rerank.reason ?? '未知原因'}`)
+          const why = r.rerank.reason
+            ?? (config.rerank === 'quality' || config.rerank === 'fast'
+              ? '远端未启用重排模型（/health 的 rerank_ready=false）或重排请求失败；把 rerank 设为 off 可消除此提示，或给服务端装 bge-reranker'
+              : '未知原因')
+          lines.push(`  重排未生效：${why}`)
         }
         if (r.remote?.ms) {
           const m = r.remote.ms
@@ -1572,7 +1639,7 @@ let reconcileTimer = null
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
+        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。工作区外的 git 仓库也可以显式指定（点名即放行）。' },
         scan: { type: 'boolean', description: '是否扫描仓库比对新鲜度（默认 true；大仓库约 0.1–1s）。' },
       },
       required: [],
@@ -1582,7 +1649,7 @@ let reconcileTimer = null
     async execute(args, exec) {
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: !!(args.path && String(args.path).trim()) })
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         const remoteMode = config.vectorStore === 'remote'
@@ -1629,7 +1696,15 @@ let reconcileTimer = null
               `  远端索引：revision ${rs.revision}；${rs.chunks} 块 / ${rs.vectors} 向量（覆盖 ${((rs.coverage ?? 0) * 100).toFixed(0)}%）；待嵌 ${rs.pending ?? '?'}`,
               `  远端嵌入：${rs.paused ? '已暂停' : '运行中'}（${rs.rate} 块/s）；血统占用 ${((rs.totalBytes ?? 0) / 1048576).toFixed(0)} MB（向量上限 ${rs.limits?.maxVectorsPerLineage ?? '-'} / 血统）`,
             )
-            if (rs.repoId) lines.push(`  血统：${rs.repoId}（追踪的远端：${normalizeRemoteUrl(gitOriginUrl(repoRoot)) || '无 git（本机血统）'}）`)
+            if (rs.repoId) {
+              const idt = repoIdentity(repoRoot, config.remote.repoId)
+              const src = idt.source === 'path'
+                ? '⚠ 无 git origin，按路径哈希（本机血统，跨机器不共享）'
+                : idt.source === 'override'
+                  ? '配置覆盖 remote.repoId'
+                  : `追踪的远端：${idt.normalizedUrl}`
+              lines.push(`  血统：${rs.repoId}（${src}）`)
+            }
             // 档 3 §4.2：status 响应里的 scope 是 TTL/pinned 的权威（本地配置只知道 ttlDays 意图）
             if (rs.scope && typeof rs.scope === 'object') {
               const scp = rs.scope
@@ -1687,13 +1762,14 @@ let reconcileTimer = null
     name: 'code_map',
     description:
       '仓库的**目录地图**：每个目录多少文件、什么语言为主、多少块、有哪些代表符号（函数/类）。'
-      + '冷启动或不知道代码在哪时先用它定位目录，再针对性 code_search，省一次盲搜来回。'
+      + '冷启动或不知道代码在哪时先用它定位目录，再针对性 code_search，省一次盲搜来回；'
+      + '改需求/修 bug 的第一步（还没定位到文件时）优先用它，已知道文件则直接 read。'
       + '只读本地索引，不做模型推理。需要先跑过 code_index。',
     isConcurrencySafe: () => true,
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
+        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。工作区外的 git 仓库也可以显式指定（点名即放行）。' },
         depth: { type: 'integer', description: '目录层级，默认 2（如 platform/win32/）。' },
         limit: { type: 'integer', description: '最多列多少个目录，默认 24，按块数排序。' },
       },
@@ -1703,7 +1779,7 @@ let reconcileTimer = null
     async execute(args, exec) {
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: !!(args.path && String(args.path).trim()) })
         const { store } = storeFor(repoRoot)
         const s = store.stats()
         if (s.files === 0) {

@@ -207,18 +207,19 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 > 让 main / 分支 / PR / worktree 各写各的快照（见下节）。**不配这些键时行为与 0.10.x 完全一致**，
 > 命名空间仍是 `<repoId>@<切块指纹>`，旧服务端/旧配置零迁移。
 
-### 多根工作空间（0.13+）
+### 路径边界：工作区 / 多根 / 显式点名（0.13+，0.14.1 增强）
 
-不再配置 `roots`。允许路径按以下来源自动推导：
+允许索引/检索的路径按以下来源推导，**默认不需要任何配置文件**：
 
-1. DSH `sandboxPolicy.workspaceRoot`；
+1. DSH `sandboxPolicy.workspaceRoot`（= 当前工作区）；
 2. 当前会话 cwd；
-3. 从 cwd 向上找到的 `.dshworkspace.json`。
-
-多根声明与 dsh-multiroot 插件共用同一份文件：
+3. **显式传入的 `path`**：只要它是 git 仓库（有 `.git`）或已建过索引，即使在工作区外也放行
+   —— 对应 Cursor 里「打开/`@` 一个文件」的点名语义（见下）；
+4. 可选：`.dshworkspace.json`（多根工作区，与 dsh-multiroot 插件同格式），从 **cwd 与 workspaceRoot 两个起点**
+   向上查找并合并；不写这个文件也不影响单工作区用法。
 
 ```json
-// D:/Projects/.dshworkspace.json
+// 可选：D:/Projects/.dshworkspace.json
 {
   "version": 1,
   "roots": [
@@ -229,8 +230,12 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 }
 ```
 
-这样 `D:/Projects` 和 `D:/oss` 都能索引，但不需要在 code-index 的 profile 配置里重复路径。
-没有 workspace/多根信息时只允许当前 cwd，不会退化为任意路径。
+**和 Cursor 的差别**：Cursor 的索引边界就是「你打开的文件夹」（多根也要一个 `.code-workspace`），
+工作区外的文件只能 `@` 引用、不建索引。本插件多给了一条：**显式 `path` 指向 git 仓库即视为授权**，
+所以「单工作区 + 引用别处代码仓库」不需要额外配置——`code_index(path="D:/Code/xxx")` 建一次，
+之后 `code_search(path=...)` 随时可用；不带 `path` 时仍按工作区边界走。
+
+没有 workspace/多根信息时只允许当前 cwd，不会退化为任意路径；非 git、未建索引、又不在工作区内的路径仍会拒绝。
 
 ### 作用域（0.11.0）：main / 分支 / PR / worktree 各写各的快照
 
@@ -453,6 +458,23 @@ advanced:
    以及"本机零重依赖、多人共享一份索引"。
 3. **纯远程没有离线语义检索**：服务端不可达时只剩 BM25（自动冷却 60 s 后重试）。
    要永久纯关键词就把 `vectors` 设为 `off`。
+
+### 血统身份（repoId）怎么算（0.14.1）
+
+`repoId = sha1(归一化 git origin URL)[:12]`，同一仓库的不同克隆/机器算出同一个值。取 URL 的优先级：
+
+1. `remote.repoId`（显式覆盖，最高优先；fork/镜像共用一份向量时用）
+2. `git` CLI：`git -C <repo> config --get remote.origin.url`
+3. **直接解析 `.git/config`**（不依赖 git 二进制；支持 worktree 的 `.git` 文件 + `commondir` 间接寻址）
+4. 以上都拿不到 → **回退 `sha1(绝对路径)`**：这是「本机血统」，跨机器/换目录无法共享
+
+> 历史坑（0.14.1 修复）：旧实现只有 1~2 步，第 2 步失败时**静默**回退路径哈希，导致同一仓库在不同
+> 目录/机器上算出不同 repoId，服务端出现「同一仓库多个血统」、内容重复存储（实测 4 组）。
+> 现在回退到路径哈希会 **`logger.warn` 一次**，并在 `code_index_status` 的血统行标 ⚠；
+> 配 `remote.strictRepoId: true` 可让这种情况直接报错、拒绝远端同步。
+>
+> 修法：`git remote add origin <url>` 后重新 `code_index`；或显式配 `remote.repoId` 固定血统。
+> 服务端残留的旧血统用 `DELETE /v1/scopes/{ns}` 清掉（控制台「作用域」页可见「重复身份」标记）。
 
 ## 文件结构
 
