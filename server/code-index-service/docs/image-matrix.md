@@ -1,7 +1,7 @@
 # 镜像标签矩阵（`ghcr.io/leganck/dsh-embed`）
 
 > 目标：**标签只跟"运行时"增长，不跟"模型"增长。**
-> 模型不进镜像矩阵，走 Release 资产 + 挂载（`compose.models.yaml` / `compose.jina.yaml`）。
+> 模型不进镜像矩阵，走 Release 资产 + 挂载（`deploy/compose.models.yaml` / `deploy/compose.jina.yaml`）。
 
 ## 常驻标签（用户只需要认这几个）
 
@@ -30,10 +30,10 @@ base-<12位Dockerfile哈希>-cpu / -gpu                     # 不可变底座（
 
 | 内容 | 原因 | 替代 |
 |---|---|---|
-| `latest-jina-cpu` / `latest-jina-gpu`、`dsh-embed-jina-v*` | 模型不该进镜像矩阵 | `latest-*`（或 `base-*`）+ `compose.jina.yaml` + Release 资产 |
+| `latest-jina-cpu` / `latest-jina-gpu`、`dsh-embed-jina-v*` | 模型不该进镜像矩阵 | `latest-*`（或 `base-*`）+ `deploy/compose.jina.yaml` + Release 资产 |
 | `jina-cpu` / `jina-gpu` 简写别名 | 与 `latest-jina-*` 重复 | —— |
 | `sha-*` | 每次构建 +2~4，永不过期 | `server-v*` 或 digest |
-| `latest-*-rerank` | 与模型挂载重复；发布矩阵已移除 | `compose.models.yaml` 挂 `model-rerank` |
+| `latest-*-rerank` | 与模型挂载重复；发布矩阵已移除 | `deploy/compose.models.yaml` 挂 `model-rerank` |
 
 > 已存在的旧标签仍可拉取（**冻结**，不再更新）。清理需要 `write:packages` 权限：
 > `gh auth refresh -h github.com -s write:packages` 后按下面命令删除，或在 GitHub Packages 页面手动删。
@@ -94,5 +94,5 @@ docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
 -v "$PWD/models/model-rerank:/models/model-rerank:ro"
 
 # compose 等价写法：
-docker compose -f compose.yaml -f compose.gpu.yaml -f compose.jina.yaml up -d
+docker compose -f deploy/compose.yaml -f deploy/compose.gpu.yaml -f deploy/compose.jina.yaml up -d
 ```

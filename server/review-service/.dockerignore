@@ -7,3 +7,6 @@ models/
 out/
 __pycache__/
 *.pyc
+
+deploy/
+scripts/

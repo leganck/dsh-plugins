@@ -80,7 +80,7 @@ g.prune(worktree)                          # 清理已删除文件
 g.stats()
 ```
 
-## 7. 实测（`spikes/bench_graph.py`，容器内 python:3.11-slim）
+## 7. 实测（`scripts/spikes/bench_graph.py`，容器内 python:3.11-slim）
 
 | 仓库 | 文件 | 符号 | 边 | 建图 | 查询 p50/p95 | 内存 | DB |
 |---|---|---|---|---|---|---|---|
@@ -107,9 +107,9 @@ docker run --rm -v "$PWD":/work -w /work python:3.11-slim \
   sh -c "pip install -q tree-sitter==0.26.0 tree-sitter-language-pack==1.22.1 && python tests/test_graph.py"
 
 # 真实仓库基准
-python spikes/bench_graph.py /path/to/repo
+python scripts/spikes/bench_graph.py /path/to/repo
 
 # 看夹具各语言抽到的符号（调试 query）
-python spikes/inspect_fixture.py
-python spikes/probe_lang_nodes.py groovy path/to/file.groovy
+python scripts/spikes/inspect_fixture.py
+python scripts/spikes/probe_lang_nodes.py groovy path/to/file.groovy
 ```

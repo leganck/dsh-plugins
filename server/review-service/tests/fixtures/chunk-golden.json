@@ -1,7 +1,7 @@
 {
   "meta": {
     "generatedAt": "2026-10-21T02:47:05.620Z",
-    "generator": "spikes/make_chunk_golden.mjs",
+    "generator": "scripts/spikes/make_chunk_golden.mjs",
     "depsDir": "C:\\Users\\you\\AppData\\Local\\dsh-code-index\\embed-deps",
     "node": "v24.17.0",
     "note": "golden 由插件（JS）chunker 生成；Python 版 chunker 的 parity 目标：块数一致、块边界 ≥95% 相同"

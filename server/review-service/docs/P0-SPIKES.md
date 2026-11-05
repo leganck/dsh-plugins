@@ -59,7 +59,7 @@
 | 文件 | **41 个**（JS 13 / Python 18 / Go 10） |
 | 块 | **122 个**，全部走 **AST** 策略（无 heuristic 降级） |
 | 夹具 | `tests/fixtures/chunk-golden.json`，29.4 KB |
-| 生成器 | `spikes/make_chunk_golden.mjs`（可重跑） |
+| 生成器 | `scripts/spikes/make_chunk_golden.mjs`（可重跑） |
 
 说明：本地插件依赖目录已装 `tree-sitter@0.21.1` + java/js/ts/groovy/go/python 语法包（60.6 MB），所以 golden 是多语言 AST 结果，可直接用于 Python 版 chunker 的 parity 测试（块数一致、块边界 ≥95% 相同）。
 
@@ -85,7 +85,7 @@
 
 1. `app/chunker.py`：按 0.26 API 移植 AST 切块，跑 parity（目标 122 块、41 文件全过）；
 2. `app/index_sync.py`：Python 同步客户端（repoState → manifest → 上传）；
-3. `app/graph.py`：把 `spikes/probe_graph.py` 原型产品化（多语言 query + 增量）；
+3. `app/graph.py`：把 `scripts/spikes/probe_graph.py` 原型产品化（多语言 query + 增量）；
 4. `app/repo.py` / `app/gitdiff.py`：镜像 + worktree + 本地 diff；
 5. 接真实 GitLab 影子模式（需你提供内网地址与 token）。
 
@@ -107,7 +107,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.11-slim \
   sh -c "pip install -q tree-sitter==0.26.0 tree-sitter-language-pack==1.22.1 && python tests/parity_chunker.py --repo dsh-plugins=/work"
 ```
 
-下一步：`app/graph.py`（把 `spikes/probe_graph.py` 产品化：补 ts/tsx/groovy query、import→文件映射、增量、图谱 golden）。
+下一步：`app/graph.py`（把 `scripts/spikes/probe_graph.py` 产品化：补 ts/tsx/groovy query、import→文件映射、增量、图谱 golden）。
 
 ## 9. P1 进展（2）：代码图谱完成
 

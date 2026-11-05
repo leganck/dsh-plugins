@@ -103,7 +103,7 @@ docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
   ghcr.io/leganck/dsh-embed:base-gpu
 
 # compose
-docker compose -f compose.yaml -f compose.gpu.yaml -f compose.jina.yaml up -d
+docker compose -f deploy/compose.yaml -f deploy/compose.gpu.yaml -f deploy/compose.jina.yaml up -d
 ```
 
 离线/内网需要"模型内置"时，可本地构建（不推 GHCR）：

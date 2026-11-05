@@ -2,7 +2,7 @@
  * P0 spike：用插件（JS）的 chunker 生成 golden 夹具，供 Python 版 chunker 做 parity 测试。
  *
  * 用法：
- *   node spikes/make_chunk_golden.mjs --deps "%LOCALAPPDATA%\dsh-code-index\embed-deps" \
+ *   node scripts/spikes/make_chunk_golden.mjs --deps "%LOCALAPPDATA%\dsh-code-index\embed-deps" \
  *        --out tests/fixtures/chunk-golden.json
  *
  * 采样策略（保证多语言，且文件不超过 256 KB）：
@@ -100,7 +100,7 @@ for (const pick of picks) {
 const payload = {
   meta: {
     generatedAt: new Date().toISOString(),
-    generator: 'spikes/make_chunk_golden.mjs',
+    generator: 'scripts/spikes/make_chunk_golden.mjs',
     depsDir,
     node: process.version,
     note: 'golden 由插件（JS）chunker 生成；Python 版 chunker 的 parity 目标：块数一致、块边界 ≥95% 相同',

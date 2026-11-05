@@ -33,16 +33,14 @@ code-index-service/
 ├── governor.py      # 后台嵌入：限流、暂停、优先级、进度
 ├── embedder.py      # ONNX 嵌入会话 + 向量标签（tag）
 ├── reranker.py      # 交叉编码器重排
-├── selftest.py      # 不需要模型的自测（FAKE_EMBED=1），248 项
+├── tests/           # selftest.py（不需模型，256 项）+ bench_knn_modes.py
 ├── Dockerfile       # 运行时底座 + 模型变体（base / nomodel / embed / embed-rerank）
 ├── Dockerfile.app   # 应用层：FROM 已发布 base，只 COPY 代码 + 模型（发布快）
 ├── docker-entrypoint.sh  # 拼 CUDA 路径、查设备、校验模型、/data 权限；能降级就降级
 ├── scripts/fetch-models.mjs  # 拉模型 → models/model、models/model-rerank（也支持 --check）
-├── compose.yaml     # 默认部署：GHCR latest-cpu，镜像自带嵌入模型
-├── compose.gpu.yaml # GPU 覆盖层：设备预留 + CUDA providers
-├── compose.build.yaml  # 本地自建（模型走 --build-context，不进主上下文）
-├── .env.example     # HOST_PORT / API_KEY / ORT_THREADS …
-├── deploy/legacy/   # 历史非容器路径（start.sh + 旧 compose），仅参考
+├── deploy/          # 部署文件：compose 5 份 + .env.example + legacy/（历史非容器路径）
+├── docs/            # image-matrix / jina-v2 / scope-tier3
+├── scope_format.json  # namespace 规范夹具（插件 test-remote.mjs 也读它）
 ├── models/          # 构建用模型（.gitignore；embed 194 MB + rerank 531 MB）
 └── /data            # 容器卷：index.db 与 server.log（运行时生成）
 ```
@@ -418,8 +416,8 @@ curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
 ### 三种用法
 
 1. **直接拉 GHCR（推荐）**：上面那段 `docker run`。
-2. **compose**（cpu）：`cp .env.example .env && docker compose up -d`；
-   有 NVIDIA 卡就叠加覆盖层：`docker compose -f compose.yaml -f compose.gpu.yaml up -d`。
+2. **compose**（cpu）：`cp deploy/.env.example deploy/.env && docker compose -f deploy/compose.yaml up -d`；
+   有 NVIDIA 卡就叠加覆盖层：`docker compose -f deploy/compose.yaml -f deploy/compose.gpu.yaml up -d`。
 3. **模型挂载**（推荐：同一个镜像，换模型不重新构建）：
 
    ```bash
@@ -428,22 +426,22 @@ curl -s http://127.0.0.1:18000/health | head -c 300      # ready=true 即可用
 
    # bge + 重排（都从宿主机挂载）
    IMAGE=ghcr.io/leganck/dsh-embed:base-gpu \
-     docker compose -f compose.yaml -f compose.gpu.yaml -f compose.models.yaml up -d
+     docker compose -f deploy/compose.yaml -f deploy/compose.gpu.yaml -f deploy/compose.models.yaml up -d
 
    # jina（同一镜像，只换挂载与几个环境变量）
    IMAGE=ghcr.io/leganck/dsh-embed:base-gpu \
-     docker compose -f compose.yaml -f compose.gpu.yaml -f compose.jina.yaml up -d
+     docker compose -f deploy/compose.yaml -f deploy/compose.gpu.yaml -f deploy/compose.jina.yaml up -d
    ```
 
 4. **自建**（改代码 / 想自己出镜像）：
 
    ```bash
    node scripts/fetch-models.mjs                 # → models/model、models/model-rerank
-   docker compose -f compose.build.yaml up -d --build
+   docker compose -f deploy/compose.build.yaml up -d --build
    # 只出"不含模型"的小镜像：
-   MODEL_TARGET=nomodel docker compose -f compose.build.yaml up -d --build
+   MODEL_TARGET=nomodel docker compose -f deploy/compose.build.yaml up -d --build
    # 离线/内网需要"模型内置"镜像时（embed-jina 仅保留给离线场景，不再发布到 GHCR）：
-   MODEL_TARGET=embed-jina docker compose -f compose.build.yaml up -d --build
+   MODEL_TARGET=embed-jina docker compose -f deploy/compose.build.yaml up -d --build
    ```
 
 ### GPU 的前置与降级行为
@@ -508,7 +506,7 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 ```
 
 流水线：先检查 `base-<Dockerfile哈希>-{cpu,gpu}`，不存在才构建并推 base → app 只 `FROM` 该 base、叠代码与模型（默认只出 cpu/gpu 的 embed；rerank 变体手动构建）→ **每个变体先在容器里跑
-`selftest.py` 与"模型文件在位"检查，通过才推**。首次发布后要在 GitHub → Packages 把
+`tests/selftest.py` 与"模型文件在位"检查，通过才推**。首次发布后要在 GitHub → Packages 把
 `dsh-embed` 设为 **public**（否则拉取需要 `docker login ghcr.io`）。
 
 ### 附录：非容器历史路径
@@ -548,7 +546,7 @@ git tag server-v0.1.0 && git push origin server-v0.1.0   # 触发 .github/workfl
 ## 自测
 
 ```bash
-python selftest.py     # 246 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
+python tests/selftest.py     # 256 项：同步/未变更/缺向量/幂等/嵌入/kNN/增量/GC/409/400/血统隔离/adopt/上限/暂停/gzip
                        # + 档 3：namespace 夹具、scope 注册/resolve/分页列表、永久作用域、
                        #   DELETE 后立即 GC 不误删共享内容、多 scope 去重/来源/权重/等价、bulk-delete、旧 DB 迁移
                        # + P3 simhash：schema 迁移、simhash 存取/非法值、相同/无关相似度、tag 过滤、overlap 计算、
@@ -556,12 +554,12 @@ python selftest.py     # 246 项：同步/未变更/缺向量/幂等/嵌入/kNN/
                        #   reuse=off/diff 不查询、adopt 失败不影响 sync、诊断接口鉴权
 
 # 容器里跑（不需要模型，发布门禁就是这条）
-docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app/selftest.py
+docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app/tests/selftest.py
 ```
 
-> 发布门禁注意：`selftest.py` 会读同目录的 `scope_format.json`（namespace 规范夹具）。
-> **Dockerfile 的 `COPY server.py index_store.py …` 那行必须把它一起拷进 /app**，否则自测 [15] 会显式失败
-> （这是刻意的：夹具没进镜像 = 两端规范可能漂移）。
+> 发布门禁注意：`tests/selftest.py` 会读**服务根目录**的 `scope_format.json`（namespace 规范夹具）。
+> Dockerfile 必须同时拷贝两处：运行期模块 + `scope_format.json` 到 `/app`，`tests/selftest.py` 到 `/app/tests`，
+> 否则自测 [15] 会显式失败（这是刻意的：夹具没进镜像 = 两端规范可能漂移）。
 
 ## 安全
 

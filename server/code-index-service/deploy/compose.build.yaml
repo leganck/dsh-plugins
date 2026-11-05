@@ -3,7 +3,7 @@
 #   1) 先准备模型（只在 baked 目标需要）：
 #        node scripts/fetch-models.mjs            # → models/embed, models/rerank
 #   2) 构建 + 起：
-#        docker compose -f compose.build.yaml up -d --build
+#        docker compose -f deploy/compose.build.yaml up -d --build
 #
 # 选不同的模型组合：
 #   MODEL_TARGET=nomodel        # 不含模型（再用 -v ./models:/models:ro 挂载）

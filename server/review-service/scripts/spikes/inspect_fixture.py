@@ -1,6 +1,6 @@
 """调试：打印 graph-sample 夹具里每个文件的符号（检查各语言 query 是否生效）。
 
-    python spikes/inspect_fixture.py
+    python scripts/spikes/inspect_fixture.py
 """
 
 from __future__ import annotations
