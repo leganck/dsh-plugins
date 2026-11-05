@@ -410,6 +410,10 @@ ADMIN_HTML = r"""<!doctype html>
   .clickable-row { cursor:pointer; }
   .clickable-row:hover td { background:var(--blue-bg); }
   .chip.small { font-size:11px; padding:1px 6px; }
+  .key-spark { width:96px; height:24px; display:block; }
+  .key-row-active td { background:var(--blue-bg); }
+  .key-detail-box { border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:12px; background:var(--card); }
+  .key-detail-box h2 { text-transform:none; letter-spacing:0; font-size:13px; color:var(--text); }
   .stat .sub { color:var(--faint); font-size:11px; margin-left:3px; }
   .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; }
   .metric { min-width:0; }
@@ -647,8 +651,8 @@ ADMIN_HTML = r"""<!doctype html>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>名称</th><th>前缀</th><th>角色 / 权限</th><th>状态</th><th class="num">今日请求</th><th class="num">今日错误</th><th>最后使用</th><th>创建时间</th><th>操作</th></tr></thead>
-          <tbody id="keys"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
+          <thead><tr><th>名称</th><th>前缀</th><th>角色 / 权限</th><th>状态</th><th class="num">今日请求</th><th class="num">今日错误</th><th class="num">请求(7d)</th><th>最后使用</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody id="keys"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div class="faint" style="font-size:11.5px;margin-top:8px">index Key 可调用索引/检索全部接口（sync / chunks / vectors / search / status / scopes），不能进控制台管理。<br>新建 Key 固定为 index 角色；admin 角色仅保留给既有 Key，不再从页面新建。</div>
@@ -671,13 +675,43 @@ ADMIN_HTML = r"""<!doctype html>
       </span></h2>
       <div class="faint" id="stats-meta" style="font-size:11.5px;margin-bottom:8px">加载中…</div>
       <nav class="subtabs" id="stats-sub">
-        <button data-sub="overview" class="active">概览</button>
+        <button data-sub="key" class="active">Key</button>
+        <button data-sub="overview">概览</button>
         <button data-sub="errors">错误</button>
         <button data-sub="usage">用量</button>
         <button data-sub="latency">延迟</button>
       </nav>
       <div class="stats" id="stat-cards" style="margin-top:10px"></div>
     </section>
+
+    <div id="stats-panel-key" class="stats-wrap">
+      <section class="card wide">
+        <h2>Key 用量看板 <span class="tail faint" id="key-board-tip"></span></h2>
+        <div class="stats" id="key-cards"></div>
+        <div class="faint" style="font-size:11.5px;margin:10px 0 6px">每日调用趋势（全部 Key 合计）· 虚线 = 前一日</div>
+        <div class="chart" id="key-trend" style="height:auto"></div>
+      </section>
+      <section class="card wide">
+        <h2>Key 排行 <span class="tail faint">点行查看该 Key 详情</span></h2>
+        <div class="table-controls">
+          <input id="key-q" type="search" placeholder="筛选 Key 名称 / 前缀 / 角色">
+          <select id="key-sort">
+            <option value="requests|desc">请求数 ↓</option>
+            <option value="embedTexts|desc">嵌入文本 ↓</option>
+            <option value="searchCalls|desc">检索次数 ↓</option>
+            <option value="errors|desc">错误数 ↓</option>
+            <option value="latencyAvg|desc">平均延迟 ↓</option>
+            <option value="lastUsedAt|desc">最后使用 ↓</option>
+          </select>
+          <span class="faint" style="font-size:11.5px" id="key-board-count"></span>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Key</th><th>角色</th><th>状态</th><th class="num">请求</th><th>占比</th><th class="num">嵌入</th><th class="num">检索</th><th class="num">重排</th><th class="num">错误率</th><th class="num">平均延迟</th><th>趋势</th><th>最后使用</th></tr></thead>
+          <tbody id="key-board-rows"><tr><td colspan="12" class="empty">加载中…</td></tr></tbody>
+        </table></div>
+        <div id="key-detail"></div>
+      </section>
+    </div>
 
     <div id="stats-panel-overview" class="stats-wrap">
       <section class="card wide">
@@ -1622,8 +1656,9 @@ function renderKeyStats() {
   $('#key-stats').innerHTML = cards.map(([l, n]) => '<div class="stat"><div class="n">' + n + '</div><div class="l">' + l + '</div></div>').join('');
 }
 async function loadKeys() {
-  const r = await api('/v1/admin/keys');
+  const [r, ks] = await Promise.all([api('/v1/admin/keys'), api('/v1/admin/stats/keys?days=7')]);
   if (r.status !== 200) return;
+  if (ks.status === 200 && ks.body) KEYS_STATS = ks.body;
   KEYS = (r.body && r.body.keys) || [];
   LEGACY = !!(r.body && r.body.legacy);
   const note = $('#key-legacy-note');
@@ -1643,15 +1678,19 @@ function renderKeys() {
   const shown = q ? rows.filter((k) => [k.name, k.prefix, k.role].some((v) => String(v || '').toLowerCase().includes(q))) : rows;
   $('#key-filtered').textContent = q ? '匹配 ' + shown.length + ' / ' + rows.length : '';
   if (!shown.length) {
-    $('#keys').innerHTML = '<tr><td colspan="9" class="empty">' + (rows.length ? '没有匹配的 Key' : '还没有 Key。在上方新建后，所有索引/检索请求都需要带 Key。') + '</td></tr>';
+    $('#keys').innerHTML = '<tr><td colspan="10" class="empty">' + (rows.length ? '没有匹配的 Key' : '还没有 Key。在上方新建后，所有索引/检索请求都需要带 Key。') + '</td></tr>';
     return;
   }
+  const usageOf = (id) => ((KEYS_STATS && KEYS_STATS.keys) || []).find((x) => x.keyId === id) || null;
   $('#keys').innerHTML = shown.map((k) => {
     const perm = k.role === 'admin'
       ? '<span class="chip blue">admin</span> <span class="faint" style="font-size:11px">索引 + 控制台</span>'
       : '<span class="chip">index</span> <span class="faint" style="font-size:11px">仅索引/检索</span>';
-    const op = k.legacy ? '<span class="faint" style="font-size:11.5px">只读（env）</span>'
-      : '<button data-toggle="' + k.id + '">' + (k.enabled ? '禁用' : '启用') + '</button> <button class="danger" data-del="' + k.id + '">删除</button>';
+    const u = usageOf(k.id);
+    const usageCell = '<td class="num">' + (u ? fmtNum(u.requests) : '—') + '</td>';
+    const op = (k.legacy ? '<span class="faint" style="font-size:11.5px">只读（env） </span>'
+      : '<button data-toggle="' + k.id + '">' + (k.enabled ? '禁用' : '启用') + '</button> <button class="danger" data-del="' + k.id + '">删除</button> ')
+      + '<button data-usage="' + k.id + '">用量</button>';
     return '<tr>'
       + '<td>' + escapeHtml(k.name || '—') + (k.legacy ? ' <span class="chip blue">legacy</span>' : '') + '</td>'
       + '<td class="mono">' + escapeHtml(k.prefix || '—') + '</td>'
@@ -1659,12 +1698,22 @@ function renderKeys() {
       + '<td>' + (k.enabled ? '<span class="chip ok"><span class="dot"></span>启用</span>' : '<span class="chip bad"><span class="dot"></span>禁用</span>') + '</td>'
       + '<td class="num">' + fmtNum(k.today && k.today.requests) + '</td>'
       + '<td class="num">' + fmtNum(k.today && k.today.errors) + '</td>'
+      + usageCell
       + '<td title="' + absTime(k.lastUsedAt) + '">' + rel(k.lastUsedAt) + '</td>'
       + '<td title="' + absTime(k.createdAt) + '">' + rel(k.createdAt) + '</td>'
       + '<td>' + op + '</td></tr>';
   }).join('');
   $$('[data-toggle]').forEach((b) => { b.onclick = () => toggleKey(Number(b.dataset.toggle)); });
   $$('[data-del]').forEach((b) => { b.onclick = () => deleteKey(Number(b.dataset.del)); });
+  $$('[data-usage]').forEach((b) => {
+    b.onclick = () => {
+      KEY_BOARD.detailId = Number(b.dataset.usage);
+      KEY_BOARD.q = '';
+      showTab('stats');
+      setStatsSub('key');
+      loadStats(STATS_DAYS);
+    };
+  });
 }
 async function createKey() {
   const name = $('#key-name').value.trim();
@@ -1732,7 +1781,10 @@ let STATS_DAYS = 7;
 let STATS = null;
 let STATS_SUMMARY = null;
 let STATS_TIMER = null;
-let STATS_SUB = 'overview';
+let STATS_SUB = 'key';
+let KEYS_STATS = null;
+let lastFullLoadAt = 0;
+const KEY_BOARD = { q: '', sort: 'requests', dir: -1, detailId: null };
 const SCOPE_STAT = { q: '', sort: 'requests', dir: -1, page: 0, size: 10 };
 const EP_VIEW = { q: '', sort: 'errors', dir: -1 };
 const KEY_VIEW = { expanded: false };
@@ -1954,17 +2006,19 @@ function renderRuntime(health, runtime) {
   if (note) note.textContent = '系统/轮询请求（status/scopes/admin）：' + fmtNum(sys.requests) + ' 次，明细可在「日志」查看';
 }
 function setStatsSub(name) {
-  if (!['overview', 'errors', 'usage', 'latency'].includes(name)) name = 'overview';
+  if (!['key', 'overview', 'errors', 'usage', 'latency'].includes(name)) name = 'key';
   STATS_SUB = name;
   $$('#stats-sub button').forEach((b) => b.classList.toggle('active', b.dataset.sub === name));
-  for (const panel of ['overview', 'errors', 'usage', 'latency']) {
+  for (const panel of ['key', 'overview', 'errors', 'usage', 'latency']) {
     const el = $('#stats-panel-' + panel);
     if (el) el.hidden = panel !== name;
   }
   renderStatsPanel();
+  if (name === 'key' && (!KEYS_STATS || Date.now() - lastFullLoadAt > 60000)) loadStats(STATS_DAYS);
 }
 function renderStatsPanel() {
-  if (STATS_SUB === 'errors') renderStatsErrors();
+  if (STATS_SUB === 'key') renderKeyBoard();
+  else if (STATS_SUB === 'errors') renderStatsErrors();
   else if (STATS_SUB === 'usage') { renderScopeTable(); renderKeyTable(); }
   else if (STATS_SUB === 'latency') renderStatsLatency();
 }
@@ -2110,6 +2164,105 @@ function renderStatsLatency() {
     + '<td class="num">' + fmtMs(e.latencyAvg) + '</td><td class="num">' + rateChip(e.errors, e.requests) + '</td></tr>').join('')
     : '<tr><td colspan="5" class="empty">没有数据</td></tr>';
 }
+function sparkline(items, opts) {
+  const o = opts || {};
+  const vals = (items || []).map((x) => Number((o.value ? o.value(x) : x.requests) || 0));
+  if (!vals.length) return '';
+  const W = 92, H = 24, P = 3;
+  const max = Math.max(1, ...vals);
+  const step = vals.length > 1 ? (W - P * 2) / (vals.length - 1) : 0;
+  const Y = (v) => H - P - (v / max) * (H - P * 2);
+  const pts = vals.map((v, i) => (P + i * step).toFixed(1) + ',' + Y(v).toFixed(1)).join(' ');
+  const lastX = (P + (vals.length - 1) * step).toFixed(1);
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="key-spark" preserveAspectRatio="none">'
+    + '<polyline points="' + pts + '" fill="none" stroke="var(--purple)" stroke-width="1.4" stroke-linejoin="round"/>'
+    + '<circle cx="' + lastX + '" cy="' + Y(vals[vals.length - 1]).toFixed(1) + '" r="1.8" fill="var(--purple)"/></svg>';
+}
+function renderKeyBoard() {
+  if (!KEYS_STATS) {
+    $('#key-board-rows').innerHTML = '<tr><td colspan="12" class="empty">加载中…</td></tr>';
+    return;
+  }
+  const d = KEYS_STATS;
+  const counts = d.keyCounts || {};
+  const byDay = d.byDay || [];
+  const today = byDay.length ? byDay[byDay.length - 1] : {};
+  const keys = d.keys || [];
+  const top = keys[0];
+  $('#key-cards').innerHTML = [
+    statCard('Key 总数', fmtNum(counts.total), '<span class="sub">启用 ' + fmtNum(counts.enabled) + ' · 禁用 ' + fmtNum(counts.disabled) + '</span>'),
+    statCard('活跃 Key', fmtNum(counts.active), '<span class="sub">区间内有调用</span>'),
+    statCard('今日请求', fmtNum(today.requests), '<span class="sub">' + escapeHtml(today.day || '') + '</span>'),
+    statCard('今日嵌入文本', fmtNum(today.embedTexts), ''),
+    statCard('Top Key 占比', top ? top.share.toFixed(1) + '%' : '—', top ? '<span class="sub">' + escapeHtml(top.name || ('#' + top.keyId)) + '</span>' : ''),
+    statCard('区间请求', fmtNum((d.totals || {}).requests), '<span class="sub">近 ' + fmtNum(d.days) + ' 天</span>'),
+  ].join('');
+  const trendRows = byDay.map((x) => ({ day: x.day, value: Number(x.requests || 0) }));
+  const prev = trendRows.length > 1 ? trendRows[trendRows.length - 2].value : 0;
+  $('#key-trend').innerHTML = chartSvg(trendRows, {
+    chart: 'key-trend', value: (r) => r.value, color: 'var(--purple)', minMax: 4,
+    yfmt: (v) => fmtNum(Math.round(v)),
+    refLine: prev ? { value: prev, label: '前一日 ' + fmtNum(prev) } : null,
+    title: (r) => r.day + '：' + fmtNum(r.value) + ' 次',
+  });
+  const q = KEY_BOARD.q.toLowerCase();
+  const shown = keys.filter((k) => {
+    if (!q) return true;
+    const hay = ((k.name || '') + ' ' + (k.prefix || '') + ' ' + (k.role || '') + ' #' + k.keyId).toLowerCase();
+    return hay.indexOf(q) >= 0;
+  }).sort((a, b) => (Number(a[KEY_BOARD.sort] || 0) - Number(b[KEY_BOARD.sort] || 0)) * KEY_BOARD.dir);
+  $('#key-board-count').textContent = q ? ('匹配 ' + shown.length + ' / ' + keys.length) : (keys.length + ' 个 Key');
+  $('#key-board-rows').innerHTML = shown.length ? shown.map((k) => {
+    const roleChip = k.role === 'admin' ? '<span class="chip blue">admin</span>'
+      : (k.role === 'legacy' ? '<span class="chip blue">legacy</span>'
+        : (k.role === 'deleted' ? '<span class="chip bad">deleted</span>' : '<span class="chip">index</span>'));
+    const statusChip = k.role === 'deleted' ? '<span class="chip bad">已删除</span>'
+      : (k.enabled ? '<span class="chip ok"><span class="dot"></span>启用</span>' : '<span class="chip bad"><span class="dot"></span>禁用</span>');
+    return '<tr class="clickable-row' + (KEY_BOARD.detailId === k.keyId ? ' key-row-active' : '') + '" data-key="' + k.keyId + '">'
+      + '<td><span class="mono">' + escapeHtml(k.name || ('#' + k.keyId)) + '</span> <span class="faint mono" style="font-size:11px">' + escapeHtml(k.prefix || '') + '</span></td>'
+      + '<td>' + roleChip + '</td><td>' + statusChip + '</td>'
+      + '<td class="num">' + fmtNum(k.requests) + '</td>'
+      + '<td><span class="bar blue" style="width:80px;display:inline-block;vertical-align:middle"><i style="width:' + Math.max(1, k.share).toFixed(1) + '%"></i></span> <span class="faint" style="font-size:11px">' + k.share.toFixed(1) + '%</span></td>'
+      + '<td class="num">' + fmtNum(k.embedTexts) + '</td><td class="num">' + fmtNum(k.searchCalls) + '</td><td class="num">' + fmtNum(k.rerankCalls) + '</td>'
+      + '<td class="num">' + (k.requests ? rateChip(k.errors, k.requests) : '—') + '</td>'
+      + '<td class="num">' + fmtMs(k.latencyAvg) + '</td>'
+      + '<td>' + sparkline(k.byDay || []) + '</td>'
+      + '<td title="' + absTime(k.lastUsedAt) + '">' + rel(k.lastUsedAt) + '</td></tr>';
+  }).join('') : '<tr><td colspan="12" class="empty">没有匹配的 Key</td></tr>';
+  const selected = keys.find((k) => k.keyId === KEY_BOARD.detailId) || null;
+  renderKeyDetail(selected);
+}
+function renderKeyDetail(k) {
+  const el = $('#key-detail');
+  if (!el) return;
+  if (!k) { el.innerHTML = '<div class="faint" style="font-size:12px;margin-top:10px">点上方任意一行，查看该 Key 的每日趋势与端点构成。</div>'; return; }
+  const eps = k.byEndpoint || [];
+  const epMax = Math.max(1, ...eps.map((e) => Number(e.requests || 0)));
+  el.innerHTML = '<div class="key-detail-box">'
+    + '<h2 style="margin-bottom:8px">' + escapeHtml(k.name || ('#' + k.keyId)) + ' 用量 <span class="tail faint">' + escapeHtml(k.prefix || '') + ' · ' + escapeHtml(k.role || '') + ' · 区间 ' + fmtNum(k.requests) + ' 次请求</span></h2>'
+    + '<div class="stats">' + [
+      statCard('请求', fmtNum(k.requests), '<span class="sub">占比 ' + k.share.toFixed(1) + '%</span>'),
+      statCard('嵌入文本', fmtNum(k.embedTexts), ''),
+      statCard('检索 / 重排', fmtNum(k.searchCalls) + ' / ' + fmtNum(k.rerankCalls), ''),
+      statCard('错误率', k.requests ? k.errorRate.toFixed(1) + '%' : '—', '<span class="sub">' + fmtNum(k.errors) + ' 错误</span>'),
+      statCard('平均延迟', fmtMs(k.latencyAvg), '<span class="sub">最大 ' + fmtMs(k.latencyMax) + '</span>'),
+      statCard('最后使用', rel(k.lastUsedAt), ''),
+    ].join('') + '</div>'
+    + '<div class="grid2" style="margin-top:12px">'
+    + '<div><div class="faint" style="font-size:11.5px;margin-bottom:6px">每日请求</div><div class="chart" id="key-detail-trend" style="height:auto"></div></div>'
+    + '<div><div class="faint" style="font-size:11.5px;margin-bottom:6px">端点构成</div><div class="mix">'
+    + (eps.length ? eps.map((e) => {
+      const w = Math.max(1, Math.round((Number(e.requests || 0) / epMax) * 100));
+      return '<div class="row"><span class="faint">' + escapeHtml(e.endpoint) + '</span><span class="bar blue"><i style="width:' + w + '%"></i></span><span class="num">' + fmtNum(e.requests) + ' · ' + fmtMs(e.latencyAvg) + '</span></div>';
+    }).join('') : '<div class="faint">没有端点数据</div>')
+    + '</div></div></div></div>';
+  const trendRows = (k.byDay || []).map((x) => ({ day: x.day, value: Number(x.requests || 0) }));
+  $('#key-detail-trend').innerHTML = chartSvg(trendRows, {
+    chart: 'key-detail', value: (r) => r.value, color: 'var(--blue)', minMax: 2,
+    yfmt: (v) => fmtNum(Math.round(v)),
+    title: (r) => r.day + '：' + fmtNum(r.value) + ' 次',
+  });
+}
 function gotoScopesFor(ns, repo) {
   showTab('scopes');
   const input = $('#filter');
@@ -2148,7 +2301,12 @@ async function loadStats(days) {
   $$('[data-days]').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === STATS_DAYS));
   const meta = $('#stats-meta');
   if (meta) meta.textContent = '加载中…';
-  const [r, h] = await Promise.all([api('/v1/admin/stats?days=' + STATS_DAYS), api('/health')]);
+  const [r, h, ks] = await Promise.all([
+    api('/v1/admin/stats?days=' + STATS_DAYS),
+    api('/health'),
+    api('/v1/admin/stats/keys?days=' + STATS_DAYS),
+  ]);
+  if (ks.status === 200 && ks.body) KEYS_STATS = ks.body;
   if (r.status !== 200 || !r.body) {
     $('#stat-cards').innerHTML = '<div class="empty">统计加载失败（' + r.status + '）</div>';
     if (meta) meta.textContent = '统计加载失败：' + r.status;
@@ -2162,6 +2320,7 @@ async function loadStats(days) {
   renderLatencyTrend();
   renderMix();
   renderRuntime(h.status === 200 ? h.body : null);
+  lastFullLoadAt = Date.now();
   renderStatsPanel();
   if (location.hash === '#stats') startStatsTimer();
 }
@@ -2310,6 +2469,8 @@ $('#tab-stats').addEventListener('click', (e) => {
   }
   const epRow = e.target.closest('#stat-endpoints tr[data-endpoint]');
   if (epRow) { drillLogs(epRow.dataset.endpoint, 'error'); return; }
+  const keyRow = e.target.closest('#key-board-rows tr[data-key]');
+  if (keyRow) { KEY_BOARD.detailId = Number(keyRow.dataset.key); renderKeyBoard(); return; }
   const scopeRow = e.target.closest('#stat-scopes tr[data-namespace]');
   if (scopeRow) { gotoScopesFor(scopeRow.dataset.namespace, scopeRow.dataset.repo); return; }
 });
@@ -2326,6 +2487,11 @@ $('#ep-sort').onchange = () => {
   EP_VIEW.sort = parts[0]; EP_VIEW.dir = Number(parts[1]) || -1; renderStatsErrors();
 };
 $('#btn-key-expand').onclick = () => { KEY_VIEW.expanded = !KEY_VIEW.expanded; renderKeyTable(); };
+$('#key-q').oninput = () => { KEY_BOARD.q = $('#key-q').value; renderKeyBoard(); };
+$('#key-sort').onchange = () => {
+  const parts = $('#key-sort').value.split('|');
+  KEY_BOARD.sort = parts[0]; KEY_BOARD.dir = Number(parts[1]) || -1; renderKeyBoard();
+};
 $('#btn-log-filter').onclick = loadLogs;
 $('#log-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLogs(); });
 $('#log-level').onchange = loadLogs;
@@ -3405,6 +3571,13 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/v1/admin/keys":
             return self._send(200, {"keys": adm.list_keys(), "legacy": bool(API_KEY)})
+        if path == "/v1/admin/stats/keys":
+            q = parse_qs(u.query or "")
+            try:
+                days = int((q.get("days") or ["7"])[0])
+            except (TypeError, ValueError):
+                days = 7
+            return self._send(200, adm.stats_keys(days))
         if path == "/v1/admin/stats/summary":
             q = parse_qs(u.query or "")
             try:
