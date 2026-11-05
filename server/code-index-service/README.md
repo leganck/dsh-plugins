@@ -97,12 +97,13 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/admin/models/activate`、`POST /v1/admin/models/deactivate` | **模型热切换**：`{kind:'embed'|'rerank', dir|name}` 动态加载，无需重启（见下文） |
 | `POST /v1/admin/reset-index` | **清空索引**：`{confirm:'RESET'}` 删除全部作用域/块/向量/正文并 VACUUM（Key/统计保留）；客户端下次同步自动全量重建 |
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
-| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按**仓库·作用域**（业务/系统分类、embed/search/rerank、延迟、**P50/P95**、上期对比）；`days=1/7/30` |
+| `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按**仓库·作用域**/**按端点**（业务/系统分类、embed/search/rerank、延迟、**P50/P95**、上期对比）；`days=1/7/30` |
+| `GET /v1/admin/stats/summary?days=7` | **统计摘要**（控制台 30s 轮询用，轻量）：总量 / 成功率 / 分类 KPI / 端点错误 Top / 延迟分位 / 运行态（块·向量·积压·**ETA**） |
 | `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用（管理员点名 `{from, hashes?}`；旧行为不变） |
 | `GET /v1/lineages/similar?path=&content=&tag=&limit=5` | **simhash 候选诊断**：只返回 `{lineage, namespace, repoId, repoName, similarity, pathSimilarity, contentSimilarity, distance, files, updatedAt}`，**不返回正文**；`path/content` 非法 → 400 `bad-simhash`，缺 `tag` → 400 `tag-required` |
 | `POST /embed` `POST /rerank` | 0.7.0 兼容：只借算力 |
-| `GET /` `/v1/status` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/` 对浏览器（`Accept: text/html`）302 到 `/admin`，对 API 客户端仍返回 JSON（插件 `describe` 契约） |
+| `GET /` `/v1/status` `/health` `/log` | 自述（模型、tag、重排状态、治理状态、作用域概览）。`/health` 免鉴权但**无人认领时只返回最小探活字段**；`/` 对浏览器（`Accept: text/html`）302 到 `/admin`，对 API 客户端仍返回 JSON（插件 `describe` 契约）。`/log?q=&level=&from=&to=&n=` 支持关键字/级别（error/warn）/时间过滤，**仅管理员** |
 | `GET /admin` | **控制台**（单文件 HTML，无外部依赖）：登录页 + 6 个 Tab（概览 / 模型 / API Key / 统计 / 作用域 / 日志）；支持暂停嵌入、清扫、热切换模型、Key 管理、调用统计 |
 
 ### 鉴权：API Key（可多把）+ 控制台会话
@@ -136,17 +137,21 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - **模型**：当前嵌入/重排、已安装模型（本机 `/models` 与 `/data/models` 自动发现）、一键**热切换**、
   可下载模型（进度/取消/重试/重传）、重排启用/关闭。
 - **API Key**：新建（固定 index 角色）、启用/禁用、删除、一次性明文展示、一键测试访问索引服务。
-- **统计**：今日 / 近 7 天 / 近 30 天；8 个 KPI（业务请求、检索/重排、embed 文本、业务成功率、平均延迟、
-  P95、索引操作、活跃 Key，带环比）；每日业务请求堆叠图（检索/索引/嵌入）、每日延迟趋势、业务请求构成；
-  **按仓库 / 作用域**明细（块/向量/覆盖率 + 请求/检索/嵌入/重排/错误率/延迟，Top 15）与按 Key 明细；
-  运行状态 / 配额卡（模型、限速、作用域上限、存储上限、块/向量、**嵌入积压**、业务/系统请求）；
-  自动刷新与 CSV 导出。
-  - **系统/轮询请求**（`status`/`scopes`/`admin` 等，含控制台轮询与健康检查）单独归类，**不进入业务 KPI 与主图**，
-    只在运行状态卡和日志页可见；不再展示原始端点表。
+- **统计**：今日 / 近 7 天 / 近 30 天，四个子页签：
+  - **概览**：8 个 KPI（业务请求、检索/重排、embed 文本、业务成功率、平均延迟、P95、索引操作、
+    活跃 Key，带环比）；SVG 趋势图（**Y 轴刻度 / 前一日参考线 / 300ms 目标线 / 超目标标红**）、业务构成；
+    运行状态 / 配额卡（模型、限速、作用域、存储、块/向量、**嵌入积压 + ETA**、业务/系统请求）。
+  - **错误**：业务错误数/错误率/今日错误/Top 错误端点；每日错误率图（**1% 注意 / 5% 红线**，超线标红）；
+    **按端点表**（请求/错误/错误率/延迟/环比，可搜索、排序）——**点行直接带 `q`+`level=error` 跳日志**。
+  - **用量**：按仓库 / 作用域表（搜索、排序、分页，点行跳作用域页）；按 Key 表（≤2 个 Key 时折叠成一行摘要）。
+  - **延迟**：毫秒桶分布直方图（P50/P95 取桶上界近似）+ 按端点平均延迟排行。
+  - 自动刷新（30s）走 `/v1/admin/stats/summary` **只更新数字**，不整页重绘；「刷新」按钮才拉全量。
+  - **系统/轮询请求**（`status`/`scopes`/`admin` 等，含控制台轮询与健康检查）单独归类，
+    **不进入业务 KPI 与主图**；端点明细在「错误」页签可见。
   - 延迟分位为桶上界近似（`usage_latency` 表按天累加，最多保留 90 天，即"≤X ms"）。
   - **按作用域**用量写 `usage_scope` 表（同样保留 90 天），从本版本开始累计；多作用域检索只计第一个写作用域。
 - **作用域**：永久快照分页表（块/文件/向量/覆盖率/占用/最近同步/命名空间）+ 检索测试。
-- **日志**：服务日志尾部。
+- **日志**：服务日志尾部，支持关键字 / 级别（error/warn）筛选（统计页「错误 → 按端点」可直接带筛选跳转）。
 
 ### 模型下载与热切换（无需重启）
 

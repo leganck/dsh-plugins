@@ -660,6 +660,8 @@ def main():
         auth = {"Authorization": "Bearer test-key-123"}
         st, _ = req("GET", "/v1/scopes", headers=auth)
         check("带 Bearer 的 GET 放行", st == 200, st)
+        st, _ = req("GET", "/log?n=1", headers=auth)
+        check("log：env API_KEY 是 admin 角色，可读日志", st == 200, st)
         st, hf = req("GET", "/health", headers=auth)
         check("带 key 的 health 是完整版（含 spaces/limits）",
               st == 200 and "spaces" in hf and "limits" in hf, list(hf.keys()))
@@ -830,7 +832,10 @@ def main():
     check("统计页含趋势图/导出/运行状态/按作用域", all(k in page for k in (
         "stat-trend", "stat-latency", "stat-mix", "stat-runtime", "stat-scopes",
         "btn-stats-export", "btn-stats-refresh")))
-    check("统计页不再显示原始端点表", "按端点" not in page and "stat-endpoints" not in page)
+    check("统计页含子页签（概览/错误/用量/延迟）", all(k in page for k in (
+        'data-sub="overview"', 'data-sub="errors"', 'data-sub="usage"', 'data-sub="latency"')))
+    check("统计页含端点错误表 + 日志下钻（错误页签）", "stat-endpoints" in page and "按端点" in page)
+    check("日志页含筛选（关键字/级别）", 'id="log-q"' in page and 'id="log-level"' in page)
     check("作用域页含清空索引危险操作", "清空所有作用域" in page and "输入 RESET 确认" in page)
     with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/admin", timeout=10) as _resp:
         _cc = _resp.headers.get("Cache-Control") or ""
@@ -919,6 +924,8 @@ def main():
         created = body
         plain2, kid2 = (created or {}).get("key"), (created or {}).get("id")
         auth2 = {"Authorization": "Bearer " + plain2}
+        st, _ = req("GET", "/log?n=1", headers=auth2)
+        check("log 只允许 admin（index 角色 Key 拒绝 401/403）", st in (401, 403), st)
         for _ in range(3):
             req("POST", "/v1/search", {"namespace": NS_NULL, "query": "统计探针", "k": 1}, headers=auth2)
         req("POST", "/embed", {"texts": ["统计探针 a", "统计探针 b"]}, headers=auth2)
@@ -965,6 +972,44 @@ def main():
         check("usage_scope 表已建",
               server.adm.db.execute("select name from sqlite_master where type='table' and name='usage_scope'").fetchone() is not None)
         check("prevCategories 存在", isinstance(stats.get("prevCategories"), dict))
+
+        # 轻量摘要（P3：控制台 30s 轮询用；不含表格展开）
+        st_sum, summary = req("GET", "/v1/admin/stats/summary?days=7", headers=admin_auth)
+        sm = summary or {}
+        check("summary：轻量接口可用（totals/successRate/categories/byEndpoint）",
+              st_sum == 200 and "totals" in sm and "successRate" in sm
+              and set(sm.get("categories") or {}) == {"retrieval", "indexing", "embedding", "system"},
+              (st_sum, list(sm)))
+        check("summary：含端点错误 Top + 延迟分位",
+              isinstance(sm.get("byEndpoint"), list) and isinstance(sm.get("topErrorEndpoints"), list)
+              and "latency" in sm, list(sm))
+        check("summary：prevCategories 存在", isinstance(sm.get("prevCategories"), dict))
+        smrt = sm.get("runtime") or {}
+        check("summary：运行态含积压/ETA/存储/作用域",
+              all(k in smrt for k in ("backlog", "etaSeconds", "chunks", "vectors", "scopes", "totalBytes")),
+              smrt)
+
+        # /log 过滤（P1：统计页点端点 → 带筛选看日志）
+        with open(server.LOG_PATH, "a", encoding="utf-8") as _lf:
+            _lf.write("[23:59:59] selftest probe: sync failed with 409 conflict\n")
+            _lf.write("[23:59:59] selftest probe: normal line\n")
+        st, lb = req("GET", "/log?n=5", headers=admin_auth)
+        check("log 尾巴返回 lines + scanned/filters 元信息",
+              st == 200 and isinstance(lb.get("lines"), list) and "scanned" in lb and "filters" in lb,
+              (st, list(lb or {})))
+        st, lb = req("GET", "/log?q=selftest%20probe&n=5", headers=admin_auth)
+        check("log q 过滤：只返回命中的行",
+              st == 200 and lb.get("matched") == 2
+              and all("selftest probe" in line for line in (lb.get("lines") or [])), lb.get("matched"))
+        st, lb = req("GET", "/log?q=selftest%20probe&level=error&n=5", headers=admin_auth)
+        check("log level=error 过滤：命中里只剩错误行",
+              st == 200 and lb.get("matched") == 1
+              and all("409" in line or "failed" in line for line in (lb.get("lines") or [])), lb)
+        st, lb = req("GET", "/log?from=00:00:00&to=23:59:58&n=5", headers=admin_auth)
+        check("log from/to 时间过滤可用（返回 200 且不报错）", st == 200, st)
+        with open(server.LOG_PATH, "a", encoding="utf-8") as _lf:
+            _lf.write("[23:59:59] selftest probe cleanup\n")
+
         server.adm.flush()
         check("flush 后可读（stats 持久化入口）", True, "")
         req("DELETE", f"/v1/admin/keys/{kid2}", headers=admin_auth)

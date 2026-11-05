@@ -49,6 +49,7 @@ import hmac
 import json
 import os
 import threading
+import re
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -151,6 +152,22 @@ def _stats_category(group):
         if group in groups:
             return category
     return "system"
+
+
+def _category_totals(by_endpoint):
+    """按端点列表聚合成 {retrieval/indexing/embedding/system}（含延迟加权平均）。"""
+    cats = {name: {"requests": 0, "errors": 0, "latencySum": 0.0} for name in STATS_CATEGORY_GROUPS}
+    for item in by_endpoint or []:
+        c = cats[_stats_category(item.get("endpoint") or "")]
+        req = int(item.get("requests") or 0)
+        c["requests"] += req
+        c["errors"] += int(item.get("errors") or 0)
+        c["latencySum"] += float(item.get("latencyAvg") or 0.0) * req
+    return {
+        name: {"requests": slot["requests"], "errors": slot["errors"],
+               "latencyAvg": round(slot["latencySum"] / slot["requests"], 6) if slot["requests"] else 0.0}
+        for name, slot in cats.items()
+    }
 
 
 def _enrich_stats(data):
@@ -373,6 +390,26 @@ ADMIN_HTML = r"""<!doctype html>
   .mix .num { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
   .delta { font-size:11px; margin-left:4px; color:var(--muted); }
   .delta.up { color:var(--bad); } .delta.down { color:var(--ok); }
+  /* ---------------- 统计页：子页签 / SVG 图 / 表格控件 ---------------- */
+  .subtabs { display:flex; gap:4px; margin:2px 0 8px; flex-wrap:wrap; }
+  .stats-wrap { grid-column:1/-1; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .stats-wrap[hidden] { display:none; }
+  .subtabs button { padding:4px 10px; border-radius:999px; font-size:12px; }
+  .subtabs button.active { border-color:var(--blue); color:var(--blue); background:var(--blue-bg); }
+  .svg-chart { width:100%; height:auto; display:block; }
+  .svg-chart .ax { font-size:10px; fill:var(--faint); }
+  .svg-chart rect:hover { opacity:.75; cursor:pointer; }
+  .chart-empty { padding:22px; text-align:center; color:var(--faint); }
+  .hist-row { display:grid; grid-template-columns:74px 1fr 120px; gap:10px; align-items:center; margin:5px 0; font-size:12px; }
+  .hist-row .bar-mini { height:8px; border-radius:4px; background:var(--blue-bg); overflow:hidden; }
+  .hist-row .bar-mini i { display:block; height:100%; background:var(--blue); }
+  .hist-row .num { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .table-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 8px; }
+  .table-controls input[type=search] { max-width:240px; }
+  .pager-mini { display:flex; gap:8px; align-items:center; margin-top:8px; font-size:12px; }
+  .clickable-row { cursor:pointer; }
+  .clickable-row:hover td { background:var(--blue-bg); }
+  .chip.small { font-size:11px; padding:1px 6px; }
   .stat .sub { color:var(--faint); font-size:11px; margin-left:3px; }
   .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; }
   .metric { min-width:0; }
@@ -632,52 +669,116 @@ ADMIN_HTML = r"""<!doctype html>
         <button id="btn-stats-refresh">刷新</button>
         <button id="btn-stats-export">导出 CSV</button>
       </span></h2>
-      <div class="faint" id="stats-meta" style="font-size:11.5px;margin-bottom:10px">加载中…</div>
-      <div class="stats" id="stat-cards"></div>
+      <div class="faint" id="stats-meta" style="font-size:11.5px;margin-bottom:8px">加载中…</div>
+      <nav class="subtabs" id="stats-sub">
+        <button data-sub="overview" class="active">概览</button>
+        <button data-sub="errors">错误</button>
+        <button data-sub="usage">用量</button>
+        <button data-sub="latency">延迟</button>
+      </nav>
+      <div class="stats" id="stat-cards" style="margin-top:10px"></div>
     </section>
-    <section class="card wide">
-      <h2>趋势 <span class="tail faint" id="stat-range-label"></span></h2>
-      <div class="grid2">
-        <div>
-          <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日业务请求（检索 / 索引 / 嵌入，不含系统轮询）</div>
-          <div class="chart" id="stat-trend"></div>
-          <div class="legend"><span class="lg req"></span>检索/重排 <span class="lg idx"></span>索引操作 <span class="lg emb"></span>嵌入</div>
+
+    <div id="stats-panel-overview" class="stats-wrap">
+      <section class="card wide">
+        <h2>趋势 <span class="tail faint" id="stat-range-label"></span></h2>
+        <div class="grid2">
+          <div>
+            <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日业务请求（检索 / 索引 / 嵌入，不含系统轮询）· 虚线 = 前一日</div>
+            <div class="chart" id="stat-trend" style="height:auto"></div>
+          </div>
+          <div>
+            <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日平均延迟 · 虚线 = 目标 300ms（超过的柱子标红）</div>
+            <div class="chart" id="stat-latency" style="height:auto"></div>
+          </div>
         </div>
-        <div>
-          <div class="faint" style="font-size:11.5px;margin-bottom:6px">每日平均延迟</div>
-          <div class="chart" id="stat-latency"></div>
-          <div class="legend"><span class="lg lat"></span>全部请求平均延迟（悬停看当日最大/请求数）</div>
+        <div class="legend"><span class="lg idx"></span>业务请求 / 平均延迟（悬停看当日明细）</div>
+        <div style="margin-top:16px">
+          <div class="faint" style="font-size:11.5px;margin-bottom:6px">业务请求构成</div>
+          <div class="mix" id="stat-mix"></div>
         </div>
-      </div>
-      <div style="margin-top:16px">
-        <div class="faint" style="font-size:11.5px;margin-bottom:6px">业务请求构成</div>
-        <div class="mix" id="stat-mix"></div>
-      </div>
-    </section>
-    <section class="card wide">
-      <h2>运行状态 / 配额 <span class="tail faint" id="stat-runtime-at"></span></h2>
-      <div class="stats" id="stat-runtime"></div>
-      <div class="toolbar" style="margin:12px 0 0">
-        <button data-goto="models">模型页</button>
-        <button data-goto="scopes">作用域页</button>
-        <span class="faint" id="stat-system-note" style="font-size:11.5px"></span>
-      </div>
-    </section>
-    <section class="card wide">
-      <h2>按仓库 / 作用域 <span class="tail faint" id="stat-scope-tip"></span></h2>
-      <div class="table-wrap"><table>
-        <thead><tr><th>仓库 / 作用域</th><th>类型</th><th class="num">块 / 向量</th><th class="num">请求</th><th class="num">检索</th><th class="num">嵌入</th><th class="num">重排</th><th class="num">错误率</th><th class="num">平均延迟</th></tr></thead>
-        <tbody id="stat-scopes"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
-      </table></div>
-      <div class="faint" style="font-size:11.5px;margin-top:8px">按作用域的用量从本版本开始累计；多作用域检索只计第一个写作用域。</div>
-    </section>
-    <section class="card wide">
-      <h2>按 Key</h2>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Key</th><th>角色</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">嵌入</th><th class="num">检索</th><th class="num">重排</th><th class="num">平均延迟</th><th>最后使用</th></tr></thead>
-        <tbody id="stat-keys"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
-      </table></div>
-    </section>
+      </section>
+      <section class="card wide">
+        <h2>运行状态 / 配额 <span class="tail faint" id="stat-runtime-at"></span></h2>
+        <div class="stats" id="stat-runtime"></div>
+        <div class="toolbar" style="margin:12px 0 0">
+          <button data-goto="models">模型页</button>
+          <button data-goto="scopes">作用域页</button>
+          <span class="faint" id="stat-system-note" style="font-size:11.5px"></span>
+        </div>
+      </section>
+    </div>
+
+    <div id="stats-panel-errors" class="stats-wrap" hidden>
+      <section class="card wide">
+        <h2>错误分析 <span class="tail faint" id="err-tip"></span></h2>
+        <div class="stats" id="err-cards"></div>
+        <div class="faint" style="font-size:11.5px;margin:10px 0 6px">每日错误率 · 虚线 = 1% 注意 / 5% 红线；红柱 = 超过红线</div>
+        <div class="chart" id="err-trend" style="height:auto"></div>
+      </section>
+      <section class="card wide">
+        <h2>按端点 <span class="tail faint">点行 → 带筛选跳日志</span></h2>
+        <div class="table-controls">
+          <input id="ep-q" type="search" placeholder="筛端点（如 sync / search）">
+          <select id="ep-sort">
+            <option value="errors|desc">错误数 ↓</option>
+            <option value="errorRate|desc">错误率 ↓</option>
+            <option value="requests|desc">请求数 ↓</option>
+            <option value="latencyAvg|desc">平均延迟 ↓</option>
+          </select>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>端点</th><th class="num">请求</th><th class="num">错误</th><th class="num">错误率</th><th class="num">平均延迟</th><th class="num">环比</th></tr></thead>
+          <tbody id="stat-endpoints"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+        </table></div>
+      </section>
+    </div>
+
+    <div id="stats-panel-usage" class="stats-wrap" hidden>
+      <section class="card wide">
+        <h2>按仓库 / 作用域 <span class="tail faint" id="stat-scope-tip"></span></h2>
+        <div class="table-controls">
+          <input id="scope-stat-q" type="search" placeholder="搜索仓库 / 作用域…">
+          <select id="scope-stat-sort">
+            <option value="requests|desc">请求数 ↓</option>
+            <option value="errors|desc">错误数 ↓</option>
+            <option value="errorRate|desc">错误率 ↓</option>
+            <option value="latencyAvg|desc">平均延迟 ↓</option>
+            <option value="chunks|desc">块数 ↓</option>
+          </select>
+          <span class="faint" style="font-size:11.5px">点行 → 作用域页</span>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>仓库 / 作用域</th><th>类型</th><th class="num">块 / 向量</th><th class="num">请求</th><th class="num">检索</th><th class="num">嵌入</th><th class="num">重排</th><th class="num">错误率</th><th class="num">平均延迟</th></tr></thead>
+          <tbody id="stat-scopes"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
+        </table></div>
+        <div class="pager-mini"><button id="scope-stat-prev">上一页</button><span class="faint" id="scope-stat-page"></span><button id="scope-stat-next">下一页</button></div>
+        <div class="faint" style="font-size:11.5px;margin-top:8px">按作用域的用量从本版本开始累计；多作用域检索只计第一个写作用域。</div>
+      </section>
+      <section class="card wide">
+        <h2>按 Key <span class="tail"><button id="btn-key-expand" style="display:none">展开明细</button></span></h2>
+        <div id="stat-key-summary" class="faint" style="font-size:12px;margin-bottom:6px"></div>
+        <div class="table-wrap" id="stat-key-wrap"><table>
+          <thead><tr><th>Key</th><th>角色</th><th class="num">请求</th><th>占比</th><th class="num">错误</th><th class="num">嵌入</th><th class="num">检索</th><th class="num">重排</th><th class="num">平均延迟</th><th>最后使用</th></tr></thead>
+          <tbody id="stat-keys"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+        </table></div>
+      </section>
+    </div>
+
+    <div id="stats-panel-latency" class="stats-wrap" hidden>
+      <section class="card wide">
+        <h2>延迟分布 <span class="tail faint" id="lat-p50p95"></span></h2>
+        <div class="faint" style="font-size:11.5px;margin-bottom:8px">按毫秒桶统计（含系统轮询）；P50/P95 取桶上界近似（"≤X ms"）</div>
+        <div id="lat-hist"></div>
+      </section>
+      <section class="card wide">
+        <h2>按端点延迟 <span class="tail faint">按平均延迟降序</span></h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>端点</th><th class="num">请求</th><th class="num">错误</th><th class="num">平均延迟</th><th class="num">错误率</th></tr></thead>
+          <tbody id="lat-endpoints"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+        </table></div>
+      </section>
+    </div>
   </section>
 
   <!-- ============================ 作用域 ============================ -->
@@ -754,7 +855,17 @@ ADMIN_HTML = r"""<!doctype html>
   <!-- ============================ 日志 ============================ -->
   <section id="tab-logs" class="panel">
     <section class="card wide">
-      <h2>服务日志 <span class="tail"><button id="btn-logs">刷新</button></span></h2>
+      <h2>服务日志 <span class="tail">
+        <input id="log-q" type="search" placeholder="关键字（如 sync / error）" style="width:170px">
+        <select id="log-level">
+          <option value="">全部级别</option>
+          <option value="error">error</option>
+          <option value="warn">warn</option>
+        </select>
+        <button id="btn-log-filter">筛选</button>
+        <button id="btn-logs">刷新</button>
+      </span></h2>
+      <div class="faint" id="log-meta" style="font-size:11.5px;margin-bottom:8px"></div>
       <pre id="log-lines" class="mono faint" style="margin:0;max-height:70vh;overflow:auto;font-size:11.5px;white-space:pre-wrap;line-height:1.5">加载中…</pre>
     </section>
   </section>
@@ -1619,9 +1730,17 @@ async function deleteKey(id) {
 // ---------------- 统计 ----------------
 let STATS_DAYS = 7;
 let STATS = null;
+let STATS_SUMMARY = null;
 let STATS_TIMER = null;
+let STATS_SUB = 'overview';
+const SCOPE_STAT = { q: '', sort: 'requests', dir: -1, page: 0, size: 10 };
+const EP_VIEW = { q: '', sort: 'errors', dir: -1 };
+const KEY_VIEW = { expanded: false };
 const STATS_CAT_ORDER = ['retrieval', 'indexing', 'embedding'];
 const STATS_CAT_LABEL = { retrieval: '检索/重排', indexing: '索引操作', embedding: '嵌入', system: '系统/轮询' };
+const LAT_TARGET_MS = 300;
+const ERR_WARN_PCT = 1;
+const ERR_BAD_PCT = 5;
 function fmtMs(v) { const n = Number(v || 0); return n > 0 ? Math.round(n) + ' ms' : '—'; }
 function ratePct(errors, requests) { return requests ? (Number(errors || 0) / Number(requests)) * 100 : 0; }
 function rateText(errors, requests) { const r = ratePct(errors, requests); return (requests ? r.toFixed(1) : '0.0') + '%'; }
@@ -1644,18 +1763,77 @@ function sumCats(categories, names) {
   let requests = 0, errors = 0, latencySum = 0;
   for (const name of names) {
     const c = catOf(categories, name);
-    requests += c.requests;
-    errors += c.errors;
-    latencySum += c.latencyAvg * c.requests;
+    requests += c.requests; errors += c.errors; latencySum += c.latencyAvg * c.requests;
   }
   return { requests, errors, latencyAvg: requests ? latencySum / requests : 0 };
 }
 function businessCats(categories) { return sumCats(categories, STATS_CAT_ORDER); }
-function renderStatCards() {
-  const d = STATS || {}; const t = d.totals || {}; const lat = d.latency || {};
-  const cats = d.categories || {}; const prevCats = d.prevCategories || {};
-  const biz = businessCats(cats); const prevBiz = businessCats(prevCats);
-  const retrieval = catOf(cats, 'retrieval'); const indexing = catOf(cats, 'indexing');
+function fmtEta(sec) {
+  const s = Math.max(0, Math.round(Number(sec || 0)));
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒';
+  return Math.floor(s / 3600) + ' 小时 ' + Math.round((s % 3600) / 60) + ' 分';
+}
+function rateChip(errors, requests) {
+  const pct = ratePct(errors, requests);
+  const kind = pct >= ERR_BAD_PCT ? 'bad' : (pct >= ERR_WARN_PCT ? 'warn' : 'ok');
+  return '<span class="chip ' + kind + ' small">' + rateText(errors, requests) + '</span>';
+}
+
+// 通用 SVG 柱状图：Y 轴刻度 + 阈值线 + 参考线 + 异常柱高亮 + 点击（data-chart/day 交给委派处理）
+function chartSvg(rows, opts) {
+  const o = opts || {};
+  if (!rows || !rows.length) return '<div class="chart-empty">没有数据</div>';
+  const W = 720, H = o.height || 150, PL = 54, PR = 12, PT = 12, PB = 20;
+  const vals = rows.map((r) => Number(o.value(r) || 0));
+  const thresholds = (o.thresholds || []).map((t) => ({ value: Number(t.value) || 0, label: t.label || '', color: t.color || 'var(--warn)' }));
+  const ref = o.refLine ? { value: Number(o.refLine.value) || 0, label: o.refLine.label || '' } : null;
+  const rawMax = Math.max(Number(o.minMax || 1), ...vals, ...thresholds.map((t) => t.value), ref ? ref.value : 0);
+  const max = rawMax * 1.05;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const X = (i) => PL + (i + 0.5) * (plotW / rows.length);
+  const Y = (v) => PT + plotH * (1 - Math.min(1, Math.max(0, v / max)));
+  const bw = Math.max(3, Math.min(34, (plotW / rows.length) * 0.62));
+  const parts = [];
+  for (const f of [0, 0.5, 1]) {
+    const v = max * f, yy = Y(v);
+    parts.push('<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + yy.toFixed(1) + '" y2="' + yy.toFixed(1) + '" stroke="var(--line)"' + (f ? ' stroke-dasharray="3 4"' : '') + '/>');
+    const label = o.yfmt ? o.yfmt(v) : fmtNum(Math.round(v));
+    parts.push('<text x="' + (PL - 6) + '" y="' + (yy + 3.5).toFixed(1) + '" text-anchor="end" class="ax">' + escapeHtml(label) + '</text>');
+  }
+  const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
+  rows.forEach((r, i) => {
+    const v = vals[i], yy = Y(v), bh = Math.max(1, H - PB - yy);
+    const bad = o.bad && o.bad(r);
+    parts.push('<rect x="' + (X(i) - bw / 2).toFixed(1) + '" y="' + yy.toFixed(1) + '" width="' + bw.toFixed(1)
+      + '" height="' + bh.toFixed(1) + '" rx="2" fill="' + (bad ? 'var(--bad)' : (o.color || 'var(--purple)'))
+      + '" data-day="' + escapeHtml(String(r.day || '')) + '">'
+      + '<title>' + escapeHtml(o.title ? o.title(r) : (String(r.day || '') + ' · ' + (o.yfmt ? o.yfmt(v) : fmtNum(v)))) + '</title></rect>');
+    if (i % step === 0) {
+      parts.push('<text x="' + X(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle" class="ax">' + escapeHtml(String(r.day || '').slice(5)) + '</text>');
+    }
+  });
+  for (const t of thresholds) {
+    const yy = Y(t.value);
+    parts.push('<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + yy.toFixed(1) + '" y2="' + yy.toFixed(1) + '" stroke="' + t.color + '" stroke-dasharray="5 4"/>');
+    parts.push('<text x="' + (W - PR - 2) + '" y="' + (yy - 3).toFixed(1) + '" text-anchor="end" class="ax" fill="' + t.color + '">' + escapeHtml(t.label) + '</text>');
+  }
+  if (ref) {
+    const yy = Y(ref.value);
+    parts.push('<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + yy.toFixed(1) + '" y2="' + yy.toFixed(1) + '" stroke="var(--muted)" stroke-dasharray="2 4"/>');
+    parts.push('<text x="' + (PL + 4) + '" y="' + (yy - 3).toFixed(1) + '" class="ax" fill="var(--muted)">' + escapeHtml(ref.label) + '</text>');
+  }
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="svg-chart" data-chart="' + escapeHtml(o.chart || '') + '">' + parts.join('') + '</svg>';
+}
+
+function buildStatCards(data) {
+  const cats = data.categories || {};
+  const prevCats = data.prevCategories || {};
+  const t = data.totals || {};
+  const lat = data.latency || {};
+  const biz = businessCats(cats), prevBiz = businessCats(prevCats);
+  const retrieval = catOf(cats, 'retrieval'), indexing = catOf(cats, 'indexing');
+  const keys = data.byKey || [];
   const success = biz.requests ? 100 - ratePct(biz.errors, biz.requests) : null;
   $('#stat-cards').innerHTML = [
     statCard('业务请求', fmtNum(biz.requests), deltaTag(biz.requests, prevBiz.requests, false)),
@@ -1663,45 +1841,48 @@ function renderStatCards() {
     statCard('embed 文本', fmtNum(t.embedTexts), ''),
     statCard('业务成功率', success === null ? '—' : success.toFixed(1) + '%', '<span class="sub">' + fmtNum(biz.errors) + ' 错误</span>'),
     statCard('平均延迟（业务）', fmtMs(biz.latencyAvg), deltaTag(biz.latencyAvg, prevBiz.latencyAvg, true)),
-    statCard('P95 延迟', lat.p95 || '—', lat.count ? '<span class="sub">' + fmtNum(lat.count) + ' 次采样（全部）</span>' : '<span class="sub">本次部署后累计</span>'),
+    statCard('P95 延迟', lat.p95 || '—', lat.count ? '<span class="sub">' + fmtNum(lat.count) + ' 次采样</span>' : ''),
     statCard('索引操作', fmtNum(indexing.requests), '<span class="sub">同步 / 上传 / 触发</span>'),
-    statCard('活跃 Key', fmtNum((d.byKey || []).filter((k) => k.role !== 'deleted').length), '<span class="sub">' + (d.days === 1 ? '今日' : '区间内') + ' 有调用</span>'),
+    statCard('活跃 Key', fmtNum(keys.filter((k) => k.role !== 'deleted').length), '<span class="sub">区间内有调用</span>'),
   ].join('');
 }
-function chartCol(x, bars, label, title) {
-  return '<div class="col" title="' + escapeHtml(title || x.day) + '"><div class="bars">' + bars + '</div><span class="x">' + escapeHtml(label) + '</span></div>';
+function renderStatCards() { buildStatCards(STATS || {}); }
+function renderStatCardsFromSummary() {
+  if (!STATS_SUMMARY) return;
+  buildStatCards(Object.assign({}, STATS_SUMMARY, { byKey: (STATS && STATS.byKey) || [] }));
 }
+
 function renderTrend() {
   const rows = (STATS && STATS.byDay) || [];
-  const el = $('#stat-trend');
-  if (!rows.length) { el.innerHTML = '<div class="empty">没有数据</div>'; return; }
-  const totals = rows.map((x) => STATS_CAT_ORDER.reduce((a, n) => a + Number(x[n + 'Requests'] || 0), 0));
-  const max = Math.max(1, ...totals);
-  const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
-  el.innerHTML = rows.map((x, i) => {
-    const seg = (name, cls) => {
-      const v = Number(x[name + 'Requests'] || 0);
-      return v ? '<i class="' + cls + '" style="height:' + ((v / max) * 100).toFixed(2) + '%"></i>' : '';
-    };
-    const bars = '<div class="stack">' + seg('embedding', 's-emb') + seg('indexing', 's-idx') + seg('retrieval', 's-ret') + '</div>';
-    const title = x.day + '：检索/重排 ' + fmtNum(x.retrievalRequests) + ' · 索引 ' + fmtNum(x.indexingRequests)
-      + ' · 嵌入 ' + fmtNum(x.embeddingRequests) + ' · 系统/轮询 ' + fmtNum(x.systemRequests) + ' · 错误 ' + fmtNum(x.errors);
-    return chartCol(x, bars, i % step === 0 ? String(x.day || '').slice(5) : '', title);
-  }).join('');
+  if (!rows.length) { $('#stat-trend').innerHTML = '<div class="chart-empty">没有数据</div>'; return; }
+  const chartRows = rows.map((d) => ({
+    day: d.day,
+    value: Number(d.retrievalRequests || 0) + Number(d.indexingRequests || 0) + Number(d.embeddingRequests || 0),
+    retrieval: Number(d.retrievalRequests || 0), indexing: Number(d.indexingRequests || 0), embedding: Number(d.embeddingRequests || 0),
+  }));
+  const prev = chartRows.length > 1 ? chartRows[chartRows.length - 2].value : 0;
+  $('#stat-trend').innerHTML = chartSvg(chartRows, {
+    chart: 'trend',
+    value: (r) => r.value,
+    color: 'var(--purple)',
+    minMax: 4,
+    yfmt: (v) => fmtNum(Math.round(v)),
+    title: (r) => r.day + '：检索/重排 ' + fmtNum(r.retrieval) + ' · 索引 ' + fmtNum(r.indexing) + ' · 嵌入 ' + fmtNum(r.embedding),
+    refLine: prev ? { value: prev, label: '前一日 ' + fmtNum(prev) } : null,
+  });
 }
 function renderLatencyTrend() {
   const rows = (STATS && STATS.byDay) || [];
-  const el = $('#stat-latency');
-  if (!rows.length) { el.innerHTML = '<div class="empty">没有数据</div>'; return; }
-  const max = Math.max(1, ...rows.map((x) => Number(x.latencyAvg || 0)));
-  const step = rows.length > 14 ? Math.ceil(rows.length / 10) : 1;
-  el.innerHTML = rows.map((x, i) => {
-    const h = Math.max(1, Math.round((Number(x.latencyAvg || 0) / max) * 100));
-    return chartCol(x, '<i class="lat" style="height:' + h + '%"></i>', i % step === 0 ? String(x.day || '').slice(5) : '');
-  }).join('');
-  $$('#stat-latency .col').forEach((col, i) => {
-    const x = rows[i] || {};
-    col.title = String(x.day || '') + '：平均 ' + fmtMs(x.latencyAvg) + ' · 最大 ' + fmtMs(x.latencyMax) + ' · 请求 ' + fmtNum(x.requests);
+  const chartRows = rows.map((d) => ({ day: d.day, value: Number(d.latencyAvg || 0), latencyMax: Number(d.latencyMax || 0) }));
+  $('#stat-latency').innerHTML = chartSvg(chartRows, {
+    chart: 'latency',
+    value: (r) => r.value,
+    color: 'var(--blue)',
+    minMax: 100,
+    yfmt: (v) => Math.round(v) + 'ms',
+    thresholds: [{ value: LAT_TARGET_MS, label: '目标 300ms', color: 'var(--warn)' }],
+    bad: (r) => r.value > LAT_TARGET_MS,
+    title: (r) => r.day + '：平均 ' + fmtMs(r.value) + ' · 最大 ' + fmtMs(r.latencyMax),
   });
 }
 function renderMix() {
@@ -1722,31 +1903,41 @@ function shortNs(ns) {
   if (at > 0) return s.slice(0, at) + '…';
   return s.length > 18 ? s.slice(0, 18) + '…' : s;
 }
-function renderRuntime(health) {
-  const sc = (health && health.scopes) || {};
-  const chunks = Number(sc.chunks || 0), vectors = Number(sc.vectors || 0);
-  const used = Number(sc.totalBytes || 0);
-  const backlog = Math.max(0, chunks - vectors);
-  const coverage = Number(sc.coverage || 0) * 100;
-  const limits = (health && health.limits) || {};
-  const maxGb = Number(limits.maxTotalGb || 0);
+function renderRuntime(health, runtime) {
+  const h = health || {};
+  const sc = h.scopes || {};
+  const rt = runtime || {};
+  const chunks = Number(rt.chunks != null ? rt.chunks : (sc.chunks || 0));
+  const vectors = Number(rt.vectors != null ? rt.vectors : (sc.vectors || 0));
+  const used = Number(rt.totalBytes != null ? rt.totalBytes : (sc.totalBytes || 0));
+  const backlog = Number(rt.backlog != null ? rt.backlog : Math.max(0, chunks - vectors));
+  const maxGb = Number((h.limits || {}).maxTotalGb || 0);
   const maxBytes = maxGb * 1024 * 1024 * 1024;
   const storagePct = maxBytes ? Math.min(100, (used / maxBytes) * 100) : 0;
   const cats = (STATS && STATS.categories) || {};
-  const biz = businessCats(cats); const sys = catOf(cats, 'system');
+  const biz = businessCats(cats), sys = catOf(cats, 'system');
+  const paused = rt.paused != null ? rt.paused : !!((h.governor || {}).paused);
+  let etaText = '';
+  if (backlog > 0) {
+    if (paused) etaText = '已暂停';
+    else if (rt.etaSeconds != null) etaText = '约 ' + fmtEta(rt.etaSeconds) + ' 清空';
+    else etaText = '后台嵌入中';
+  } else {
+    etaText = '已完成';
+  }
   let cards;
-  if (!health) {
+  if (!health && !runtime) {
     cards = [statCard('运行状态', '<span class="chip bad">不可用</span>', ''), statCard('作用域', fmtNum(sc.total), '')];
   } else {
-    const g = health.governor || {};
+    const g = h.governor || {};
     cards = [
-      statCard('服务', '<span class="chip ' + (health.ready ? 'ok' : 'bad') + '"><span class="dot"></span>' + (health.ready ? 'ready' : '未就绪') + '</span>', ''),
-      statCard('当前模型', '<span class="mono" style="font-size:11px">' + escapeHtml(health.tag || '—') + '</span>', ''),
-      statCard('嵌入限速', (g.paused ? '已暂停' : '运行中') + ' · ' + fmtNum(g.rate) + '/s · batch ' + fmtNum(g.batch), ''),
-      statCard('作用域', fmtNum(sc.total), '<span class="sub">永久保留</span>'),
+      statCard('服务', '<span class="chip ' + (h.ready ? 'ok' : 'bad') + '"><span class="dot"></span>' + (h.ready ? 'ready' : '未就绪') + '</span>', ''),
+      statCard('当前模型', '<span class="mono" style="font-size:11px">' + escapeHtml(h.tag || '—') + '</span>', ''),
+      statCard('嵌入限速', (paused ? '已暂停' : '运行中') + ' · ' + fmtNum(g.rate) + '/s · batch ' + fmtNum(g.batch), ''),
+      statCard('作用域', fmtNum(rt.scopes != null ? rt.scopes : sc.total), '<span class="sub">永久保留</span>'),
       statCard('存储', maxGb ? fmtBytes(used) + ' / ' + maxGb + ' GB' : fmtBytes(used), '<span class="sub">' + storagePct.toFixed(1) + '%</span>'),
       statCard('块 / 向量', fmtNum(chunks) + ' / ' + fmtNum(vectors), ''),
-      statCard('嵌入积压', backlog > 0 ? fmtNum(backlog) + ' 块' : '0', backlog > 0 ? '<span class="sub">后台嵌入中</span>' : '<span class="sub">已全部完成</span>'),
+      statCard('嵌入积压', backlog > 0 ? fmtNum(backlog) + ' 块' : '0', '<span class="sub">' + etaText + '</span>'),
       statCard('业务 / 系统请求', fmtNum(biz.requests) + ' / ' + fmtNum(sys.requests), '<span class="sub">系统请求不计入 KPI</span>'),
     ];
   }
@@ -1755,47 +1946,201 @@ function renderRuntime(health) {
   const note = $('#stat-system-note');
   if (note) note.textContent = '系统/轮询请求（status/scopes/admin）：' + fmtNum(sys.requests) + ' 次，明细可在「日志」查看';
 }
+function setStatsSub(name) {
+  if (!['overview', 'errors', 'usage', 'latency'].includes(name)) name = 'overview';
+  STATS_SUB = name;
+  $$('#stats-sub button').forEach((b) => b.classList.toggle('active', b.dataset.sub === name));
+  for (const panel of ['overview', 'errors', 'usage', 'latency']) {
+    const el = $('#stats-panel-' + panel);
+    if (el) el.hidden = panel !== name;
+  }
+  renderStatsPanel();
+}
+function renderStatsPanel() {
+  if (STATS_SUB === 'errors') renderStatsErrors();
+  else if (STATS_SUB === 'usage') { renderScopeTable(); renderKeyTable(); }
+  else if (STATS_SUB === 'latency') renderStatsLatency();
+}
+function renderStatsErrors() {
+  if (!STATS) return;
+  const cats = STATS.categories || {};
+  const prevCats = STATS.prevCategories || {};
+  const biz = businessCats(cats), prevBiz = businessCats(prevCats);
+  const eps = (STATS.byEndpoint || []).slice();
+  const top = eps.filter((e) => e.errors > 0).sort((a, b) => b.errors - a.errors)[0];
+  const byDay = STATS.byDay || [];
+  const today = byDay.length ? byDay[byDay.length - 1] : {};
+  const errPct = ratePct(biz.errors, biz.requests);
+  const kind = errPct >= ERR_BAD_PCT ? 'bad' : (errPct >= ERR_WARN_PCT ? 'warn' : 'ok');
+  $('#err-cards').innerHTML = [
+    statCard('业务错误', fmtNum(biz.errors), deltaTag(biz.errors, prevBiz.errors, true)),
+    statCard('业务错误率', biz.requests ? errPct.toFixed(1) + '%' : '—', '<span class="chip ' + kind + '">' + (kind === 'ok' ? '正常' : (kind === 'warn' ? '注意' : '偏高')) + '</span>'),
+    statCard('今日错误', fmtNum(today.errors), '<span class="sub">' + escapeHtml(today.day || '') + '</span>'),
+    statCard('Top 错误端点', top ? escapeHtml(top.endpoint) : '—', top ? '<span class="sub">' + fmtNum(top.errors) + ' 次</span>' : ''),
+  ].join('');
+  const rateRows = byDay.map((d) => ({ day: d.day, value: ratePct(d.errors, d.requests), errors: d.errors, requests: d.requests }));
+  $('#err-trend').innerHTML = chartSvg(rateRows, {
+    chart: 'errors',
+    value: (r) => r.value,
+    color: 'var(--bad)',
+    minMax: 5,
+    yfmt: (v) => v.toFixed(1) + '%',
+    thresholds: [
+      { value: ERR_WARN_PCT, label: '1% 注意', color: 'var(--warn)' },
+      { value: ERR_BAD_PCT, label: '5% 红线', color: 'var(--bad)' },
+    ],
+    bad: (r) => r.value >= ERR_BAD_PCT,
+    title: (r) => r.day + '：错误 ' + fmtNum(r.errors) + ' / 请求 ' + fmtNum(r.requests) + '（' + r.value.toFixed(1) + '%）',
+  });
+  const prevMap = {};
+  for (const e of STATS.prevByEndpoint || []) prevMap[e.endpoint] = e;
+  const rows = eps.filter((e) => {
+    if (!EP_VIEW.q) return true;
+    return String(e.endpoint || '').toLowerCase().indexOf(EP_VIEW.q) >= 0;
+  }).sort((a, b) => {
+    if (EP_VIEW.sort === 'errorRate') return (ratePct(a.errors, a.requests) - ratePct(b.errors, b.requests)) * EP_VIEW.dir;
+    return (Number(a[EP_VIEW.sort] || 0) - Number(b[EP_VIEW.sort] || 0)) * EP_VIEW.dir;
+  });
+  $('#stat-endpoints').innerHTML = rows.length ? rows.map((e) => {
+    const p = prevMap[e.endpoint];
+    const delta = p && p.requests ? deltaTag(e.requests, p.requests, false) : '';
+    return '<tr class="clickable-row" data-endpoint="' + escapeHtml(e.endpoint) + '" title="点击查看该端点的错误日志">'
+      + '<td class="mono">' + escapeHtml(e.endpoint) + '</td>'
+      + '<td class="num">' + fmtNum(e.requests) + '</td>'
+      + '<td class="num">' + fmtNum(e.errors) + '</td>'
+      + '<td class="num">' + (e.requests ? rateChip(e.errors, e.requests) : '—') + '</td>'
+      + '<td class="num">' + fmtMs(e.latencyAvg) + '</td>'
+      + '<td class="num">' + (delta || '—') + '</td></tr>';
+  }).join('') : '<tr><td colspan="6" class="empty">没有数据</td></tr>';
+  const tip = $('#err-tip');
+  if (tip) tip.textContent = top ? ('错误集中在 ' + top.endpoint + '（' + fmtNum(top.errors) + ' 次）· 点端点行看日志') : '没有错误';
+}
+function scopeStatRows() {
+  const q = SCOPE_STAT.q.toLowerCase();
+  const rows = ((STATS && STATS.byScope) || []).filter((s) => {
+    if (!q) return true;
+    const hay = ((s.repoName || '') + ' ' + (s.namespace || '') + ' ' + (s.kind || '') + ' ' + (s.ref || '')).toLowerCase();
+    return hay.indexOf(q) >= 0;
+  });
+  rows.sort((a, b) => {
+    if (SCOPE_STAT.sort === 'errorRate') return (ratePct(a.errors, a.requests) - ratePct(b.errors, b.requests)) * SCOPE_STAT.dir;
+    if (SCOPE_STAT.sort === 'chunks') return ((Number(a.chunks || 0)) - (Number(b.chunks || 0))) * SCOPE_STAT.dir;
+    return ((Number(a[SCOPE_STAT.sort] || 0)) - (Number(b[SCOPE_STAT.sort] || 0))) * SCOPE_STAT.dir;
+  });
+  return rows;
+}
 function renderScopeTable() {
-  const rows = (STATS && STATS.byScope) || [];
-  const top = rows.slice(0, 15);
-  $('#stat-scope-tip').textContent = rows.length ? ('Top ' + top.length + ' / ' + rows.length) : '';
-  $('#stat-scopes').innerHTML = top.length ? top.map((s) => {
+  const all = scopeStatRows();
+  const pages = Math.max(1, Math.ceil(all.length / SCOPE_STAT.size));
+  SCOPE_STAT.page = Math.min(SCOPE_STAT.page, pages - 1);
+  const start = SCOPE_STAT.page * SCOPE_STAT.size;
+  const rows = all.slice(start, start + SCOPE_STAT.size);
+  const tip = $('#stat-scope-tip');
+  if (tip) tip.textContent = all.length ? (all.length + ' 个作用域') : '';
+  const pageEl = $('#scope-stat-page');
+  if (pageEl) pageEl.textContent = '第 ' + (SCOPE_STAT.page + 1) + ' / ' + pages + ' 页';
+  const prevBtn = $('#scope-stat-prev'), nextBtn = $('#scope-stat-next');
+  if (prevBtn) prevBtn.disabled = SCOPE_STAT.page <= 0;
+  if (nextBtn) nextBtn.disabled = SCOPE_STAT.page >= pages - 1;
+  $('#stat-scopes').innerHTML = rows.length ? rows.map((s) => {
     const name = s.repoName || shortNs(s.namespace);
     const kind = s.kind || (s.missing ? 'deleted' : 'unknown');
     const label = kind === 'main' ? '#main:default' : (s.ref ? '#' + kind + ':' + s.ref : (s.missing ? '已删除' : '—'));
     const counts = s.chunks != null ? fmtNum(s.chunks) + ' / ' + fmtNum(s.vectors) : '—';
     const cov = s.chunks ? ' <span class="faint">' + Math.round((Number(s.vectors || 0) / Number(s.chunks)) * 100) + '%</span>' : '';
-    return '<tr><td title="' + escapeHtml(s.namespace || '') + '"><span class="mono">' + escapeHtml(name) + '</span> <span class="faint" style="font-size:11px">' + escapeHtml(label) + '</span></td>'
+    return '<tr class="clickable-row" data-namespace="' + escapeHtml(s.namespace || '') + '" data-repo="' + escapeHtml(s.repoName || '') + '" title="点击去作用域页">'
+      + '<td><span class="mono">' + escapeHtml(name) + '</span> <span class="faint" style="font-size:11px">' + escapeHtml(label) + '</span></td>'
       + '<td>' + (s.kind ? '<span class="kind ' + escapeHtml(s.kind) + '">' + escapeHtml(s.kind) + '</span>' : '<span class="chip bad">' + escapeHtml(kind) + '</span>') + '</td>'
       + '<td class="num">' + counts + cov + '</td><td class="num">' + fmtNum(s.requests) + '</td>'
       + '<td class="num">' + fmtNum(s.searchCalls) + '</td><td class="num">' + fmtNum(s.embedTexts) + '</td><td class="num">' + fmtNum(s.rerankCalls) + '</td>'
-      + '<td class="num">' + (s.requests ? rateText(s.errors, s.requests) : '—') + '</td><td class="num">' + fmtMs(s.latencyAvg) + '</td></tr>';
-  }).join('') : '<tr><td colspan="9" class="empty">按作用域用量从本版本开始累计（历史数据没有该维度）</td></tr>';
+      + '<td class="num">' + (s.requests ? rateChip(s.errors, s.requests) : '—') + '</td><td class="num">' + fmtMs(s.latencyAvg) + '</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">没有匹配的数据</td></tr>';
 }
 function renderKeyTable() {
-  const keys = (STATS && STATS.byKey) || [];
+  const keys = ((STATS && STATS.byKey) || []).slice().sort((a, b) => Number(b.requests || 0) - Number(a.requests || 0));
   const totalReq = Number((STATS && STATS.totals && STATS.totals.requests) || 0);
-  $('#stat-keys').innerHTML = keys.length ? keys.map((k) => {
+  const summary = $('#stat-key-summary'), wrap = $('#stat-key-wrap'), btn = $('#btn-key-expand');
+  if (!keys.length) {
+    if (summary) summary.textContent = '没有 Key 调用记录';
+    if (wrap) wrap.style.display = 'none';
+    if (btn) btn.style.display = 'none';
+    return;
+  }
+  if (keys.length < 3 && !KEY_VIEW.expanded) {
+    if (summary) summary.textContent = '只有 ' + keys.length + ' 个 Key 在用：' + keys.map((k) => (k.name || ('#' + k.keyId)) + '（' + fmtNum(k.requests) + ' 次）').join('、');
+    if (wrap) wrap.style.display = 'none';
+    if (btn) { btn.style.display = ''; btn.textContent = '展开明细'; }
+    return;
+  }
+  if (summary) summary.textContent = '';
+  if (wrap) wrap.style.display = '';
+  if (btn) { btn.style.display = keys.length < 3 ? '' : 'none'; btn.textContent = KEY_VIEW.expanded ? '收起明细' : '展开明细'; }
+  $('#stat-keys').innerHTML = keys.map((k) => {
     const share = totalReq ? (Number(k.requests || 0) / totalReq) * 100 : 0;
     const name = escapeHtml(k.name || ('#' + k.keyId)) + (k.role === 'legacy' ? ' <span class="chip blue">legacy</span>' : '') + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(k.prefix || '') + '</span>';
     return '<tr><td>' + name + '</td><td>' + escapeHtml(k.role || '—') + '</td><td class="num">' + fmtNum(k.requests) + '</td>'
       + '<td><div class="cov"><span class="bar blue" style="width:100px"><i style="width:' + share.toFixed(1) + '%"></i></span><span class="faint">' + share.toFixed(1) + '%</span></div></td>'
       + '<td class="num">' + fmtNum(k.errors) + '</td><td class="num">' + fmtNum(k.embedTexts) + '</td><td class="num">' + fmtNum(k.searchCalls) + '</td><td class="num">' + fmtNum(k.rerankCalls) + '</td>'
       + '<td class="num">' + fmtMs(k.latencyAvg) + '</td><td title="' + absTime(k.lastUsedAt) + '">' + rel(k.lastUsedAt) + '</td></tr>';
-  }).join('') : '<tr><td colspan="10" class="empty">没有数据</td></tr>';
+  }).join('');
+}
+function renderStatsLatency() {
+  if (!STATS) return;
+  const lat = STATS.latency || {};
+  const total = Number(lat.count || 0);
+  const head = $('#lat-p50p95');
+  if (head) head.textContent = total ? ('P50 ' + (lat.p50 || '—') + ' · P95 ' + (lat.p95 || '—') + ' · ' + fmtNum(total) + ' 采样') : '';
+  const buckets = lat.buckets || [];
+  const maxCount = Math.max(1, ...buckets.map((b) => Number(b.count || 0)));
+  $('#lat-hist').innerHTML = buckets.length ? buckets.map((b) => {
+    const pct = total ? (Number(b.count || 0) / total) * 100 : 0;
+    const w = Math.round((Number(b.count || 0) / maxCount) * 100);
+    return '<div class="hist-row"><span class="mono">' + escapeHtml(b.label) + '</span><span class="bar-mini"><i style="width:' + w + '%"></i></span><span class="num">' + fmtNum(b.count) + ' · ' + pct.toFixed(1) + '%</span></div>';
+  }).join('') : '<div class="chart-empty">没有采样数据</div>';
+  const eps = (STATS.byEndpoint || []).slice().sort((a, b) => Number(b.latencyAvg || 0) - Number(a.latencyAvg || 0));
+  $('#lat-endpoints').innerHTML = eps.length ? eps.map((e) => '<tr><td class="mono">' + escapeHtml(e.endpoint) + '</td>'
+    + '<td class="num">' + fmtNum(e.requests) + '</td><td class="num">' + fmtNum(e.errors) + '</td>'
+    + '<td class="num">' + fmtMs(e.latencyAvg) + '</td><td class="num">' + rateChip(e.errors, e.requests) + '</td></tr>').join('')
+    : '<tr><td colspan="5" class="empty">没有数据</td></tr>';
+}
+function gotoScopesFor(ns, repo) {
+  showTab('scopes');
+  const input = $('#filter');
+  if (input) input.value = repo || String(ns || '').split('@')[0];
+  SCOPES.offset = 0;
+  loadScopes();
+}
+function drillLogs(q, level) {
+  const qInput = $('#log-q'), lv = $('#log-level');
+  if (qInput) qInput.value = q || '';
+  if (lv) lv.value = level || '';
+  showTab('logs');
+  loadLogs();
+}
+function drillFromChart(chart, day) {
+  if (chart === 'errors') {
+    if (day && STATS && day !== STATS.to) toast('日志只有当前进程的尾部，无法按历史日期过滤；已按 error 级别打开');
+    drillLogs('', 'error');
+  } else {
+    toast('该图没有可下钻的日志维度');
+  }
 }
 function stopStatsTimer() { if (STATS_TIMER) { clearInterval(STATS_TIMER); STATS_TIMER = null; } }
 function startStatsTimer() {
   stopStatsTimer();
   if ($('#stats-auto') && !$('#stats-auto').checked) return;
   STATS_TIMER = setInterval(() => {
-    if (document.visibilityState === 'visible' && location.hash === '#stats') loadStats(STATS_DAYS);
+    if (document.visibilityState === 'visible' && location.hash === '#stats') loadStatsSummary();
   }, 30000);
+}
+function statsMetaText(data) {
+  return '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' · ' + data.from + ' ~ ' + data.to + ' · 含未落盘缓冲（最多约 30 秒延迟）';
 }
 async function loadStats(days) {
   STATS_DAYS = Number(days) || 7;
   $$('[data-days]').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === STATS_DAYS));
-  const meta = $('#stats-meta'); if (meta) meta.textContent = '加载中…';
+  const meta = $('#stats-meta');
+  if (meta) meta.textContent = '加载中…';
   const [r, h] = await Promise.all([api('/v1/admin/stats?days=' + STATS_DAYS), api('/health')]);
   if (r.status !== 200 || !r.body) {
     $('#stat-cards').innerHTML = '<div class="empty">统计加载失败（' + r.status + '）</div>';
@@ -1803,21 +2148,30 @@ async function loadStats(days) {
     return;
   }
   STATS = r.body;
-  if (meta) meta.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' · ' + STATS.from + ' ~ ' + STATS.to + ' · 含未落盘缓冲（最多约 30 秒延迟）';
+  if (meta) meta.textContent = statsMetaText(STATS);
   $('#stat-range-label').textContent = STATS.days === 1 ? '今日' : ('近 ' + STATS.days + ' 天');
   renderStatCards();
   renderTrend();
   renderLatencyTrend();
   renderMix();
   renderRuntime(h.status === 200 ? h.body : null);
-  renderScopeTable();
-  renderKeyTable();
+  renderStatsPanel();
   if (location.hash === '#stats') startStatsTimer();
+}
+async function loadStatsSummary() {
+  const [r, h] = await Promise.all([api('/v1/admin/stats/summary?days=' + STATS_DAYS), api('/health')]);
+  if (r.status !== 200 || !r.body) return;
+  STATS_SUMMARY = r.body;
+  renderStatCardsFromSummary();
+  renderRuntime(h.status === 200 ? h.body : null, STATS_SUMMARY.runtime);
+  const meta = $('#stats-meta');
+  if (meta) meta.textContent = statsMetaText(STATS_SUMMARY);
 }
 function csvCell(v) { const s = String(v === undefined || v === null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 function exportStatsCsv() {
   if (!STATS) { toast('统计还没加载完'); return; }
-  const t = STATS.totals || {}; const lat = STATS.latency || {};
+  const t = STATS.totals || {};
+  const lat = STATS.latency || {};
   const cats = STATS.categories || {};
   const lines = [];
   lines.push('区间,' + STATS.from + ' ~ ' + STATS.to + ',天数,' + STATS.days);
@@ -1828,12 +2182,25 @@ function exportStatsCsv() {
     lines.push([STATS_CAT_LABEL[name], c.requests, c.errors, c.latencyAvg.toFixed(1)].join(','));
   }
   lines.push('');
+  lines.push('延迟分位,样本数,P50,P95');
+  lines.push(['近似', lat.count, lat.p50 || '', lat.p95 || ''].join(','));
+  lines.push('');
   lines.push('日期,业务请求,检索/重排,索引操作,嵌入,系统/轮询,错误,成功率,平均延迟ms,最大延迟ms');
   for (const d of STATS.byDay || []) {
     const biz = Number(d.retrievalRequests || 0) + Number(d.indexingRequests || 0) + Number(d.embeddingRequests || 0);
     const success = d.requests ? (100 - ratePct(d.errors, d.requests)) : 0;
     lines.push([d.day, biz, d.retrievalRequests, d.indexingRequests, d.embeddingRequests, d.systemRequests,
       d.errors, success.toFixed(1), Number(d.latencyAvg || 0).toFixed(1), Number(d.latencyMax || 0).toFixed(1)].join(','));
+  }
+  lines.push('');
+  lines.push('上下文,请求,错误,平均延迟ms');
+  for (const row of [{ name: '全部', requests: t.requests, errors: t.errors, latencyAvg: t.latencyAvg }]) {
+    lines.push([row.name, row.requests, row.errors, Number(row.latencyAvg || 0).toFixed(1)].join(','));
+  }
+  lines.push('');
+  lines.push('端点,请求,错误,错误率,平均延迟ms');
+  for (const e of STATS.byEndpoint || []) {
+    lines.push([csvCell(e.endpoint), e.requests, e.errors, e.requests ? rateText(e.errors, e.requests) : '', Number(e.latencyAvg || 0).toFixed(1)].join(','));
   }
   lines.push('');
   lines.push('仓库/作用域,类型,请求,检索,嵌入,重排,错误率,平均延迟ms');
@@ -1844,7 +2211,10 @@ function exportStatsCsv() {
   }
   lines.push('');
   lines.push('Key,角色,请求,错误,嵌入,检索,重排,平均延迟ms,最后使用');
-  for (const k of STATS.byKey || []) lines.push([csvCell(k.name || ('#' + k.keyId)), k.role, k.requests, k.errors, k.embedTexts, k.searchCalls, k.rerankCalls, Number(k.latencyAvg || 0).toFixed(1), k.lastUsedAt ? new Date(k.lastUsedAt * 1000).toISOString() : ''].join(','));
+  for (const k of STATS.byKey || []) {
+    lines.push([csvCell(k.name || ('#' + k.keyId)), k.role, k.requests, k.errors, k.embedTexts, k.searchCalls, k.rerankCalls,
+      Number(k.latencyAvg || 0).toFixed(1), k.lastUsedAt ? new Date(k.lastUsedAt * 1000).toISOString() : ''].join(','));
+  }
   const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1855,10 +2225,31 @@ function exportStatsCsv() {
 }
 
 // ---------------- 日志 ----------------
+function logQuery() {
+  const q = (($('#log-q') || {}).value || '').trim();
+  const level = (($('#log-level') || {}).value || '').trim();
+  const params = ['n=300'];
+  if (q) params.push('q=' + encodeURIComponent(q));
+  if (level) params.push('level=' + encodeURIComponent(level));
+  return '/log?' + params.join('&');
+}
 async function loadLogs() {
-  const r = await api('/log?n=300');
-  if (r.status !== 200) return;
-  $('#log-lines').textContent = ((r.body && r.body.lines) || []).join(String.fromCharCode(10)) || '（空）';
+  const r = await api(logQuery());
+  const meta = $('#log-meta');
+  if (r.status !== 200) {
+    if (meta) meta.textContent = '日志加载失败：' + r.status;
+    return;
+  }
+  const body = r.body || {};
+  const lines = body.lines || [];
+  $('#log-lines').textContent = lines.join(String.fromCharCode(10)) || '（空）';
+  const f = body.filters || {};
+  const filtered = !!(f.q || f.level);
+  if (meta) {
+    meta.textContent = (filtered
+      ? '筛选 ' + [f.q ? ('关键字“' + f.q + '”') : '', f.level ? ('级别 ' + f.level) : ''].filter(Boolean).join(' + ') + '：命中 ' + fmtNum(body.matched) + ' 行 / 扫描 ' + fmtNum(body.scanned) + ' 行'
+      : '最近 ' + fmtNum(lines.length) + ' 行') + ' · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  }
 }
 
 // ---------------- 初始化 ----------------
@@ -1902,6 +2293,35 @@ $$('[data-days]').forEach((b) => { b.onclick = () => loadStats(b.dataset.days); 
 $('#btn-stats-refresh').onclick = () => loadStats(STATS_DAYS);
 $('#btn-stats-export').onclick = exportStatsCsv;
 $('#stats-auto').onchange = () => { if (location.hash === '#stats') startStatsTimer(); };
+$$('#stats-sub button').forEach((b) => { b.onclick = () => setStatsSub(b.dataset.sub); });
+$('#tab-stats').addEventListener('click', (e) => {
+  const rect = e.target.closest('svg.svg-chart rect[data-day]');
+  if (rect) {
+    const svg = rect.closest('svg');
+    drillFromChart(svg ? svg.dataset.chart : '', rect.dataset.day);
+    return;
+  }
+  const epRow = e.target.closest('#stat-endpoints tr[data-endpoint]');
+  if (epRow) { drillLogs(epRow.dataset.endpoint, 'error'); return; }
+  const scopeRow = e.target.closest('#stat-scopes tr[data-namespace]');
+  if (scopeRow) { gotoScopesFor(scopeRow.dataset.namespace, scopeRow.dataset.repo); return; }
+});
+$('#scope-stat-q').oninput = () => { SCOPE_STAT.q = $('#scope-stat-q').value; SCOPE_STAT.page = 0; renderScopeTable(); };
+$('#scope-stat-sort').onchange = () => {
+  const parts = $('#scope-stat-sort').value.split('|');
+  SCOPE_STAT.sort = parts[0]; SCOPE_STAT.dir = Number(parts[1]) || -1; SCOPE_STAT.page = 0; renderScopeTable();
+};
+$('#scope-stat-prev').onclick = () => { if (SCOPE_STAT.page > 0) { SCOPE_STAT.page -= 1; renderScopeTable(); } };
+$('#scope-stat-next').onclick = () => { SCOPE_STAT.page += 1; renderScopeTable(); };
+$('#ep-q').oninput = () => { EP_VIEW.q = $('#ep-q').value.trim().toLowerCase(); renderStatsErrors(); };
+$('#ep-sort').onchange = () => {
+  const parts = $('#ep-sort').value.split('|');
+  EP_VIEW.sort = parts[0]; EP_VIEW.dir = Number(parts[1]) || -1; renderStatsErrors();
+};
+$('#btn-key-expand').onclick = () => { KEY_VIEW.expanded = !KEY_VIEW.expanded; renderKeyTable(); };
+$('#btn-log-filter').onclick = loadLogs;
+$('#log-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLogs(); });
+$('#log-level').onchange = loadLogs;
 $$('[data-goto]').forEach((b) => { b.onclick = () => { location.hash = '#' + b.dataset.goto; }; });
 $$('nav.tabs button').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
 $('#btn-logout').onclick = async () => { await fetch('/admin/logout', { method: 'POST' }); location.replace('/admin'); };
@@ -2950,7 +3370,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._redirect("/admin")
         admin_only = (
             path.startswith("/v1/admin/")
-            or path in ("/v1/status", "/v1/scopes", "/v1/spaces", "/v1/lineages/similar")
+            or path in ("/v1/status", "/v1/scopes", "/v1/spaces", "/v1/lineages/similar", "/log")
             or path.startswith("/v1/scopes/")
             or path.startswith("/v1/lineages/")
         )
@@ -2978,6 +3398,40 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/v1/admin/keys":
             return self._send(200, {"keys": adm.list_keys(), "legacy": bool(API_KEY)})
+        if path == "/v1/admin/stats/summary":
+            q = parse_qs(u.query or "")
+            try:
+                days = int((q.get("days") or ["7"])[0])
+            except (TypeError, ValueError):
+                days = 7
+            data = adm.summary(days)
+            # 分类汇总（与 /v1/admin/stats 的 categories 同口径）：轻量轮询也要能更新 KPI
+            data["categories"] = _category_totals(data.get("byEndpoint"))
+            data["prevCategories"] = _category_totals(data.get("prevByEndpoint"))
+            if store:
+                sc = store.scope_stats()
+                chunks = int(sc.get("chunks") or 0)
+                vectors = int(sc.get("vectors") or 0)
+                backlog = max(0, chunks - vectors)
+                gov = governor.status() if governor else {}
+                rate = float(gov.get("rate") or 0)
+                data["runtime"] = {
+                    "ready": bool(state["ready"]),
+                    "paused": bool(gov.get("paused")),
+                    "rate": rate,
+                    "batch": gov.get("batch"),
+                    "scopes": int(sc.get("total") or 0),
+                    "chunks": chunks,
+                    "vectors": vectors,
+                    "coverage": sc.get("coverage"),
+                    "backlog": backlog,
+                    # 清空积压的预计秒数：这就是"终点"（速率 0/已暂停时为 None）
+                    "etaSeconds": round(backlog / rate, 1) if (backlog and rate > 0) else None,
+                    "totalBytes": sc.get("totalBytes"),
+                    "maxTotalBytes": MAX_TOTAL_BYTES,
+                }
+            data["tag"] = state["info"].get("tag")
+            return self._send(200, data)
         if path == "/v1/admin/stats":
             q = parse_qs(u.query or "")
             try:
@@ -2995,18 +3449,67 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/admin/runtime":
             return self._send(200, self._runtime_payload())
         if path == "/log":
-            n = 200
-            if "n=" in (u.query or ""):
-                try:
-                    n = int(u.query.split("n=")[1].split("&")[0])
-                except Exception:
-                    pass
+            q = parse_qs(u.query or "")
+
+            def _q1(name, default=""):
+                return ((q.get(name) or [default])[0] or default).strip()
+
+            try:
+                n = int(_q1("n", "200"))
+            except (TypeError, ValueError):
+                n = 200
+            n = max(1, min(n, 5000))
+            keyword = _q1("q").lower()
+            level = _q1("level").lower()
+            t_from = _q1("from")
+            t_to = _q1("to")
+            level_re = None
+            if level == "error":
+                level_re = re.compile(r"(error|fail|failed|exception|traceback|\b4\d\d\b|\b5\d\d\b)", re.I)
+            elif level == "warn":
+                level_re = re.compile(r"(warn|警告|deprecated|慢|超时)", re.I)
+            ts_re = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]")
+            filtered = bool(keyword or level_re or t_from or t_to)
+            scanned = 0
+            matched = 0
             try:
                 with open(LOG_PATH, encoding="utf-8") as f:
-                    lines = f.readlines()[-n:]
+                    raw = f.readlines()
+                # 过滤时多扫一段（最近 2 万行），否则只取尾巴
+                window = raw[-20000:] if filtered else raw[-n:]
+                scanned = len(window)
+                out = []
+                last_keep = True
+                for line in window:
+                    text = line.rstrip("\n")
+                    m = ts_re.match(text)
+                    if m:
+                        ts = m.group(1)
+                        keep = True
+                        if keyword and keyword not in text.lower():
+                            keep = False
+                        if level_re is not None and not level_re.search(text):
+                            keep = False
+                        if t_from and ts < t_from:
+                            keep = False
+                        if t_to and ts > t_to:
+                            keep = False
+                        last_keep = keep
+                    else:
+                        # traceback / 续行没有时间戳：跟随上一行的判定
+                        keep = last_keep
+                    if keep:
+                        out.append(text)
+                matched = len(out)
+                lines = out[-n:]
             except Exception as e:
                 lines = [f"log read failed: {e}"]
-            return self._send(200, {"lines": [x.rstrip() for x in lines]})
+            return self._send(200, {
+                "lines": lines,
+                "scanned": scanned,
+                "matched": matched,
+                "filters": {"q": keyword, "level": level, "from": t_from, "to": t_to, "n": n},
+            })
         if path == "/":
             return self._send(200, self._status_payload())
         if path.startswith("/v1/namespaces/") and path.endswith("/status"):

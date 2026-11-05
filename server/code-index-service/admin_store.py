@@ -80,6 +80,32 @@ def _latency_bucket(latency_ms):
         if ms <= edge:
             return i
     return len(LATENCY_EDGES)
+
+
+def _latency_percentiles(counts):
+    """桶计数 → {count, buckets, p50, p95, p50Ms, p95Ms}（P50/P95 取桶上界，页面标注 "≤"）。"""
+    total = sum(int(v) for v in counts.values())
+    buckets = []
+    cumulative = 0
+    p50 = p50_ms = p95 = p95_ms = None
+    for i in range(len(LATENCY_EDGES) + 1):
+        count = int(counts.get(i, 0))
+        if i < len(LATENCY_EDGES):
+            le = LATENCY_EDGES[i]
+            label = "≤%d ms" % le
+            upper = le
+        else:
+            le = None
+            label = ">%d ms" % LATENCY_EDGES[-1]
+            upper = LATENCY_EDGES[-1]
+        buckets.append({"le": le, "label": label, "count": count})
+        cumulative += count
+        if total and p50 is None and cumulative >= total * 0.5:
+            p50, p50_ms = label, upper
+        if total and p95 is None and cumulative >= total * 0.95:
+            p95, p95_ms = label, upper
+    return {"count": total, "buckets": buckets, "p50": p50, "p95": p95,
+            "p50Ms": p50_ms, "p95Ms": p95_ms}
 PBKDF2_ITER = 200_000
 SESSION_SECRET_KEY = "session_secret"
 ADMIN_PASSWORD_KEY = "admin_password"
@@ -783,34 +809,7 @@ class AdminStore:
             })
 
         # 延迟分位（桶上界近似）：P50/P95 只是"≤X ms"，用于判断大体水位，不做精确分位
-        lat_total = sum(latency_counts.values())
-        buckets_out = []
-        cumulative = 0
-        p50 = p50_ms = p95 = p95_ms = None
-        for i in range(len(LATENCY_EDGES) + 1):
-            count = latency_counts.get(i, 0)
-            if i < len(LATENCY_EDGES):
-                le = LATENCY_EDGES[i]
-                label = "≤%d ms" % le
-                upper = le
-            else:
-                le = None
-                label = ">%d ms" % LATENCY_EDGES[-1]
-                upper = LATENCY_EDGES[-1]
-            buckets_out.append({"le": le, "label": label, "count": count})
-            cumulative += count
-            if lat_total and p50 is None and cumulative >= lat_total * 0.5:
-                p50, p50_ms = label, upper
-            if lat_total and p95 is None and cumulative >= lat_total * 0.95:
-                p95, p95_ms = label, upper
-        latency_out = {
-            "count": lat_total,
-            "buckets": buckets_out,
-            "p50": p50,
-            "p95": p95,
-            "p50Ms": p50_ms,
-            "p95Ms": p95_ms,
-        }
+        latency_out = _latency_percentiles(latency_counts)
         prev_totals = {
             "requests": int(prev_row["requests"]),
             "errors": int(prev_row["errors"]),
@@ -834,6 +833,141 @@ class AdminStore:
             "byDayEndpoint": day_endpoint_out,
             "prevByEndpoint": prev_endpoint_out,
             "latency": latency_out,
+        }
+
+    def summary(self, days=7):
+        """轻量看板摘要（控制台 30 秒轮询用）：总量 / 按端点 / 按天错误 / 延迟分位。
+
+        与 stats() 同口径（含未落盘缓冲），但**不做** byKey/byScope/byDayEndpoint 的展开，
+        返回体小、查询少；表格类数据只在进入对应页签时用 stats() 拉一次。
+        """
+        days = max(1, min(90, int(days)))
+        today = datetime.date.today()
+        start = today - datetime.timedelta(days=days - 1)
+        day_list = [(start + datetime.timedelta(days=i)).isoformat() for i in range(days)]
+        day_from, day_to = day_list[0], day_list[-1]
+        prev_to = (start - datetime.timedelta(days=1)).isoformat()
+        prev_from = (start - datetime.timedelta(days=days)).isoformat()
+        with self._lock:
+            total_row = self.db.execute(
+                "select coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(embed_texts),0) as embed_texts, coalesce(sum(search_calls),0) as search_calls,"
+                " coalesce(sum(rerank_calls),0) as rerank_calls, coalesce(sum(latency_sum),0) as latency_sum"
+                " from usage_daily where day >= ? and day <= ?",
+                (day_from, day_to),
+            ).fetchone()
+            prev_row = self.db.execute(
+                "select coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(latency_sum),0) as latency_sum"
+                " from usage_daily where day >= ? and day <= ?",
+                (prev_from, prev_to),
+            ).fetchone()
+            prev_ep_rows = self.db.execute(
+                "select endpoint, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(latency_sum),0) as latency_sum from usage_endpoint"
+                " where day >= ? and day <= ? group by endpoint",
+                (prev_from, prev_to),
+            ).fetchall()
+            day_rows = self.db.execute(
+                "select day, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors"
+                " from usage_daily where day >= ? and day <= ? group by day order by day",
+                (day_from, day_to),
+            ).fetchall()
+            ep_rows = self.db.execute(
+                "select endpoint, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(latency_sum),0) as latency_sum from usage_endpoint"
+                " where day >= ? and day <= ? group by endpoint",
+                (day_from, day_to),
+            ).fetchall()
+            lat_rows = self.db.execute(
+                "select bucket, coalesce(sum(requests),0) as requests from usage_latency"
+                " where day >= ? and day <= ? group by bucket",
+                (day_from, day_to),
+            ).fetchall()
+            pending = list(self._pending.items())
+            latency_pending = list(self._latency.items())
+        totals = {
+            "requests": int(total_row["requests"]), "errors": int(total_row["errors"]),
+            "embedTexts": int(total_row["embed_texts"]), "searchCalls": int(total_row["search_calls"]),
+            "rerankCalls": int(total_row["rerank_calls"]), "latencySum": float(total_row["latency_sum"]),
+        }
+        day_map = {r["day"]: {"requests": int(r["requests"]), "errors": int(r["errors"])} for r in day_rows}
+        ep_map = {r["endpoint"] or "": {"requests": int(r["requests"]), "errors": int(r["errors"]),
+                                        "latencySum": float(r["latency_sum"])} for r in ep_rows}
+        lat_counts = {int(r["bucket"]): int(r["requests"]) for r in lat_rows}
+        for (_key_id, day, endpoint), v in pending:
+            if day < day_from or day > day_to:
+                continue
+            totals["requests"] += v[0]
+            totals["errors"] += v[1]
+            totals["embedTexts"] += v[2]
+            totals["searchCalls"] += v[3]
+            totals["rerankCalls"] += v[4]
+            totals["latencySum"] += v[5]
+            d = day_map.setdefault(day, {"requests": 0, "errors": 0})
+            d["requests"] += v[0]
+            d["errors"] += v[1]
+            e = ep_map.setdefault(endpoint, {"requests": 0, "errors": 0, "latencySum": 0.0})
+            e["requests"] += v[0]
+            e["errors"] += v[1]
+            e["latencySum"] += v[5]
+        for (day, bucket), count in latency_pending:
+            if day < day_from or day > day_to:
+                continue
+            lat_counts[int(bucket)] = lat_counts.get(int(bucket), 0) + int(count)
+
+        endpoints = []
+        for ep, acc in ep_map.items():
+            endpoints.append({
+                "endpoint": ep or "other",
+                "requests": acc["requests"],
+                "errors": acc["errors"],
+                "errorRate": round(acc["errors"] / acc["requests"] * 100, 1) if acc["requests"] else 0.0,
+                "latencyAvg": _avg(acc["latencySum"], acc["requests"]),
+            })
+        endpoints.sort(key=lambda x: (-x["errors"], -x["requests"]))
+        days_out = []
+        for day in day_list:
+            row = day_map.get(day) or {"requests": 0, "errors": 0}
+            days_out.append({
+                "day": day,
+                "requests": row["requests"],
+                "errors": row["errors"],
+                "errorRate": round(row["errors"] / row["requests"] * 100, 1) if row["requests"] else 0.0,
+            })
+        requests = totals["requests"]
+        errors = totals["errors"]
+        return {
+            "days": days,
+            "from": day_from,
+            "to": day_to,
+            "totals": {
+                "requests": requests,
+                "errors": errors,
+                "embedTexts": totals["embedTexts"],
+                "searchCalls": totals["searchCalls"],
+                "rerankCalls": totals["rerankCalls"],
+                "latencyAvg": _avg(totals["latencySum"], requests),
+            },
+            "successRate": round(100 - errors / requests * 100, 1) if requests else None,
+            "byDay": days_out,
+            "byEndpoint": endpoints,
+            "topErrorEndpoints": [e for e in endpoints if e["errors"] > 0][:3],
+            "latency": _latency_percentiles(lat_counts),
+            "prevByEndpoint": [
+                {
+                    "endpoint": r["endpoint"] or "other",
+                    "requests": int(r["requests"]),
+                    "errors": int(r["errors"]),
+                    "latencyAvg": _avg(r["latency_sum"], r["requests"]),
+                }
+                for r in prev_ep_rows
+            ],
+            "prevTotals": {
+                "requests": int(prev_row["requests"]),
+                "errors": int(prev_row["errors"]),
+                "latencyAvg": _avg(prev_row["latency_sum"], prev_row["requests"]),
+            },
         }
 
     # ---------------------------------------------------------------- settings
