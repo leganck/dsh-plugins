@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "namespace / scope 规范化夹具：服务端 selftest.py 与插件 test-remote.mjs 都读它，防止 JS 与 Python 规则漂移。规则见 docs/scope-tier3.md §2。",
+  "description": "namespace / scope 规范化夹具：服务端 selftest.py 与插件 test-remote.mjs 都读它，防止 JS 与 Python 规则漂移。规则见 docs/scope-tier3.md §2。root 是 L2 新增维度：子目录索引与仓库根主快照并存。",
   "cases": [
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "main", "ref": "default", "expect": "r1234@fp1#main:default" },
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "feat/x", "expect": "r1234@fp1#branch:feat-x-d6e256" },
@@ -8,7 +8,9 @@
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "中文分支", "expect": "r1234@fp1#branch:x-4465f2" },
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "Feature_A", "expect": "r1234@fp1#branch:Feature_A-21868d" },
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "pr", "ref": "1234", "expect": "r1234@fp1#pr:1234" },
-    { "repoId": "r1234", "chunkFp": "fp1", "kind": "worktree", "ref": "abcdef1234567890", "expect": "r1234@fp1#wt:e4f91dd3" }
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "worktree", "ref": "abcdef1234567890", "expect": "r1234@fp1#wt:e4f91dd3" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "main", "ref": "default", "root": "plugins/dsh-code-index", "expect": "r1234@fp1#main:default~root:ff3b34eb" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "branch", "ref": "feat/x", "root": "packages\\web\\", "expect": "r1234@fp1#branch:feat-x-d6e256~root:2e82f685" }
   ],
   "legacy_cases": [
     { "namespace": "repo@fp", "expect": "repo@fp" },
@@ -20,6 +22,8 @@
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "pr", "ref": "abc", "reason": "pr-ref-not-numeric" },
     { "repoId": "r1234", "chunkFp": "fp1", "kind": "worktree", "ref": "", "reason": "empty-ref" },
     { "repoId": "has space", "chunkFp": "fp1", "kind": "main", "ref": "default", "reason": "invalid-repo-id" },
-    { "repoId": "r1234", "chunkFp": "a@b", "kind": "main", "ref": "default", "reason": "invalid-chunk-fp" }
+    { "repoId": "r1234", "chunkFp": "a@b", "kind": "main", "ref": "default", "reason": "invalid-chunk-fp" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "main", "ref": "default", "root": "../escape", "reason": "invalid-root" },
+    { "repoId": "r1234", "chunkFp": "fp1", "kind": "main", "ref": "default", "root": "C:/abs/path", "reason": "invalid-root" }
   ]
 }

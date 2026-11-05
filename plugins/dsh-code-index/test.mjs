@@ -97,14 +97,27 @@ const store = Store.open(dbPath)
 // 夹具是 JS 与 Python 两端共同的唯一真相（server/code-index-service/scope_format.json）。
 console.log('[0] 作用域规范')
 {
-  const { normalizeNamespace, safeRef, refToken, validateScope } = await import('./lib/scope.js')
+  const { normalizeNamespace, safeRef, refToken, validateScope, canonicalNamespace, normalizeRoot, rootToken } = await import('./lib/scope.js')
   const fixture = JSON.parse(fs.readFileSync(new URL('../../server/code-index-service/scope_format.json', import.meta.url), 'utf8'))
   for (const c of fixture.legacy_cases) {
     check('legacy 命名空间原样保留（不重新规范化）', normalizeNamespace(c.namespace) === c.expect)
   }
+  // 逐条跑 canonical 夹具（含 root 维度）：JS/Python 两端只要漂移这里就会红
+  const badCanon = []
+  for (const c of fixture.cases) {
+    const got = canonicalNamespace(c.repoId, c.chunkFp, c.kind, c.ref, c.root)
+    if (got !== c.expect) badCanon.push({ expect: c.expect, got })
+  }
+  check(`canonical 夹具 ${fixture.cases.length} 条全一致（含 ~root）`, badCanon.length === 0, JSON.stringify(badCanon[0] ?? ''))
   check('safeRef 把非法字符压成 -、空结果用 x', safeRef('feat/x') === 'feat-x' && safeRef('中文分支') === 'x')
   check('main 的 ref 被忽略（固定 default）', refToken('main', 'dev') === 'default')
   check('validateScope 保留原始分支名（token 只用于命名空间）', validateScope({ kind: 'branch', ref: 'feat/x' }).ref === 'feat/x')
+  check('root 归一：反斜杠/尾斜杠/./ 等价', normalizeRoot('plugins\\dsh-code-index\\') === 'plugins/dsh-code-index' && normalizeRoot('./') === '')
+  check('rootToken 8 位且与夹具一致', rootToken('plugins/dsh-code-index') === 'ff3b34eb', rootToken('plugins/dsh-code-index'))
+  check('validateScope 接受 root 并归一', JSON.stringify(validateScope({ kind: 'main', root: 'a\\b\\' })) === JSON.stringify({ kind: 'main', ref: 'default', root: 'a/b' }))
+  let badRootThrew = false
+  try { normalizeRoot('../escape') } catch (e) { badRootThrew = e.reason === 'invalid-root' }
+  check("root 含 '..' → invalid-root", badRootThrew)
 
   // 配置校验：DSH_HOME 必须先隔离 —— apply() 会写加载标记，不能碰真实 ~/.dsh
   process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ci-test-home-'))

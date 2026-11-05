@@ -49,6 +49,7 @@ create table if not exists repos (
   updated_at integer not null,
   scope_kind text not null default 'main',
   scope_ref text,
+  root_rel text,
   commit_sha text,
   ttl_days integer,
   expires_at integer,
@@ -155,10 +156,46 @@ def ref_token(kind, ref):
     raise ScopeFormatError("unknown-kind", f"kind={kind}")
 
 
-def canonical_namespace(repo_id, chunk_fp, kind, ref):
-    """canonical_namespace(repoId, chunkFp, kind, ref) -> "{repoId}@{chunkFp}#{kind}:{refToken}"。
+def normalize_root(root):
+    """把"索引根相对 git 顶层的路径"归一成命名空间里用的形式。
 
-    legacy 命名空间（不含 #）**不经过本函数**，原样保留（见 legacy_namespace()）。
+    规则（与插件 `lib/scope.js normalizeRoot()` 逐条一致）：
+    - `None`/空/`.`/`/` → `""`（表示仓库根，不写 root 维度）；
+    - 反斜杠统一成 `/`，去掉空段与 `./`；
+    - 拒绝绝对路径（`/x`、`C:/x`）和 `..` 段 → ScopeFormatError('invalid-root')。
+
+    为什么需要：同一个 git 仓库的子目录是**同一分支的另一个扫描根**，不是新快照；
+    把根作为命名空间的一个维度（`~root:<sha8>`），子目录与仓库根才能并存且不混淆。
+    """
+    text = "" if root is None else str(root)
+    text = text.strip().replace("\\", "/")
+    if not text or text == "." or text == "./":
+        return ""
+    if text.startswith("/"):
+        raise ScopeFormatError("invalid-root", f"root 必须是相对路径：{text!r}")
+    parts = [p for p in text.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ScopeFormatError("invalid-root", f"root 不能包含 '..'：{text!r}")
+    if parts and len(parts[0]) == 2 and parts[0][0].isalpha() and parts[0][1] == ":":
+        raise ScopeFormatError("invalid-root", f"root 必须是相对路径：{text!r}")
+    return "/".join(parts)
+
+
+def root_token(root):
+    """子目录根 → 8 位 sha1；仓库根返回 None（命名空间里不写 `~root:`）。"""
+    rel = normalize_root(root)
+    if not rel:
+        return None
+    return hashlib.sha1(rel.encode("utf-8")).hexdigest()[:8]
+
+
+def canonical_namespace(repo_id, chunk_fp, kind, ref, root=None):
+    """canonical_namespace(repoId, chunkFp, kind, ref, root=None)
+    -> "{repoId}@{chunkFp}#{kind}:{refToken}[~root:{sha8}]"。
+
+    - legacy 命名空间（不含 #）**不经过本函数**，原样保留（见 legacy_namespace()）；
+    - `root` 为空 = 仓库根；非空 = 该仓库的某个子目录（同一 (repoId, kind, ref) 下允许并存，
+      靠 `~root:<sha8>` 区分）。
     """
     repo_id = "" if repo_id is None else str(repo_id)
     chunk_fp = "" if chunk_fp is None else str(chunk_fp)
@@ -168,7 +205,9 @@ def canonical_namespace(repo_id, chunk_fp, kind, ref):
         raise ScopeFormatError("invalid-chunk-fp", f"chunkFp={chunk_fp!r}")
     if kind not in _TOKENS:
         raise ScopeFormatError("unknown-kind", f"kind={kind!r}")
-    return f"{repo_id}@{chunk_fp}#{_TOKENS[kind]}:{ref_token(kind, ref)}"
+    base = f"{repo_id}@{chunk_fp}#{_TOKENS[kind]}:{ref_token(kind, ref)}"
+    rt = root_token(root)
+    return f"{base}~root:{rt}" if rt else base
 
 
 def legacy_namespace(namespace):
@@ -183,22 +222,25 @@ def legacy_namespace(namespace):
 def parse_scope_namespace(namespace):
     """从 canonical namespace 反推 scope 元信息（不含 # 的旧格式返回 kind=None，调用方应拒绝）。
 
-    返回 {kind, token, scope_ref}；scope_ref 按 §3 的列值口径：
-    main -> "default"、branch -> token、pr -> token、worktree -> "wt:<sha8>"。
+    返回 {kind, token, scope_ref, root}；scope_ref 按 §3 的列值口径：
+    main -> "default"、branch -> token、pr -> token、worktree -> "wt:<sha8>"；
+    root 是 `~root:<sha8>` 里的 sha8（仓库根为 None，无法反推相对路径）。
     """
     ns = "" if namespace is None else str(namespace)
     if "#" not in ns:
-        return {"kind": None, "token": None, "scope_ref": None}
-    _, _, tail = ns.rpartition("#")
+        return {"kind": None, "token": None, "scope_ref": None, "root": None}
+    head, sep, root_hash = ns.partition("~root:")
+    root = (root_hash or None) if sep else None
+    _, _, tail = head.rpartition("#")
     prefix, _, token = tail.partition(":")
     kind = _TOKEN_KINDS.get(prefix)
     if not kind:
-        return {"kind": None, "token": token or None, "scope_ref": None}
+        return {"kind": None, "token": token or None, "scope_ref": None, "root": root}
     if kind == "worktree":
         scope_ref = f"wt:{token}" if token else None
     else:
         scope_ref = token or None
-    return {"kind": kind, "token": token or None, "scope_ref": scope_ref}
+    return {"kind": kind, "token": token or None, "scope_ref": scope_ref, "root": root}
 
 
 def namespace_identity(namespace):
@@ -346,6 +388,7 @@ class IndexStore:
         for name, ddl in (
             ("scope_kind", "text not null default 'main'"),
             ("scope_ref", "text"),
+            ("root_rel", "text"),
             ("commit_sha", "text"),
             ("ttl_days", "integer"),
             ("expires_at", "integer"),
@@ -466,14 +509,19 @@ class IndexStore:
             return int(cur.rowcount or 0)
 
     # ---------------------------------------------------------------- 作用域生命周期
-    def register_scope(self, namespace, kind, ref, commit_sha=None, scope_ref=None):
-        """写/更新 scope 元数据；作用域永久，不再计算 TTL/pin。"""
+    def register_scope(self, namespace, kind, ref, commit_sha=None, scope_ref=None, root_rel=None):
+        """写/更新 scope 元数据；作用域永久，不再计算 TTL/pin。
+
+        `root_rel`：索引根相对 git 顶层的路径（仓库根传 None/空串）；
+        命名空间里只带 `~root:<sha8>`，这里同时存一份可读路径供控制台展示。
+        """
         now = int(time.time())
         kind = kind or "main"
         if kind not in SCOPE_KINDS:
             raise ScopeFormatError("unknown-kind", f"kind={kind!r}")
         if scope_ref is None:
             scope_ref = self._scope_ref_value(kind, ref)
+        root_rel = normalize_root(root_rel) or None
         with self.lock:
             row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
             if row is None:
@@ -481,15 +529,19 @@ class IndexStore:
                 lineage = self.ensure_lineage("", repo_id or "unknown")
                 self.db.execute(
                     "insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
-                    " repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, created_at)"
-                    " values (?,?,?,?,0,null,null,null,?,?,?,?,?)",
+                    " repo_state_chunks, updated_at, scope_kind, scope_ref, root_rel, commit_sha, created_at)"
+                    " values (?,?,?,?,0,null,null,null,?,?,?,?,?,?)",
                     (namespace, lineage, repo_id or "unknown", chunk_fp or "default", now, kind, scope_ref,
-                     commit_sha, now),
+                     root_rel, commit_sha, now),
                 )
                 self.db.commit()
                 row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
             sets = ["scope_kind = ?", "scope_ref = ?", "updated_at = ?"]
             args = [kind, scope_ref, now]
+            # root_rel 只在显式给了根时写（仓库根同步不写，避免把旧行已有值清掉）
+            if root_rel:
+                sets.append("root_rel = ?")
+                args.append(root_rel)
             if commit_sha is not None:
                 sets.append("commit_sha = ?")
                 args.append(commit_sha)
@@ -577,6 +629,7 @@ class IndexStore:
             item["scope"] = {
                 "kind": r["scope_kind"] or "main",
                 "ref": r["scope_ref"],
+                "root": r["root_rel"],
                 "commit": r["commit_sha"],
                 "createdAt": r["created_at"],
             }
@@ -600,8 +653,9 @@ class IndexStore:
             needle = "%" + str(q).strip().lower() + "%"
             where.append("(lower(coalesce(r.repo_name,'')) like ? or lower(r.repo_id) like ?"
                          " or lower(r.namespace) like ? or lower(coalesce(r.scope_ref,'')) like ?"
+                         " or lower(coalesce(r.root_rel,'')) like ?"
                          " or lower(r.chunk_fp) like ?)")
-            args.extend([needle] * 5)
+            args.extend([needle] * 6)
         return where, args
 
     def scope_page(self, repo_id=None, kind=None, q=None, sort="updated_at", order="desc",
@@ -668,6 +722,7 @@ class IndexStore:
                 item["scope"] = {
                     "kind": r["scope_kind"] or "main",
                     "ref": r["scope_ref"],
+                    "root": r["root_rel"],
                     "commit": r["commit_sha"],
                     "createdAt": r["created_at"],
                 }
