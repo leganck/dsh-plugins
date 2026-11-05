@@ -26,7 +26,7 @@ P3（simhash 候选 + 精确哈希 adopt）：
   · 只复制精确 hash + 当前 tag，不复制 chunks/path；full+adopt 集成
   · reuse=off / diff 不查询；adopt 失败不影响 sync；诊断接口与鉴权
 
-跑法：python selftest.py
+跑法：python tests/selftest.py（在服务根目录执行）
 """
 import base64
 import functools
@@ -63,7 +63,9 @@ os.environ.update(
     MAX_SEARCH_SCOPES="4",
 )
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+SELFTEST_DIR = os.path.dirname(os.path.abspath(__file__))   # …/tests
+SERVICE_ROOT = os.path.dirname(SELFTEST_DIR)                # 服务根目录（运行期模块在这里）
+sys.path.insert(0, SERVICE_ROOT)
 import server  # noqa: E402
 import index_store as istore  # noqa: E402
 
@@ -341,7 +343,7 @@ def main():
         return req("POST", f"/v1/namespaces/{nsq(ns)}/chunks", {"bodies": bodies})[1]
 
     print("\n[15] namespace 规范夹具（scope_format.json）")
-    fixture_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scope_format.json")
+    fixture_path = os.path.join(SERVICE_ROOT, "scope_format.json")
     if not os.path.exists(fixture_path):
         # 显式失败而不是静默跳过：容器发布门禁也要能发现"夹具没被打包进镜像"
         check("scope_format.json 可用", False, f"文件不存在：{fixture_path}（Dockerfile COPY 需包含它）")

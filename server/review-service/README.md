@@ -24,8 +24,8 @@ worker ─▶ MirrorManager（每项目一镜像，fetch MR ref + 目标分支�
 ## 快速开始
 
 ```bash
-cp .env.example .env      # 填 GITLAB_URL / GITLAB_TOKEN / WEBHOOK_SECRET / LLM_API_KEY
-docker compose up -d      # 镜像：ghcr.io/leganck/dsh-review:latest（或本地 build）
+cp deploy/.env.example deploy/.env      # 填 GITLAB_URL / GITLAB_TOKEN / WEBHOOK_SECRET / LLM_API_KEY
+docker compose -f deploy/compose.yaml up -d      # 镜像：ghcr.io/leganck/dsh-review:latest（或本地 build）
 curl -s localhost:18001/healthz | head -c 300
 ```
 
@@ -41,7 +41,7 @@ Secret token 填 `.env` 里的 `WEBHOOK_SECRET`，地址 `http://<host>:18001/we
 
 clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地址）。
 
-## 关键配置（完整见 `.env.example`）
+## 关键配置（完整见 `deploy/.env.example`）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -94,7 +94,7 @@ clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地�
 
 ```bash
 # 1) 开启 dry-run 与 clone 取数
-DRY_RUN=1 GIT_STRATEGY=clone docker compose up -d
+DRY_RUN=1 GIT_STRATEGY=clone docker compose -f deploy/compose.yaml up -d
 
 # 2) GitLab webhook 照常配，跑 1–2 周 / 累计 30 个 MR
 

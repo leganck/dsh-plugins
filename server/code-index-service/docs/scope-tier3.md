@@ -179,7 +179,7 @@ INDEX_PR_TTL_DAYS = 14                       （传给服务端 scope.ttlDays）
 | 负责人 | 文件 |
 |---|---|
 | Lead | `server/code-index-service/scope_format.json`、`server/code-index-service/docs/scope-tier3.md`、发布/E2E |
-| server-core | `server/code-index-service/{index_store.py,server.py,selftest.py,README.md}` |
+| server-core | `server/code-index-service/{index_store.py,server.py,tests/selftest.py,README.md}` |
 | plugin-client | `plugins/dsh-code-index/{lib/scope.js,index.js,lib/remote.js,lib/indexer.js,test-remote.mjs,test.mjs,package.json,README.md}` |
 | review-integration | `server/review-service/app/{config,sync,worker,clients,context,pipeline,server,index_state,selftest}.py`、`server/review-service/README.md` |
 
@@ -187,7 +187,7 @@ INDEX_PR_TTL_DAYS = 14                       （传给服务端 scope.ttlDays）
 
 ```bash
 # 服务端（本机已装 numpy）
-cd server/code-index-service && python selftest.py            # 基线 43 → 目标 ~60+
+cd server/code-index-service && python tests/selftest.py            # 基线 43 → 目标 ~60+
 
 # 插件
 cd plugins/dsh-code-index && node test-remote.mjs && node test.mjs && node test-plugin.mjs
@@ -202,7 +202,7 @@ cd server/review-service && python -m app.selftest            # 基线 85 → �
 
 验收：
 
-- [ ] 夹具三组 cases 两端全过；`python selftest.py`、三个 node 测试、`python -m app.selftest` 全绿；
+- [ ] 夹具三组 cases 两端全过；`python tests/selftest.py`、三个 node 测试、`python -m app.selftest` 全绿；
 - [ ] 两分支交替索引互不覆盖；默认主作用域查询无分支内容；
 - [ ] 合并后重建 main：`missing=0`、`coverage=100%`、0 重嵌；
 - [ ] `DELETE scope` 后 `/health.spaces` 消失；GC 不误删仍被其他 scope 引用的内容；

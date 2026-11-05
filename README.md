@@ -135,16 +135,21 @@ plugins/
     docs/analysis/              多根工作空间调研与实现设计（从仓库根 docs/analysis 迁入）
     test.mjs                    自测
 server/
+  README.md                     两个服务的对照表 / 目录约定 / 部署与自测入口
   review-service/               自研 GitLab MR AI 评审（Python）：webhook + 镜像仓 + 语法图 + 并行流水线
+    app/                        运行期包（server / pipeline / graph / llm / sync …）
+    tests/                      pytest（含 chunk-golden / graph-sample 夹具）
+    scripts/spikes/             P0 原型脚本（bench_graph / probe_* / make_chunk_golden）
+    deploy/                     compose.yaml + .env.example
     Dockerfile                  镜像含 git + tree-sitter（231 MB）
-    compose.yaml                单容器部署（/data 卷：任务库/镜像仓/工作树）
     docs/                       P0 验证报告、图谱说明
   code-index-service/           远端索引服务（Python）：/v1 索引层 + /embed + /rerank
+    *.py                        运行期模块（server / index_store / knn / governor / embedder …）
+    tests/                      selftest.py（256 项，FAKE_EMBED 不需要模型）+ bench_knn_modes.py
+    deploy/                     compose*.yaml（5 份）+ .env.example + legacy/
     Dockerfile                  一个文件出 4 种镜像：base / nomodel / embed / embed-rerank
-    compose.yaml (+.gpu/.build) 开箱即用部署（镜像自带嵌入模型）
     scripts/fetch-models.mjs    拉模型到 models/（构建用，不进 git）
-    selftest.py                 服务端自测（43 项；FAKE_EMBED 模式不需要模型）
-    deploy/legacy/              容器化之前的非容器路径，仅参考
+    scope_format.json           namespace 规范夹具（插件测试也读它）
 ```
 
 ## 多插件仓库约定（新增插件照做即可）
@@ -237,7 +242,7 @@ docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
 自研 GitLab MR AI 评审，参考 CodeRabbit 的评审主链路：
 
 ```bash
-cp server/review-service/.env.example server/review-service/.env   # 填 GitLab/LLM
+cp server/review-service/deploy/.env.example server/review-service/deploy/.env   # 填 GitLab/LLM
 cd server/review-service && docker compose up -d
 ```
 

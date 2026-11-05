@@ -4,7 +4,7 @@
 #   curl -s http://127.0.0.1:18000/health | head -c 400
 #
 # 默认拉 GHCR 上的 latest-cpu（≈0.3 GB，含 bge-base-zh-v1.5 fp16）。
-# 有 NVIDIA 卡、要大规模建库或高并发 → 加 -f compose.gpu.yaml。
+# 有 NVIDIA 卡、要大规模建库或高并发 → 加 -f deploy/compose.gpu.yaml。
 # 要远端重排 → 把 IMAGE 换成 :latest-cpu-rerank / :latest-gpu-rerank。
 #
 # 端口只绑 127.0.0.1：对外暴露请走反代（见 README「反向代理」一节）。

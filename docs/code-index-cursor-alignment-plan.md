@@ -700,7 +700,7 @@ remote:
 ### 9.2 门禁
 
 - `pnpm test`（插件）；
-- 服务端 `python selftest.py`；
+- 服务端 `python tests/selftest.py`；
 - `yaml + manifests` / 插件市场索引检查；
 - 现有 CI 不变；
 - 新增依赖后确认安装无 `pendingBuilds`。

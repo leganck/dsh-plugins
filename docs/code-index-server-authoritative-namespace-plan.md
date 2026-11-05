@@ -50,7 +50,7 @@ GET  /v1/namespaces/{ns}/status
 
 ```bash
 # 服务端（不加载 ONNX）
-cd server/code-index-service && FAKE_EMBED=1 python selftest.py
+cd server/code-index-service && FAKE_EMBED=1 python tests/selftest.py
 python scripts/check-admin-html.py
 
 # 插件

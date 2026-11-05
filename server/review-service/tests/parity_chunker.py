@@ -67,7 +67,7 @@ def main() -> int:
             text = f.read()
         expected_hash = item.get("textHash")
         if expected_hash and hashlib.sha256(text.encode("utf-8")).hexdigest() != expected_hash:
-            print(f"  [stale] {item['path']}（文件已改动，golden 过期；重跑 spikes/make_chunk_golden.mjs）")
+            print(f"  [stale] {item['path']}（文件已改动，golden 过期；重跑 scripts/spikes/make_chunk_golden.mjs）")
             continue
 
         got = chunk_file(item["path"], text)

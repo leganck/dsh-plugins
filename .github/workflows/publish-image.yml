@@ -163,7 +163,7 @@ jobs:
       # 门禁：容器内自测（不需要模型，FAKE_EMBED=1），失败就绝不发布
       - name: smoke test (selftest.py in container)
         run: |
-          docker run --rm -e FAKE_EMBED=1 dsh-embed:smoke python /app/selftest.py
+          docker run --rm -e FAKE_EMBED=1 dsh-embed:smoke python /app/tests/selftest.py
       # 门禁：真实模型要能被找到（baked 目标）
       - name: smoke test (model files present)
         run: |

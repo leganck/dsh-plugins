@@ -71,7 +71,7 @@ if [ "$wants_cuda" = "1" ]; then
   # 而不是优雅降级。所以先看设备，再决定用不用 CUDA。
   if [ ! -e /dev/nvidia0 ]; then
     log "警告：要求 CUDA，但容器内没有 /dev/nvidia0 —— 说明没做 GPU 设备预留。"
-    log "      用 compose 的话叠加：docker compose -f compose.yaml -f compose.gpu.yaml up -d"
+    log "      用 compose 的话叠加：docker compose -f deploy/compose.yaml -f deploy/compose.gpu.yaml up -d"
     log "      （并确认宿主机装了 nvidia-container-toolkit）。本次退回 CPU。"
     ORT_PROVIDERS=CPUExecutionProvider
     export ORT_PROVIDERS
@@ -106,7 +106,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 4) 启动
-# 显式给了命令就照办（例如 docker run … python /app/selftest.py）。
+# 显式给了命令就照办（例如 docker run … python /app/tests/selftest.py）。
 # 不加这段的话 ENTRYPOINT 会把任何命令都吞掉、一律起服务 —— 冒烟测试会"看起来卡住"。
 if [ "$#" -gt 0 ]; then
   log "执行自定义命令：$*"

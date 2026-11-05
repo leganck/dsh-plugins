@@ -1,7 +1,7 @@
 """graph 真实仓库基准：建图耗时、符号/边数、查询延迟（p50/p95）。
 
 跑法（容器内，需 tree-sitter）：
-    python spikes/bench_graph.py /path/to/repo [--branch main]
+    python scripts/spikes/bench_graph.py /path/to/repo [--branch main]
 """
 
 from __future__ import annotations

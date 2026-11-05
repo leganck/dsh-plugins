@@ -1,7 +1,7 @@
 """打印某个文件在指定语法下的节点树（用于修正 query 的节点名）。
 
-    python spikes/probe_lang_nodes.py groovy tests/fixtures/graph-sample/g.groovy
-    python spikes/probe_lang_nodes.py typescript tests/fixtures/graph-sample/d.ts
+    python scripts/spikes/probe_lang_nodes.py groovy tests/fixtures/graph-sample/g.groovy
+    python scripts/spikes/probe_lang_nodes.py typescript tests/fixtures/graph-sample/d.ts
 """
 
 from __future__ import annotations
