@@ -32,7 +32,7 @@ import { normalizeRelPrefix } from './lib/scan.js'
 import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch, gitToplevel } from './lib/repo.js'
 import { normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
-import { RepoRegistry } from './lib/repo-registry.js'
+import { RepoRegistry, pruneNestedRepos } from './lib/repo-registry.js'
 import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
 import { resolveAllowedRoots, isInsideRoots } from './lib/workspace-roots.js'
 import z from '@deepseek-ai/schemastery'
@@ -867,6 +867,16 @@ function applyInner(ctx, rawConfig = {}) {
   const stores = new Map()
 /** 已索引仓库注册表：DSH 重启后恢复 watcher，而不是等下一次手动 code_index */
 const repoRegistry = new RepoRegistry(bootDir())
+/**
+ * 注册表去重：同一个 git 仓库被"仓库根"和"子目录"各注册一次时，两者共用
+ * (repoId, kind, ref)、只有 chunkFp 不同 → 服务端会出现两行同名 main 作用域。
+ * 启动时删掉"git 顶层已在注册表里"的子目录条目（子目录内容本来就被根覆盖）。
+ */
+;(() => {
+  for (const root of pruneNestedRepos(repoRegistry, gitToplevel)) {
+    ctx.logger?.info?.(`dsh-code-index: 子目录 ${root} 已并入仓库根索引，移出自动同步注册表`)
+  }
+})()
 /** repoRoot -> AutoSyncEntry；同进程内去重 */
 const autoEntries = new Map()
 let reconcileTimer = null
