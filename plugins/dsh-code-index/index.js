@@ -29,7 +29,7 @@ import { isValidStrategy, strategyTable, resolveChunkConfig } from './lib/strate
 import { search as hybridSearch, searchFusedRemote } from './lib/search.js'
 import { buildIndex, scanStatus, indexDbPath, dropIndex } from './lib/indexer.js'
 import { normalizeRelPrefix } from './lib/scan.js'
-import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch } from './lib/repo.js'
+import { normalizeRemoteUrl, gitOriginUrl, repoIdOf, gitBranch, gitToplevel } from './lib/repo.js'
 import { normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CONFIG_KEYS } from './lib/scope.js'
 import { renderParserHint } from './lib/parser-hints.js'
 import { RepoRegistry } from './lib/repo-registry.js'
@@ -970,12 +970,13 @@ let reconcileTimer = null
    * 命名空间优先级（档 3 §6）：
    * namespace 由服务端计算；客户端只缓存 sync 响应，不再维护 canonical 算法。
    */
-  /** `remote.scope: "auto"`：按当前 git 分支推导；无 git 时返回 null（退回 legacy 命名空间） */
+  /** `remote.scope: "auto"`：按当前 git 分支推导；detached 时解析指向 HEAD 的分支，解析不到才回退 main:default */
   const autoScopeFor = (repoRoot) => {
     const b = gitBranch(repoRoot)
     // 没有 git 也写到 main:default（repoId 已由本地路径哈希区分），不再产生 legacy 命名空间
     if (!b.name) return { kind: 'main', ref: 'default' }
-    if (!b.detached && (b.name === 'main' || b.name === 'master')) return { kind: 'main', ref: 'default' }
+    // main/master 一律写 main:default；detached（rebase 等）解析出的真分支名照分支处理
+    if (b.name === 'main' || b.name === 'master') return { kind: 'main', ref: 'default' }
     return { kind: 'branch', ref: b.name }
   }
   const effectiveScopeFor = (repoRoot) =>
@@ -1161,6 +1162,12 @@ let reconcileTimer = null
           if (r.remoteError) markRemoteDown(new Error(r.remoteError))
           else markRemoteUp()
         }
+        const top = gitToplevel(repoRoot)
+        const relTop = top ? path.relative(top, repoRoot) : ''
+        const subdirHint = (top && relTop && !relTop.startsWith('..'))
+          ? `  提示：索引的是仓库子目录（${relTop}），作用域与仓库根共用；`
+            + `不需要独立索引时只索引根目录 ${top}，可避免列表出现同一仓库的重复指纹行`
+          : null
         const lines = [
           `索引完成（${r.mode}）${repoRoot}`,
           `  扫描 ${r.scanned} 文件；变更 ${r.changed} / 删除 ${r.removed}；写入 ${r.chunksWritten} 块`,
@@ -1184,6 +1191,7 @@ let reconcileTimer = null
               : `  向量：${r.vectorsBefore} → ${r.vectorsAfter}（本轮补算 ${r.embedded}）`,
           // 作用域只在配了新键时多一行：旧配置输出保持原样（不制造噪音）
           scopeInfo ? renderScopeLine(scopeInfo) : null,
+          subdirHint,
           keywordOnly ? null : `  ${r.embedNote}`,
           r.remote?.adopted
             ? `  复用：从 ${r.remote.adopted.fromRepo || r.remote.adopted.fromLineage} 复用 ${r.remote.adopted.vectors ?? 0} 块（重叠 ${((r.remote.adopted.overlap ?? 0) * 100).toFixed(0)}%）`
