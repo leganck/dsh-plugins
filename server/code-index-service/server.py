@@ -1788,7 +1788,9 @@ function chartSvg(rows, opts) {
   const vals = rows.map((r) => Number(o.value(r) || 0));
   const thresholds = (o.thresholds || []).map((t) => ({ value: Number(t.value) || 0, label: t.label || '', color: t.color || 'var(--warn)' }));
   const ref = o.refLine ? { value: Number(o.refLine.value) || 0, label: o.refLine.label || '' } : null;
-  const rawMax = Math.max(Number(o.minMax || 1), ...vals, ...thresholds.map((t) => t.value), ref ? ref.value : 0);
+  const dataMax = Math.max(Number(o.minMax || 1), ...vals, ref ? ref.value : 0);
+  // 阈值线只在其与数据同量级（≤2 倍）时参与刻度，否则贴顶画（避免"目标 300ms"把 8ms 的柱子压成一条线）
+  const rawMax = Math.max(dataMax, ...thresholds.map((t) => t.value).filter((v) => v <= dataMax * 2));
   const max = rawMax * 1.05;
   const plotW = W - PL - PR, plotH = H - PT - PB;
   const X = (i) => PL + (i + 0.5) * (plotW / rows.length);
@@ -1814,9 +1816,10 @@ function chartSvg(rows, opts) {
     }
   });
   for (const t of thresholds) {
-    const yy = Y(t.value);
+    const over = t.value > max;
+    const yy = over ? PT : Y(t.value);
     parts.push('<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + yy.toFixed(1) + '" y2="' + yy.toFixed(1) + '" stroke="' + t.color + '" stroke-dasharray="5 4"/>');
-    parts.push('<text x="' + (W - PR - 2) + '" y="' + (yy - 3).toFixed(1) + '" text-anchor="end" class="ax" fill="' + t.color + '">' + escapeHtml(t.label) + '</text>');
+    parts.push('<text x="' + (W - PR - 2) + '" y="' + (yy + 10).toFixed(1) + '" text-anchor="end" class="ax" fill="' + t.color + '">' + escapeHtml(t.label + (over ? '（高于图内数据）' : '')) + '</text>');
   }
   if (ref) {
     const yy = Y(ref.value);
@@ -1878,7 +1881,7 @@ function renderLatencyTrend() {
     chart: 'latency',
     value: (r) => r.value,
     color: 'var(--blue)',
-    minMax: 100,
+    minMax: 20,
     yfmt: (v) => Math.round(v) + 'ms',
     thresholds: [{ value: LAT_TARGET_MS, label: '目标 300ms', color: 'var(--warn)' }],
     bad: (r) => r.value > LAT_TARGET_MS,
@@ -1917,10 +1920,14 @@ function renderRuntime(health, runtime) {
   const cats = (STATS && STATS.categories) || {};
   const biz = businessCats(cats), sys = catOf(cats, 'system');
   const paused = rt.paused != null ? rt.paused : !!((h.governor || {}).paused);
+  const gov = h.governor || {};
+  const etaSec = rt.etaSeconds != null
+    ? rt.etaSeconds
+    : (backlog > 0 && Number(gov.rate) > 0 && !paused ? backlog / Number(gov.rate) : null);
   let etaText = '';
   if (backlog > 0) {
     if (paused) etaText = '已暂停';
-    else if (rt.etaSeconds != null) etaText = '约 ' + fmtEta(rt.etaSeconds) + ' 清空';
+    else if (etaSec != null) etaText = '约 ' + fmtEta(etaSec) + ' 清空';
     else etaText = '后台嵌入中';
   } else {
     etaText = '已完成';
