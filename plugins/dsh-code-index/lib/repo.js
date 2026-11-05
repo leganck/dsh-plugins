@@ -47,7 +47,13 @@ export function gitOriginUrl(repoRoot) {
  * 血统标识：默认 = sha1(归一化 origin URL) 前 12 位（同一仓库的不同克隆/机器算出同一个值）；
  * 无 git 时用绝对路径哈希（仅本机血统）。
  */
-/** 当前分支：{name, detached}；不是 git 仓库时 {name: '', detached: false}。 */
+/** 当前分支：{name, detached}；不是 git 仓库时 {name: '', detached: false}。
+ *
+ * detached HEAD（rebase/checkout <sha>）时不能用 short sha 当分支名 —— 那会在服务端
+ * 造出 `#branch:<sha8>` 这种一次性作用域（作用域现在永久保留，会一直堆在列表里）。
+ * 改为找“指向 HEAD 的分支”：rebase 过程中原分支就指向新 HEAD，能正常恢复分支名；
+ * 真找不到（裸 checkout 某个提交）才返回空名，交给 autoScopeFor 回退 main:default。
+ */
 export function gitBranch(repoRoot) {
   const git = (args) =>
     execFileSync('git', ['-C', repoRoot, ...args], {
@@ -58,10 +64,34 @@ export function gitBranch(repoRoot) {
   try {
     const name = git(['rev-parse', '--abbrev-ref', 'HEAD'])
     if (name && name !== 'HEAD') return { name, detached: false }
-    const sha = git(['rev-parse', '--short', 'HEAD'])
-    return { name: sha, detached: true }
+    // detached：先看有没有本地分支正指向 HEAD（rebase 期间是这种情况）
+    try {
+      const listed = git(['for-each-ref', '--points-at', 'HEAD', '--format=%(refname:short)', 'refs/heads/'])
+      const branches = listed.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).sort()
+      if (branches.length) {
+        const preferred = branches.find((b) => b === 'main' || b === 'master') ?? branches[0]
+        return { name: preferred, detached: true }
+      }
+    } catch {
+      /* 老版本 git 不支持 --points-at：按未知处理 */
+    }
+    return { name: '', detached: true }
   } catch {
     return { name: '', detached: false }
+  }
+}
+
+/** git 仓库顶层目录（子目录索引时用来判断"是否只索引了仓库的一部分"）；非 git 返回 '' */
+export function gitToplevel(repoRoot) {
+  try {
+    const out = execFileSync('git', ['-C', repoRoot, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return String(out).trim()
+  } catch {
+    return ''
   }
 }
 

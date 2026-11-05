@@ -250,6 +250,15 @@ kind=worktree  -> refToken = sha1(ref)[:8]                  （命名空间里�
 **命名空间优先级**：`remote.namespace`（显式覆盖）> `remote.scope` 推导 > 旧默认 `<repoId>@<切块指纹>`。
 `remote.namespace` 与 `remote.scope` 同时给时以 `namespace` 为准（`scope` 只用于展示）。
 
+**detached HEAD（rebase / checkout 某个 sha）**：0.15.2 起不再把 short sha 当分支名（那会写出
+一次性的 `#branch:<sha8>` 作用域，永久作用域模式下会一直堆在控制台）。现在按
+`git for-each-ref --points-at HEAD refs/heads/` 找"指向 HEAD 的分支"：唯一命中就沿用该分支名；
+真找不到（裸 checkout 提交）才回退 `main:default`。
+
+**子目录索引**：同一个 git 仓库的根目录和子目录共用 `(repoId, kind, ref)`，只有 `chunkFp`
+不同 → 服务端会显示两行同名作用域。`code_index` 在检测到"索引的是仓库子目录"时会输出提示；
+不需要独立索引时只索引仓库根即可。
+
 **多作用域读取**：分支上查询时，通常还想看主干已有的实现 —— 把主干的命名空间放进 `readScopes`，
 `code_search` 会一次检索 `[写作用域, ...readScopes]`（去重保序），服务端结果再按内容哈希合并：
 
