@@ -121,3 +121,29 @@ export class RepoRegistry {
     return changed
   }
 }
+
+/**
+ * 删除"git 顶层已在注册表里"的子目录条目。
+ *
+ * 为什么需要：同一仓库被"仓库根"和"子目录"各注册一次时，两者共用 (repoId, kind, ref)、
+ * 只有 chunkFp 不同 → 服务端出现两行同名作用域（2026-11-05 实际出现过）。
+ * 子目录内容本来就被根索引覆盖，保留条目只会制造重复。
+ * @param {RepoRegistry} registry
+ * @param {(root: string) => string} toplevelOf 返回 git 顶层（非 git 返回 ''）
+ * @returns {string[]} 被删除的 root
+ */
+export function pruneNestedRepos(registry, toplevelOf) {
+  const entries = registry.list()
+  if (entries.length < 2) return []
+  const byRoot = new Map(entries.map((r) => [path.resolve(r.root), r]))
+  const drop = []
+  for (const r of entries) {
+    const top = toplevelOf(r.root)
+    if (!top) continue
+    const absTop = path.resolve(top)
+    if (absTop === path.resolve(r.root)) continue
+    if (byRoot.has(absTop)) drop.push(r.root)
+  }
+  for (const root of drop) registry.remove(root)
+  return drop
+}

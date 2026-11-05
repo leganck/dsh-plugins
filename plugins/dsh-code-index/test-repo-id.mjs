@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { gitBranch, gitToplevel } from './lib/repo.js'
+import { RepoRegistry, pruneNestedRepos } from './lib/repo-registry.js'
 
 let pass = 0
 let fail = 0
@@ -66,6 +67,29 @@ const sub = path.join(repo, 'pkg', 'mod')
 fs.mkdirSync(sub, { recursive: true })
 check('gitToplevel 返回仓库根', path.resolve(gitToplevel(sub)) === path.resolve(repo), gitToplevel(sub))
 check('非 git 目录返回空', gitToplevel(tmp) === '', gitToplevel(tmp))
+
+console.log('\n[5] 注册表去重：子目录条目并入仓库根')
+const regDir = path.join(tmp, 'reg')
+const registry = new RepoRegistry(regDir)
+registry.upsert(repo, { lastIndexedAt: 2 })
+registry.upsert(sub, { lastIndexedAt: 1 })
+const dropped = pruneNestedRepos(registry, gitToplevel)
+check('子目录条目被移除', dropped.length === 1 && path.resolve(dropped[0]) === path.resolve(sub), JSON.stringify(dropped))
+check('仓库根条目保留', !!registry.get(repo))
+check('子目录条目已不在注册表', !registry.get(sub))
+// 独立 git 仓库（vendored 副本）不能被误删
+const vendored = path.join(repo, 'vendor', 'other')
+fs.mkdirSync(vendored, { recursive: true })
+git(vendored, ['init', '-q', '-b', 'main'])
+git(vendored, ['config', 'user.email', 't@t'])
+git(vendored, ['config', 'user.name', 't'])
+fs.writeFileSync(path.join(vendored, 'v.txt'), 'v\n')
+git(vendored, ['add', '.'])
+git(vendored, ['commit', '-q', '-m', 'v'])
+registry.upsert(repo, { lastIndexedAt: 3 })
+registry.upsert(vendored, { lastIndexedAt: 1 })
+const dropped2 = pruneNestedRepos(registry, gitToplevel)
+check('独立 git 子仓库不被误删', dropped2.length === 0 && !!registry.get(vendored), JSON.stringify(dropped2))
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`\n通过 ${pass}，失败 ${fail}`)
