@@ -91,9 +91,9 @@ create table if not exists vectors (
 
 # ---------------------------------------------------------------- 作用域（档 3）
 # 规则见 docs/scope-tier3.md §2；夹具 scope_format.json 是本文件的验收标准。
-SCOPE_KINDS = ("legacy", "main", "branch", "pr", "worktree")
-# 默认 TTL（天）：main / legacy 永久。服务端可用环境变量覆盖后传给 IndexStore。
-DEFAULT_SCOPE_TTL = {"branch": 30, "pr": 14, "worktree": 1, "main": None, "legacy": None}
+SCOPE_KINDS = ("main", "branch", "pr", "worktree")
+# 默认 TTL（天）：main 永久。服务端可用环境变量覆盖后传给 IndexStore。
+DEFAULT_SCOPE_TTL = {"branch": 30, "pr": 14, "worktree": 1, "main": None}
 
 # ---------------------------------------------------------------- simhash 候选（跨血统冷启动）
 # 客户端把整棵文件清单压成两个 64-bit simhash（path-aware / content-only）。
@@ -174,27 +174,25 @@ def canonical_namespace(repo_id, chunk_fp, kind, ref):
 
 
 def legacy_namespace(namespace):
-    """legacy 命名空间原样保留（不做规范化）；带 "#" 的说明其实是 scope，不当 legacy。"""
+    """已废弃：不再支持 legacy 命名空间。不带 # 的 namespace 一律拒绝。"""
     ns = "" if namespace is None else str(namespace)
-    if "#" in ns:
-        raise ScopeFormatError("not-legacy", f"带 # 的 namespace 不是 legacy：{ns}")
-    return ns
+    raise ScopeFormatError("legacy-not-supported", f"namespace 不含 #（旧格式已废弃）：{ns}；请用 canonical 格式 {{repoId}}@{{chunkFp}}#{{kind}}:{{ref}}")
 
 
 def parse_scope_namespace(namespace):
-    """从 canonical namespace 反推 scope 元信息（legacy 返回 kind='legacy'）。
+    """从 canonical namespace 反推 scope 元信息。不含 # 的旧格式返回 kind=None（调用方应拒绝）。
 
     返回 {kind, token, scope_ref}；scope_ref 按 §3 的列值口径：
     main -> "default"、branch -> token、pr -> token、worktree -> "wt:<sha8>"。
     """
     ns = "" if namespace is None else str(namespace)
     if "#" not in ns:
-        return {"kind": "legacy", "token": None, "scope_ref": None}
+        return {"kind": None, "token": None, "scope_ref": None}
     _, _, tail = ns.rpartition("#")
     prefix, _, token = tail.partition(":")
     kind = _TOKEN_KINDS.get(prefix)
     if not kind:
-        return {"kind": "legacy", "token": token or None, "scope_ref": None}
+        return {"kind": None, "token": token or None, "scope_ref": None}
     if kind == "worktree":
         scope_ref = f"wt:{token}" if token else None
     else:
@@ -348,11 +346,10 @@ class IndexStore:
         self.db.execute("pragma synchronous = normal")
         self.db.executescript(SCHEMA)
         # 幂等迁移：早期 0.8.0 的库里 repos 没有 repo_state_chunks 这一列；
-        # 档 3 又加了 scope 相关 7 列。老库补齐后，legacy 行标成 pinned（永不被 janitor 删）。
+        # 档 3 又加了 scope 相关 7 列。
         cols = {r["name"] for r in self.db.execute("pragma table_info(repos)").fetchall()}
-        scope_added = False
         for name, ddl in (
-            ("scope_kind", "text not null default 'legacy'"),
+            ("scope_kind", "text not null default 'main'"),
             ("scope_ref", "text"),
             ("commit_sha", "text"),
             ("ttl_days", "integer"),
@@ -363,11 +360,9 @@ class IndexStore:
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
-                scope_added = True
         if "repo_state_chunks" not in cols:
             self.db.execute("alter table repos add column repo_state_chunks integer")
         # P3 simhash：只增不删的幂等列（旧库启动自动补齐；旧客户端不写 → 保持 null）。
-        # 刻意与 scope 的 `scope_added` 回填解耦：补 simhash 列不能触发 legacy 重新 pin。
         for name, ddl in (
             ("simhash_path", "text"),
             ("simhash_content", "text"),
@@ -377,11 +372,17 @@ class IndexStore:
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
-        # 只在"本次才补上 scope 列"的老库上做 legacy 回填：先 pinned/expires，再回填 created_at，
-        # 这样二次启动不会再把管理员显式 unpin 的 legacy 行重新钉上（幂等）。
-        if scope_added:
-            self.db.execute("update repos set pinned = 1 where scope_kind = 'legacy' and created_at is null")
-            self.db.execute("update repos set expires_at = null where scope_kind = 'legacy' and created_at is null")
+        # 废弃 legacy：删除所有旧格式作用域（不含 # 的 namespace）及其 chunks，blob/vector 由 gc 回收。
+        legacy_rows = self.db.execute(
+            "select namespace, lineage_id from repos where scope_kind = 'legacy'"
+            " or namespace not like '%#%'"
+        ).fetchall()
+        if legacy_rows:
+            for lr in legacy_rows:
+                self.db.execute("delete from chunks where namespace = ?", (lr["namespace"],))
+                self.db.execute("delete from repos where namespace = ?", (lr["namespace"],))
+            self.db.commit()
+            self._invalidate()
         self.db.execute("update repos set created_at = updated_at where created_at is null")
         self.db.execute("create index if not exists repos_scope on repos(scope_kind, expires_at)")
         self.db.commit()
@@ -407,15 +408,15 @@ class IndexStore:
         with self.lock:
             row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
             if not row:
-                # 行先按 namespace 反推 scope 元信息落库（legacy 行 pinned=1，protected 于 janitor）；
+                # 行先按 namespace 反推 scope 元信息落库；
                 # 带 scope 的同步随后由 register_scope() 校准 kind/ref/TTL。
                 meta = parse_scope_namespace(namespace)
-                kind = meta["kind"]
+                kind = meta["kind"] or "main"
                 self.db.execute(
                     "insert into repos(namespace, lineage_id, repo_id, repo_name, chunk_fp, revision, tag,"
                     " repo_state, repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, ttl_days,"
                     " expires_at, pinned, created_at)"
-                    " values (?,?,?,?,?,0,?,null,null,?,?,?,null,null,null,?,?)",
+                    " values (?,?,?,?,?,0,?,null,null,?,?,?,null,null,null,0,?)",
                     (
                         namespace,
                         lineage_id,
@@ -426,7 +427,6 @@ class IndexStore:
                         now,
                         kind,
                         meta["scope_ref"],
-                        1 if kind == "legacy" else 0,
                         now,
                     ),
                 )
@@ -478,13 +478,13 @@ class IndexStore:
                        scope_ref=None, new_row=None):
         """写/更新 scope 元数据。
 
-        - `expires_at = now + (ttl_days ?? default_for(kind))`；kind=main/legacy 永远为 null；
+        - `expires_at = now + (ttl_days ?? default_for(kind))`；kind=main 永远为 null；
         - 已存在的行**不覆盖** pinned/expires_at（除非 ttl_days 显式给出）——sync 的增量语义；
         - new_row=True 表示这是刚建出来的 repos 行（调用方在 sync 前判断过），此时落默认 TTL/pinned。
         返回更新后的 repos 行。
         """
         now = int(time.time())
-        kind = kind or "legacy"
+        kind = kind or "main"
         if kind not in SCOPE_KINDS:
             raise ScopeFormatError("unknown-kind", f"kind={kind!r}")
         if scope_ref is None:
@@ -497,9 +497,9 @@ class IndexStore:
                 self.db.execute(
                     "insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
                     " repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, ttl_days, expires_at,"
-                    " pinned, created_at) values (?,?,?,?,0,null,null,null,?,?,?,?,null,null,?,?)",
+                    " pinned, created_at) values (?,?,?,?,0,null,null,null,?,?,?,?,null,null,0,?)",
                     (namespace, lineage, repo_id or "unknown", chunk_fp or "default", now, kind, scope_ref,
-                     commit_sha, 1 if kind == "legacy" else 0, now),
+                     commit_sha, now),
                 )
                 self.db.commit()
                 row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
@@ -513,7 +513,7 @@ class IndexStore:
                 args.append(commit_sha)
             # TTL：新行必须落默认/显式值；老行只有显式 ttlDays 才改（否则 pin 出来的永久态会被同步覆盖）
             if new_row or ttl_days is not None:
-                if kind in ("main", "legacy"):
+                if kind == "main":
                     expires_at = None
                 elif ttl_days is not None:
                     expires_at = now + max(0, int(ttl_days)) * 86400
@@ -523,7 +523,7 @@ class IndexStore:
                 sets += ["expires_at = ?", "ttl_days = ?"]
                 args += [expires_at, max(0, int(ttl_days)) if ttl_days is not None else None]
             if pinned is not None or new_row:
-                value = pinned if pinned is not None else (1 if kind == "legacy" else 0)
+                value = pinned if pinned is not None else False
                 sets.append("pinned = ?")
                 args.append(1 if value else 0)
             args.append(namespace)
@@ -542,8 +542,8 @@ class IndexStore:
             sets = ["pinned = ?", "updated_at = ?"]
             args = [1 if pinned else 0, now]
             if update_ttl:
-                kind = row["scope_kind"] or "legacy"
-                if kind in ("main", "legacy") or ttl_days is None:
+                kind = row["scope_kind"] or "main"
+                if kind == "main" or ttl_days is None:
                     expires_at = None
                 else:
                     expires_at = now + max(0, int(ttl_days)) * 86400
@@ -604,7 +604,8 @@ class IndexStore:
             where.append("r.scope_kind = ?")
             args.append(kind)
         sql = (
-            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks"
+            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks,"
+            " (select url_norm from lineages l where l.id = r.lineage_id) as lineage_url"
             " from repos r"
         )
         if where:
@@ -622,13 +623,14 @@ class IndexStore:
             expires_at = r["expires_at"]
             pinned = bool(r["pinned"])
             item["scope"] = {
-                "kind": r["scope_kind"] or "legacy",
+                "kind": r["scope_kind"] or "main",
                 "ref": r["scope_ref"],
                 "commit": r["commit_sha"],
                 "createdAt": r["created_at"],
                 "expiresAt": expires_at,
                 "pinned": pinned,
             }
+            item["lineageUrl"] = r["lineage_url"] or ""
             item["pinned"] = pinned
             item["ttlRemaining"] = None if expires_at is None else max(0, int(expires_at) - now)
             out.append(item)
@@ -639,12 +641,12 @@ class IndexStore:
             return int(self.db.execute("select count(*) as n from repos").fetchone()["n"])
 
     def scope_stats(self):
-        """{total, byKind:{legacy,main,branch,pr,worktree}}（/health 的 scopes 汇总）。"""
+        """{total, byKind:{main,branch,pr,worktree}}（/health 的 scopes 汇总）。"""
         with self.lock:
             rows = self.db.execute("select scope_kind, count(*) as n from repos group by scope_kind").fetchall()
         by_kind = {k: 0 for k in SCOPE_KINDS}
         for r in rows:
-            key = r["scope_kind"] or "legacy"
+            key = r["scope_kind"] or "main"
             by_kind[key] = by_kind.get(key, 0) + int(r["n"])
         return {"total": sum(by_kind.values()), "byKind": by_kind}
 
@@ -653,8 +655,6 @@ class IndexStore:
         """§3 的 scope_ref 列口径：main:default / branch 原名 / pr:<iid> / wt:<sha8>。"""
         if kind == "main":
             return "default"
-        if kind == "legacy":
-            return None
         token = "" if ref is None else str(ref)
         if kind == "pr":
             return str(int(token)) if _DIGITS_RE.match(token) else token

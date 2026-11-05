@@ -369,8 +369,14 @@ def main():
                 if e.reason != c["reason"]:
                     bad.append((c["reason"], e.reason))
         check("invalid_cases：6 条 reason 全对", not bad, bad[:2])
-        bad = [c for c in fixture["legacy_cases"] if istore.legacy_namespace(c["namespace"]) != c["expect"]]
-        check("legacy_cases：原样保留不规范化", not bad, bad[:1])
+        # legacy 已废弃：旧格式 namespace 应被拒绝
+        for c in fixture["legacy_cases"]:
+            try:
+                istore.legacy_namespace(c["namespace"])
+                bad.append((c["namespace"], "没有报错（应当拒绝旧格式）"))
+            except istore.ScopeFormatError:
+                pass  # 预期行为
+        check("legacy_cases：旧格式全部被拒绝", not bad, bad[:1])
 
     print("\n[16] scope 注册 / resolve / 列表 / status / health")
     REPO = "scopedemo"
@@ -400,7 +406,7 @@ def main():
     check("health 顶层 scopes 汇总", hh.get("scopes", {}).get("byKind", {}).get("branch", 0) >= 1
           and hh["scopes"].get("total", 0) >= 1, hh.get("scopes"))
 
-    print("\n[17] legacy 命名空间 pinned，janitor 不删")
+    print("\n[17] legacy 命名空间已废弃：同步不带 scope 的旧格式 → 拒绝或转 main")
     LEG = "legacy-demo@fp1"
     st, lg = req("POST", "/v1/namespaces/sync", {
         "namespace": LEG,
@@ -408,12 +414,12 @@ def main():
         "upsert": [{"path": "l.java", "hash": "file-l.java", "chunks": [{"hash": "hl1", "start": 1, "end": 2}]}],
         "remove": [],
     })
-    check("legacy 同步成功", st == 200, (st, lg))
-    st, sw = req("POST", "/v1/admin/sweep", {})
-    check("sweep 不删 legacy", LEG not in sw.get("deleted", []), sw)
-    st, lstt = req("GET", f"/v1/namespaces/{nsq(LEG)}/status")
-    check("legacy = pinned + 无过期时间", lstt.get("scope", {}).get("kind") == "legacy"
-          and lstt["scope"].get("pinned") is True and lstt["scope"].get("expiresAt") is None, lstt.get("scope"))
+    # 不带 scope 的旧格式仍然能同步（ensure_repo 会建行），但 scope_kind 默认 main、不 pin
+    check("旧格式同步成功（scope_kind=main，不 pin）", st == 200, (st, lg))
+    if st == 200:
+        st, lstt = req("GET", f"/v1/namespaces/{nsq(LEG)}/status")
+        check("旧格式 fallback 到 main（非 legacy/pinned）",
+              lstt.get("scope", {}).get("kind") != "legacy", lstt.get("scope"))
 
     print("\n[18] TTL 过期 → sweep 删除")
     check("build() 已启动 janitor 线程", any(t.name == "scope-janitor" for t in threading.enumerate()))
@@ -522,7 +528,7 @@ def main():
     check("配额响应带 count/limit", q.get("count") == server.MAX_SCOPES and q.get("limit") == server.MAX_SCOPES, q)
     server.MAX_SCOPES = old_max
 
-    print("\n[22] 旧 DB 启动即幂等迁移")
+    print("\n[22] 旧 DB 启动即幂等迁移（legacy 行被删除）")
     old_db = os.path.join(TMP, "legacy-db", "index.db")
     os.makedirs(os.path.dirname(old_db), exist_ok=True)
     conn = sqlite3.connect(old_db)
@@ -546,23 +552,15 @@ def main():
     conn.commit()
     conn.close()
     m1 = istore.IndexStore(old_db)
-    row = m1.repo("old@fp")
-    check("老库补列后 legacy/pinned/no-expiry",
-          row["scope_kind"] == "legacy" and row["pinned"] == 1 and row["expires_at"] is None, row)
-    check("created_at 回填 updated_at", row["created_at"] == 1000, row.get("created_at"))
+    check("老库补列后 legacy 行被删除", m1.repo("old@fp") is None,
+          m1.repo("old@fp"))
     simhash_cols = {"simhash_path", "simhash_content", "simhash_algo", "simhash_files", "simhash_at"}
     check("老库幂等补上 simhash 5 列（值保持 null）",
-          simhash_cols <= set(row) and all(row[c] is None for c in simhash_cols), row)
-    check("simhash 5 列已落进 repos schema",
           simhash_cols <= {r["name"] for r in m1.db.execute("pragma table_info(repos)").fetchall()})
     m1.close()
     m2 = istore.IndexStore(old_db)
-    check("二次启动迁移幂等", m2.repo("old@fp")["pinned"] == 1)
-    m2.pin_scope("old@fp", False)
+    check("二次启动迁移幂等（legacy 行仍为空）", m2.repo("old@fp") is None)
     m2.close()
-    m3 = istore.IndexStore(old_db)
-    check("显式 unpin 不会被二次迁移重新钉住", m3.repo("old@fp")["pinned"] == 0)
-    m3.close()
 
     print("\n[23] sync 显式 tag=null → 服务端补默认 tag（review-service 旧 payload 回归）")
     NS_NULL = istore.canonical_namespace("nulltag", "fp1", "branch", "feat/n")

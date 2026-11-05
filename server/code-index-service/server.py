@@ -95,12 +95,12 @@ MAX_TEXTS = 512
 MAX_TEXT_CHARS = 8000
 
 # ---------------- 档 3：作用域（快照）生命周期 ----------------
-# TTL 单位是"天"；main / legacy 永久。janitor 周期见 SCOPE_SWEEP_INTERVAL。
+# TTL 单位是"天"；main 永久。janitor 周期见 SCOPE_SWEEP_INTERVAL。
 SCOPE_TTL_BRANCH = int(F.get("SCOPE_TTL_BRANCH", "30"))
 SCOPE_TTL_PR = int(F.get("SCOPE_TTL_PR", "14"))
 SCOPE_TTL_WORKTREE = int(F.get("SCOPE_TTL_WORKTREE", "1"))
 SCOPE_TTL = {"branch": SCOPE_TTL_BRANCH, "pr": SCOPE_TTL_PR, "worktree": SCOPE_TTL_WORKTREE,
-             "main": None, "legacy": None}
+             "main": None}
 SCOPE_SWEEP = F.get("SCOPE_SWEEP", "1") not in ("0", "false", "no")
 SCOPE_SWEEP_INTERVAL = max(1, int(float(F.get("SCOPE_SWEEP_INTERVAL", "3600"))))
 SCOPE_SWEEP_FIRST_DELAY = max(0, int(float(F.get("SCOPE_SWEEP_FIRST_DELAY", "30"))))  # 避开 warmup
@@ -218,7 +218,7 @@ def _enrich_stats(data):
             scope = known.get("scope") or {}
             item.update({
                 "repoName": known.get("repo_name"),
-                "kind": scope.get("kind") or "legacy",
+                "kind": scope.get("kind") or "main",
                 "ref": scope.get("ref"),
                 "chunks": known.get("chunks"),
                 "vectors": known.get("vectors"),
@@ -316,6 +316,12 @@ ADMIN_HTML = r"""<!doctype html>
   tbody td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle; white-space:nowrap; }
   tbody tr:last-child td { border-bottom:0; }
   tbody tr:hover td { background:color-mix(in srgb, var(--bg) 60%, transparent); }
+  /* 作用域分组：组头可折叠，子行缩进；过期/临时行灰显 */
+  tr.group-row td { background:color-mix(in srgb, var(--bg) 85%, var(--card)); font-size:12.5px; cursor:pointer; user-select:none; }
+  tr.group-row:hover td { background:color-mix(in srgb, var(--bg) 65%, var(--card)); }
+  tr.group-row .caret { display:inline-block; width:14px; color:var(--muted); }
+  tr.scope-row td:first-child { padding-left:22px; }
+  tr.scope-row.expired td { opacity:.45; }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   .kind { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11.5px; font-family:var(--mono); background:var(--bg); border:1px solid var(--line); }
   .kind.main { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
@@ -681,7 +687,9 @@ ADMIN_HTML = r"""<!doctype html>
     <section class="card wide">
       <h2>作用域（快照）<span class="tail" id="scope-count"></span></h2>
       <div class="toolbar">
-        <input id="filter" type="search" placeholder="筛选 kind / ref / repoId / namespace…">
+        <input id="filter" type="search" placeholder="筛选仓库 / kind / ref / repoId / namespace…">
+        <label><input id="group-repo" type="checkbox" checked> 按仓库分组</label>
+        <label><input id="hide-temp" type="checkbox" checked> 隐藏 worktree / 已过期</label>
         <label><input id="auto" type="checkbox" checked> 每 15 秒自动刷新</label>
         <span class="faint" id="filtered"></span>
       </div>
@@ -697,7 +705,9 @@ ADMIN_HTML = r"""<!doctype html>
       <details class="help">
         <summary>字段说明</summary>
         <div class="grid">
-          <div><b>类型</b>：legacy = 接入作用域前的老命名空间（永久保护）；main/branch/pr/worktree = 新规范快照。</div>
+          <div><b>分组</b>：默认按仓库名分组，组内顺序 main → branch → pr → worktree；临时快照（worktree / 已过期）默认隐藏。</div>
+          <div><b>重复身份</b>：同一仓库出现多个 repoId（通常是插件读不到 git origin、回退成路径哈希造成），组头会标红；内容会各存一份，需要清理。</div>
+          <div><b>类型</b>：main = 主分支（永久）；branch/pr/worktree = 快照（有 TTL）。</div>
           <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入限速异步，刚同步完会从 0% 涨到 100%。</div>
           <div><b>向量 tag</b>：模型指纹。热切换模型后 tag 变化，旧 tag 向量不会被检索，需要客户端重新同步。</div>
         </div>
@@ -752,11 +762,11 @@ function ttl(expiresAt) {
 }
 function friendlyNs(x) {
   const fp = String(x.chunkFp || '').slice(0, 8);
-  const scope = x.kind === 'legacy' ? 'legacy' : ('#' + x.kind + (x.ref ? ':' + x.ref : ''));
+  const scope =  ('#' + x.kind + (x.ref ? ':' + x.ref : ''));
   return scope + ' <span class="faint" style="font-size:11px">· fp ' + fp + '</span>';
 }
 function chip(kind) {
-  const k = String(kind || 'legacy');
+  const k = String(kind || 'main');
   return '<span class="kind ' + k + '">' + k + '</span>';
 }
 function toast(msg) {
@@ -989,39 +999,149 @@ async function setupAdmin() {
 
 // ---------------- 作用域 / 检索测试 ----------------
 let ROWS = [];
+const SCOPE_KIND_ORDER = { main: 0, branch: 1, pr: 2, worktree: 3 };
+const COLLAPSED_GROUPS = new Set();
+
+function scopeIsExpired(x) {
+  return !!(x.expiresAt && Number(x.expiresAt) * 1000 <= Date.now());
+}
+function scopeGroupName(x) {
+  return x.repoName || x.repoId || '（未知仓库）';
+}
+function scopeRepoKey(x) {
+  return scopeGroupName(x);
+}
+
+/** 把行按仓库名分组；组内 main→branch→pr→worktree，再按最近更新。 */
+function groupScopes(rows) {
+  const byName = new Map();
+  rows.forEach((x) => {
+    const k = scopeRepoKey(x);
+    if (!byName.has(k)) byName.set(k, []);
+    byName.get(k).push(x);
+  });
+  const groups = [...byName.entries()].map(([name, items]) => {
+    items.sort((a, b) => {
+      const ka = SCOPE_KIND_ORDER[a.kind] ?? 9;
+      const kb = SCOPE_KIND_ORDER[b.kind] ?? 9;
+      if (ka !== kb) return ka - kb;
+      return Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0);
+    });
+    const ids = [...new Set(items.map((x) => x.repoId).filter(Boolean))];
+    // canonical 身份 = 有 git remote URL 的血统（路径回退产生的血统 url 为空）；同条件下再比块数。
+    const chunkById = {};
+    const hasUrl = {};
+    items.forEach((x) => {
+      chunkById[x.repoId] = (chunkById[x.repoId] || 0) + Number(x.chunks || 0);
+      hasUrl[x.repoId] = hasUrl[x.repoId] || !!(x.repoUrl || '');
+    });
+    const primary = ids.slice().sort((a, b) => {
+      if (hasUrl[a] !== hasUrl[b]) return hasUrl[b] ? 1 : -1;
+      return (chunkById[b] || 0) - (chunkById[a] || 0);
+    })[0] || '';
+    return {
+      name,
+      items,
+      ids,
+      primary,
+      duplicate: ids.length > 1,
+      chunks: items.reduce((s, x) => s + Number(x.chunks || 0), 0),
+      updatedAt: Math.max(...items.map((x) => Number(x.updatedAt || x.createdAt || 0))),
+    };
+  });
+  groups.sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+  return groups;
+}
+
+function renderScopeRow(x, group) {
+  const pct = Math.round((x.coverage || 0) * 100);
+  const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
+  const expired = scopeIsExpired(x);
+  const isDup = group && group.duplicate && x.repoId && x.repoId !== group.primary;
+  const repoCell = '<span class="faint mono" style="font-size:11px">└ ' + escapeHtml(x.repoId || '—') + '</span>'
+    + (isDup ? ' <span class="chip bad" title="该仓库存在多个 repoId，内容会重复存储">重复身份</span>' : '');
+  return '<tr class="scope-row' + (expired ? ' expired' : '') + '" data-g="' + escapeHtml(scopeRepoKey(x)) + '">'
+    + '<td>' + repoCell + '</td>'
+    + '<td>' + chip(x.kind) + '</td>'
+    + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
+    + '<td class="num">' + fmtNum(x.chunks) + '</td>'
+    + '<td class="num">' + fmtNum(x.vectors) + '</td>'
+    + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
+    + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
+    + '<td title="' + absTime(x.createdAt) + '">' + rel(x.createdAt) + '</td>'
+    + '<td>' + (expired ? '<span class="chip bad">已过期</span>' : ttl(x.expiresAt)) + '</td>'
+    + '<td>' + (x.pinned ? '<span class="chip ok">已钉住</span>' : '<span class="faint">—</span>') + '</td>'
+    + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span> '
+    + '<button class="copy" data-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
+    + '</tr>';
+}
+
+function renderScopeGroup(g) {
+  const key = g.name;
+  const collapsed = COLLAPSED_GROUPS.has(key);
+  const idsTxt = g.ids.map((id) => escapeHtml(id)).join(', ');
+  const head = '<tr class="group-row" data-g="' + escapeHtml(key) + '">'
+    + '<td colspan="11">'
+    + '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span> '
+    + '<b>' + escapeHtml(g.name) + '</b> '
+    + '<span class="faint mono" style="font-size:11px">' + idsTxt + '</span>'
+    + ' <span class="faint">· ' + g.items.length + ' 个作用域 · ' + fmtNum(g.chunks) + ' 块</span>'
+    + (g.duplicate ? ' <span class="chip bad" title="同一仓库存在多个 repoId（通常来自路径回退），内容重复存储">重复身份 ×' + g.ids.length + '</span>' : '')
+    + '</td></tr>';
+  if (collapsed) return head;
+  return head + g.items.map((x) => renderScopeRow(x, g)).join('');
+}
+
 function renderScopes() {
   const q = ($('#filter').value || '').trim().toLowerCase();
-  const rows = ROWS.filter((x) => !q || [x.kind, x.ref, x.repoId, x.namespace].some((v) => String(v || '').toLowerCase().includes(q)));
-  $('#filtered').textContent = q ? '匹配 ' + rows.length + ' / ' + ROWS.length : '';
-  $('#scope-count').textContent = '(' + ROWS.length + ')';
+  const hideTemp = $('#hide-temp') ? $('#hide-temp').checked : true;
+  const doGroup = $('#group-repo') ? $('#group-repo').checked : true;
+  const matched = ROWS.filter((x) => {
+    if (hideTemp && (x.kind === 'worktree' || scopeIsExpired(x))) return false;
+    if (!q) return true;
+    return [x.kind, x.ref, x.repoId, x.repoName, x.namespace].some((v) => String(v || '').toLowerCase().includes(q));
+  });
+  const groups = groupScopes(matched);
+  $('#filtered').textContent = (q || hideTemp)
+    ? '显示 ' + matched.length + ' / ' + ROWS.length + ' 个作用域' + (hideTemp ? '（已隐藏临时/过期）' : '')
+    : '';
+  $('#scope-count').textContent = '(' + groups.length + ' 仓库 / ' + ROWS.length + ' 作用域)';
+
+  // 检索测试下拉：按分组顺序，标出临时作用域
   const sel = $('#test-ns');
   const cur = sel.value;
-  sel.innerHTML = ROWS.map((x) => '<option value="' + escapeHtml(x.namespace) + '">' + escapeHtml(x.kind + (x.ref ? ':' + x.ref : '') + ' · ' + (x.repoName || x.repoId)) + '</option>').join('');
-  if (cur && ROWS.some((x) => x.namespace === cur)) sel.value = cur;
-  if (!rows.length) { $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">' + (ROWS.length ? '没有匹配的作用域' : '还没有作用域') + '</td></tr>'; return; }
-  $('#scopes').innerHTML = rows.map((x) => {
-    const pct = Math.round((x.coverage || 0) * 100);
-    const cls = pct >= 95 ? '' : (pct >= 50 ? 'warn' : 'bad');
-    const repoCell = x.repoName
-      ? escapeHtml(x.repoName) + ' <span class="faint mono" style="font-size:11px">' + escapeHtml(x.repoId || '') + '</span>'
-      : '<span class="mono">' + escapeHtml(x.repoId || '—') + '</span>';
-    return '<tr>'
-      + '<td>' + repoCell + '</td>'
-      + '<td>' + chip(x.kind) + '</td>'
-      + '<td>' + (x.ref ? escapeHtml(x.ref) : '<span class="faint">—</span>') + '</td>'
-      + '<td class="num">' + fmtNum(x.chunks) + '</td>'
-      + '<td class="num">' + fmtNum(x.vectors) + '</td>'
-      + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
-      + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
-      + '<td title="' + absTime(x.createdAt) + '">' + rel(x.createdAt) + '</td>'
-      + '<td>' + ttl(x.expiresAt) + '</td>'
-      + '<td>' + (x.pinned ? '<span class="chip ok">已钉住</span>' : '<span class="faint">—</span>') + '</td>'
-      + '<td><span class="ns" title="' + escapeHtml(x.namespace) + '">' + friendlyNs(x) + '</span> '
-      + '<button class="copy" data-ns="' + escapeHtml(x.namespace) + '" title="复制命名空间">⧉</button></td>'
-      + '</tr>';
-  }).join('');
+  const flat = doGroup
+    ? groups.flatMap((g) => g.items)
+    : matched.slice().sort((a, b) => (SCOPE_KIND_ORDER[a.kind] ?? 9) - (SCOPE_KIND_ORDER[b.kind] ?? 9));
+  sel.innerHTML = flat.map((x) => '<option value="' + escapeHtml(x.namespace) + '">'
+    + escapeHtml(scopeGroupName(x)) + ' · ' + escapeHtml(x.kind + (x.ref ? ':' + x.ref : ''))
+    + (scopeIsExpired(x) ? '（已过期）' : '') + '</option>').join('');
+  if (cur && flat.some((x) => x.namespace === cur)) sel.value = cur;
+
+  if (!ROWS.length) { $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">还没有作用域</td></tr>'; return; }
+  if (!matched.length) {
+    $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">没有匹配的作用域'
+      + (hideTemp ? '（可能被「隐藏 worktree / 已过期」过滤掉，取消勾选再看）' : '') + '</td></tr>';
+    return;
+  }
+
+  let html;
+  if (doGroup) {
+    html = groups.map(renderScopeGroup).join('');
+  } else {
+    html = matched.slice().sort((a, b) => (SCOPE_KIND_ORDER[a.kind] ?? 9) - (SCOPE_KIND_ORDER[b.kind] ?? 9))
+      .map((x) => renderScopeRow(x, null)).join('');
+  }
+  $('#scopes').innerHTML = html;
   $$('button.copy').forEach((b) => {
     b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.ns); toast('已复制命名空间'); } catch (e) { toast('复制失败（浏览器限制）'); } };
+  });
+  $$('tr.group-row').forEach((tr) => {
+    tr.onclick = () => {
+      const key = tr.dataset.g;
+      if (COLLAPSED_GROUPS.has(key)) COLLAPSED_GROUPS.delete(key); else COLLAPSED_GROUPS.add(key);
+      renderScopes();
+    };
   });
 }
 async function searchTest() {
@@ -1674,6 +1794,8 @@ updateRoleHint();
 $('#btn-setup').onclick = setupAdmin;
 $('#btn-logs').onclick = loadLogs;
 $('#filter').oninput = renderScopes;
+$('#group-repo').onchange = renderScopes;
+$('#hide-temp').onchange = renderScopes;
 $$('[data-days]').forEach((b) => { b.onclick = () => loadStats(b.dataset.days); });
 $('#btn-stats-refresh').onclick = () => loadStats(STATS_DAYS);
 $('#btn-stats-export').onclick = exportStatsCsv;
@@ -2178,8 +2300,8 @@ def _namespaces_from_request(raw, single):
 
 def _hit_scope(repo):
     if not repo:
-        return {"kind": "legacy", "ref": None}
-    return {"kind": repo["scope_kind"] or "legacy", "ref": repo["scope_ref"]}
+        return {"kind": "main", "ref": None}
+    return {"kind": repo["scope_kind"] or "main", "ref": repo["scope_ref"]}
 
 
 def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
@@ -2341,7 +2463,7 @@ def repo_status(namespace):
         "tag": repo["tag"],
         "repoState": repo["repo_state"],
         "scope": {
-            "kind": repo["scope_kind"] or "legacy",
+            "kind": repo["scope_kind"] or "main",
             "ref": repo["scope_ref"],
             "commit": repo["commit_sha"],
             "createdAt": repo["created_at"],
@@ -2370,10 +2492,11 @@ def scope_list(repo_id=None, kind=None):
         scope = it.get("scope") or {}
         out.append({
             "namespace": it["namespace"],
-            "kind": scope.get("kind") or "legacy",
+            "kind": scope.get("kind") or "main",
             "ref": scope.get("ref"),
             "repoId": it["repo_id"],
             "repoName": it.get("repo_name"),
+            "repoUrl": it.get("lineageUrl") or "",
             "chunkFp": it["chunk_fp"],
             "revision": it["revision"],
             "commit": scope.get("commit"),
@@ -2381,6 +2504,7 @@ def scope_list(repo_id=None, kind=None):
             "vectors": it.get("vectors", 0),
             "coverage": it.get("coverage", 0.0),
             "createdAt": scope.get("createdAt"),
+            "updatedAt": it.get("updated_at"),
             "expiresAt": scope.get("expiresAt"),
             "pinned": bool(scope.get("pinned")),
             "ttlRemaining": it.get("ttlRemaining"),
