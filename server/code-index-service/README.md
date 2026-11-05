@@ -99,6 +99,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `GET /v1/admin/keys`、`POST /v1/admin/keys`、`POST /v1/admin/keys/{id}/enable|disable`、`DELETE /v1/admin/keys/{id}` | **API Key 管理**（明文只返回一次，服务端只存 sha256） |
 | `GET /v1/admin/stats?days=7` | **调用统计**：按天/按 Key/按**仓库·作用域**/**按端点**（业务/系统分类、embed/search/rerank、延迟、**P50/P95**、上期对比）；`days=1/7/30` |
 | `GET /v1/admin/stats/summary?days=7` | **统计摘要**（控制台 30s 轮询用，轻量）：总量 / 成功率 / 分类 KPI / 端点错误 Top / 延迟分位 / 运行态（块·向量·积压·**ETA**） |
+| `GET /v1/admin/stats/keys?days=7` | **按 Key 用量看板**（类 new-api）：每 Key 汇总 + 每日序列 + 端点构成 + 占比 + keyCounts（活跃/启用/禁用）；legacy/env Key 计为 `keyId=0` |
 | `POST /admin/login` `/admin/logout` `/admin/setup` | 控制台会话（HttpOnly Cookie，12h）/ 首次初始化管理员密码 |
 | `POST /v1/lineages/{id}/adopt` | 显式跨血统借用（管理员点名 `{from, hashes?}`；旧行为不变） |
 | `GET /v1/lineages/similar?path=&content=&tag=&limit=5` | **simhash 候选诊断**：只返回 `{lineage, namespace, repoId, repoName, similarity, pathSimilarity, contentSimilarity, distance, files, updatedAt}`，**不返回正文**；`path/content` 非法 → 400 `bad-simhash`，缺 `tag` → 400 `tag-required` |
@@ -136,8 +137,12 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 - **概览**：运行时 / 治理 / 存储限额 / 向量标签 / 鉴权状态；暂停/恢复嵌入、立即清扫、清理旧 tag。
 - **模型**：当前嵌入/重排、已安装模型（本机 `/models` 与 `/data/models` 自动发现）、一键**热切换**、
   可下载模型（进度/取消/重试/重传）、重排启用/关闭。
-- **API Key**：新建（固定 index 角色）、启用/禁用、删除、一次性明文展示、一键测试访问索引服务。
-- **统计**：今日 / 近 7 天 / 近 30 天，四个子页签：
+- **API Key**：新建（固定 index 角色）、启用/禁用、删除、一次性明文展示、一键测试访问索引服务；
+  列表显示每把 Key 的 7 天请求数，「用量」按钮直接跳到统计页该 Key 的详情。
+- **统计**：今日 / 近 7 天 / 近 30 天，五个子页签（**Key 为默认页签**）：
+  - **Key**（类 new-api 的 Key 视图）：Key 用量看板（Key 总数/活跃 Key/今日请求/今日嵌入/Top Key 占比/区间请求）
+    + 每日调用趋势（全部 Key 合计）；**Key 排行表**（请求/占比/嵌入/检索/重排/错误率/延迟/**sparkline**/最后使用，
+    可筛选排序），**点行展开该 Key 详情**（每日请求图 + 端点构成 + 关键指标）。
   - **概览**：8 个 KPI（业务请求、检索/重排、embed 文本、业务成功率、平均延迟、P95、索引操作、
     活跃 Key，带环比）；SVG 趋势图（**Y 轴刻度 / 前一日参考线 / 300ms 目标线 / 超目标标红**）、业务构成；
     运行状态 / 配额卡（模型、限速、作用域、存储、块/向量、**嵌入积压 + ETA**、业务/系统请求）。

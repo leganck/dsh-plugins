@@ -832,8 +832,10 @@ def main():
     check("统计页含趋势图/导出/运行状态/按作用域", all(k in page for k in (
         "stat-trend", "stat-latency", "stat-mix", "stat-runtime", "stat-scopes",
         "btn-stats-export", "btn-stats-refresh")))
-    check("统计页含子页签（概览/错误/用量/延迟）", all(k in page for k in (
-        'data-sub="overview"', 'data-sub="errors"', 'data-sub="usage"', 'data-sub="latency"')))
+    check("统计页含子页签（Key/概览/错误/用量/延迟）", all(k in page for k in (
+        'data-sub="key"', 'data-sub="overview"', 'data-sub="errors"', 'data-sub="usage"', 'data-sub="latency"')))
+    check("Key 看板：卡片/趋势/排行表/详情容器", all(k in page for k in (
+        "key-cards", "key-trend", "key-board-rows", "key-detail", "Key 排行")))
     check("统计页含端点错误表 + 日志下钻（错误页签）", "stat-endpoints" in page and "按端点" in page)
     check("日志页含筛选（关键字/级别）", 'id="log-q"' in page and 'id="log-level"' in page)
     check("作用域页含清空索引危险操作", "清空所有作用域" in page and "输入 RESET 确认" in page)
@@ -988,6 +990,27 @@ def main():
         check("summary：运行态含积压/ETA/存储/作用域",
               all(k in smrt for k in ("backlog", "etaSeconds", "chunks", "vectors", "scopes", "totalBytes")),
               smrt)
+
+        # Key 用量看板（类 new-api：每 Key 汇总 + 每日序列 + 端点构成）
+        st_k, kstats = req("GET", "/v1/admin/stats/keys?days=7", headers=admin_auth)
+        ks = kstats or {}
+        check("key 看板：接口可用且含 totals/byDay/keys/keyCounts",
+              st_k == 200 and isinstance(ks.get("keys"), list) and isinstance(ks.get("byDay"), list)
+              and isinstance(ks.get("keyCounts"), dict), (st_k, list(ks)))
+        kmap = {k.get("keyId"): k for k in (ks.get("keys") or [])}
+        check("key 看板：新建 Key 的用量被统计到（≥4 次）",
+              kid2 in kmap and kmap[kid2].get("requests", 0) >= 4,
+              {k: v.get("requests") for k, v in kmap.items()})
+        kk = kmap.get(kid2) or {}
+        check("key 看板：含每日序列（days 长度）与端点构成（search）",
+              len(kk.get("byDay") or []) == 7
+              and any(e.get("endpoint") == "search" for e in (kk.get("byEndpoint") or [])),
+              kk.get("byEndpoint"))
+        check("key 看板：占比/错误率/最后使用字段齐全",
+              all(field in kk for field in ("share", "errorRate", "lastUsedAt", "embedTexts")),
+              list(kk))
+        check("key 看板：keyCounts 总数与 keys 长度一致",
+              ks.get("keyCounts", {}).get("total") == len(ks.get("keys") or []))
 
         # /log 过滤（P1：统计页点端点 → 带筛选看日志）
         with open(server.LOG_PATH, "a", encoding="utf-8") as _lf:

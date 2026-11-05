@@ -970,6 +970,162 @@ class AdminStore:
             },
         }
 
+    def stats_keys(self, days=7):
+        """按 Key 的用量看板（类 new-api）：每 Key 汇总 + 每日序列 + 端点构成 + 占比。"""
+        days = max(1, min(90, int(days)))
+        today = datetime.date.today()
+        start = today - datetime.timedelta(days=days - 1)
+        day_list = [(start + datetime.timedelta(days=i)).isoformat() for i in range(days)]
+        day_from, day_to = day_list[0], day_list[-1]
+        with self._lock:
+            key_rows = self.db.execute(
+                "select id, name, prefix, role, enabled, created_at, last_used_at from api_keys order by id"
+            ).fetchall()
+            daily_rows = self.db.execute(
+                "select key_id, day, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(embed_texts),0) as embed_texts, coalesce(sum(search_calls),0) as search_calls,"
+                " coalesce(sum(rerank_calls),0) as rerank_calls, coalesce(sum(latency_sum),0) as latency_sum,"
+                " coalesce(max(latency_max),0) as latency_max from usage_daily"
+                " where day >= ? and day <= ? group by key_id, day",
+                (day_from, day_to),
+            ).fetchall()
+            ep_rows = self.db.execute(
+                "select key_id, endpoint, coalesce(sum(requests),0) as requests, coalesce(sum(errors),0) as errors,"
+                " coalesce(sum(latency_sum),0) as latency_sum from usage_endpoint"
+                " where day >= ? and day <= ? group by key_id, endpoint",
+                (day_from, day_to),
+            ).fetchall()
+            pending = list(self._pending.items())
+            mem_last = dict(self._last_used)
+
+        stats = {}
+
+        def slot(key_id):
+            return stats.setdefault(int(key_id), {
+                "requests": 0, "errors": 0, "embedTexts": 0, "searchCalls": 0, "rerankCalls": 0,
+                "latencySum": 0.0, "latencyMax": 0.0, "byDay": {}, "byEndpoint": {},
+            })
+
+        for r in daily_rows:
+            s = slot(r["key_id"])
+            s["requests"] += int(r["requests"])
+            s["errors"] += int(r["errors"])
+            s["embedTexts"] += int(r["embed_texts"])
+            s["searchCalls"] += int(r["search_calls"])
+            s["rerankCalls"] += int(r["rerank_calls"])
+            s["latencySum"] += float(r["latency_sum"])
+            s["latencyMax"] = max(s["latencyMax"], float(r["latency_max"]))
+            day_acc = s["byDay"].setdefault(r["day"], {"requests": 0, "errors": 0, "embedTexts": 0})
+            day_acc["requests"] += int(r["requests"])
+            day_acc["errors"] += int(r["errors"])
+            day_acc["embedTexts"] += int(r["embed_texts"])
+        for (key_id, day, endpoint), v in pending:
+            if day < day_from or day > day_to:
+                continue
+            s = slot(key_id)
+            s["requests"] += v[0]
+            s["errors"] += v[1]
+            s["embedTexts"] += v[2]
+            s["searchCalls"] += v[3]
+            s["rerankCalls"] += v[4]
+            s["latencySum"] += v[5]
+            s["latencyMax"] = max(s["latencyMax"], float(v[6]))
+            day_acc = s["byDay"].setdefault(day, {"requests": 0, "errors": 0, "embedTexts": 0})
+            day_acc["requests"] += v[0]
+            day_acc["errors"] += v[1]
+            day_acc["embedTexts"] += v[2]
+            ep = s["byEndpoint"].setdefault(endpoint or "other", {"requests": 0, "errors": 0, "latencySum": 0.0})
+            ep["requests"] += v[0]
+            ep["errors"] += v[1]
+            ep["latencySum"] += v[5]
+        for r in ep_rows:
+            s = slot(r["key_id"])
+            ep = s["byEndpoint"].setdefault(r["endpoint"] or "other",
+                                            {"requests": 0, "errors": 0, "latencySum": 0.0})
+            ep["requests"] += int(r["requests"])
+            ep["errors"] += int(r["errors"])
+            ep["latencySum"] += float(r["latency_sum"])
+
+        meta = {int(r["id"]): r for r in key_rows}
+        keys_out = []
+        for key_id, s in stats.items():
+            if key_id == LEGACY_KEY_ID:
+                name, prefix, role, enabled, created_at = LEGACY_KEY_NAME, "", "legacy", True, None
+            elif key_id in meta:
+                row = meta[key_id]
+                name, prefix, role = row["name"] or "", row["prefix"] or "", row["role"] or "index"
+                enabled, created_at = bool(row["enabled"]), float(row["created_at"])
+            else:
+                name, prefix, role, enabled, created_at = "key#%d" % key_id, "", "deleted", False, None
+            db_last = meta[key_id]["last_used_at"] if key_id in meta else None
+            last_used = max(float(db_last or 0.0), float(mem_last.get(key_id) or 0.0)) or None
+            endpoints = [
+                {"endpoint": ep, "requests": acc["requests"], "errors": acc["errors"],
+                 "latencyAvg": _avg(acc["latencySum"], acc["requests"])}
+                for ep, acc in sorted(s["byEndpoint"].items(), key=lambda kv: (-kv[1]["requests"], kv[0]))
+            ]
+            keys_out.append({
+                "keyId": key_id,
+                "name": name,
+                "prefix": prefix,
+                "role": role,
+                "enabled": enabled,
+                "createdAt": created_at,
+                "lastUsedAt": last_used,
+                "requests": s["requests"],
+                "errors": s["errors"],
+                "errorRate": round(s["errors"] / s["requests"] * 100, 1) if s["requests"] else 0.0,
+                "latencyAvg": _avg(s["latencySum"], s["requests"]),
+                "latencyMax": round(s["latencyMax"], 6),
+                "embedTexts": s["embedTexts"],
+                "searchCalls": s["searchCalls"],
+                "rerankCalls": s["rerankCalls"],
+                "byDay": [
+                    {"day": d,
+                     "requests": (s["byDay"].get(d) or {}).get("requests", 0),
+                     "errors": (s["byDay"].get(d) or {}).get("errors", 0),
+                     "embedTexts": (s["byDay"].get(d) or {}).get("embedTexts", 0)}
+                    for d in day_list
+                ],
+                "byEndpoint": endpoints,
+            })
+        keys_out.sort(key=lambda k: (-k["requests"], k["keyId"]))
+        total_requests = sum(k["requests"] for k in keys_out)
+        for k in keys_out:
+            k["share"] = round(k["requests"] / total_requests * 100, 1) if total_requests else 0.0
+        day_totals = {d: {"requests": 0, "errors": 0, "embedTexts": 0} for d in day_list}
+        for k in keys_out:
+            for item in k["byDay"]:
+                t = day_totals[item["day"]]
+                t["requests"] += item["requests"]
+                t["errors"] += item["errors"]
+                t["embedTexts"] += item["embedTexts"]
+        weighted_latency = sum(k["latencyAvg"] * k["requests"] for k in keys_out)
+        return {
+            "days": days,
+            "from": day_from,
+            "to": day_to,
+            "totals": {
+                "requests": total_requests,
+                "errors": sum(k["errors"] for k in keys_out),
+                "embedTexts": sum(k["embedTexts"] for k in keys_out),
+                "searchCalls": sum(k["searchCalls"] for k in keys_out),
+                "rerankCalls": sum(k["rerankCalls"] for k in keys_out),
+                "latencyAvg": _avg(weighted_latency, total_requests),
+            },
+            "byDay": [
+                {"day": d, "requests": v["requests"], "errors": v["errors"], "embedTexts": v["embedTexts"]}
+                for d, v in day_totals.items()
+            ],
+            "keys": keys_out,
+            "keyCounts": {
+                "total": len(keys_out),
+                "enabled": sum(1 for k in keys_out if k["enabled"]),
+                "disabled": sum(1 for k in keys_out if not k["enabled"]),
+                "active": sum(1 for k in keys_out if k["requests"] > 0),
+            },
+        }
+
     # ---------------------------------------------------------------- settings
     def get_setting(self, key, default=None):
         with self._lock:
