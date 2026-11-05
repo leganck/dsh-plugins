@@ -13,12 +13,12 @@
 档 3（快照作用域）：
   ⑮ namespace 规范夹具（scope_format.json 三组 cases）
   ⑯ scope 注册 / resolve / 列表 / status / health 汇总
-  ⑰ legacy 命名空间 pinned，不被 sweep
-  ⑱ TTL 过期 → sweep 删除 + /health.spaces 消失
+  ⑰ legacy 旧格式已废弃（sync 400 legacy-not-supported）
+  ⑱ 作用域永久：不再有过期/自动删除（sweep 端点已移除）
   ⑲ DELETE scope 后 GC 不误删仍被其他 scope 引用的内容
   ⑳ 多作用域：按 hash 去重、来源、加权 RRF、byScope、旧单 ns 等价
   ㉑ MAX_SCOPES 配额 → 507
-  ㉒ 旧 DB 启动即幂等迁移（legacy → pinned=1，created_at 回填）
+  ㉒ 旧 DB 启动即幂等迁移（旧格式作用域被清理、canonical 行补 main）
 
 P3（simhash 候选 + 精确哈希 adopt）：
   · 旧库补 simhash 5 列；simhash 存取 / 非法值 / Hamming
@@ -173,7 +173,7 @@ def main():
     time.sleep(0.2)
 
     URL = "https://git.example.com/team/demo.git"
-    NS = "demo-abc@fp1"
+    NS = istore.canonical_namespace("demo", "fp1", "main", "default")
     files = {
         "a.java": [("h1", "class A { void f(){} }", 1, 5)],
         "b.java": [("h2", "class B { void g(){} }", 1, 5), ("h3", "class B2 { }", 6, 9)],
@@ -215,9 +215,9 @@ def main():
 
     print("\n[3] 上传正文（幂等）")
     bodies = [{"hash": h, "body": b} for cs in files.values() for h, b, _s, _e in cs]
-    st, r1 = req("POST", f"/v1/namespaces/{NS}/chunks", {"bodies": bodies})
+    st, r1 = req("POST", f"/v1/namespaces/{nsq(NS)}/chunks", {"bodies": bodies})
     check("首次全部 accepted", r1.get("accepted") == 5 and r1.get("deduped") == 0, r1)
-    st, r2 = req("POST", f"/v1/namespaces/{NS}/chunks", {"bodies": bodies})
+    st, r2 = req("POST", f"/v1/namespaces/{nsq(NS)}/chunks", {"bodies": bodies})
     check("重复上传全部 deduped", r2.get("accepted") == 0 and r2.get("deduped") == 5, r2)
 
     print("\n[4] 后台嵌入")
@@ -237,7 +237,7 @@ def main():
     st, body3 = sync(NS, manifest(files, "state-2"))
     check("revision 递增到 3（2b 已推进过一次）", body3.get("revision") == 3, body3.get("revision"))
     check("只缺 h6", body3.get("missing") == ["h6"], body3.get("missing"))
-    req("POST", f"/v1/namespaces/{NS}/chunks", {"bodies": [{"hash": "h6", "body": "class A2 { }"}]})
+    req("POST", f"/v1/namespaces/{nsq(NS)}/chunks", {"bodies": [{"hash": "h6", "body": "class A2 { }"}]})
     stt = wait_vectors(NS, 6)
     check("向量补到 6", stt.get("vectors") == 6, stt)
 
@@ -248,7 +248,7 @@ def main():
     payload["remove"] = ["c.java"]
     st, body4 = sync(NS, payload)
     check("删除后 chunks = 4", body4.get("chunks") == 4, body4)
-    lid = req("GET", f"/v1/namespaces/{NS}/status")[1]["lineage"]
+    lid = req("GET", f"/v1/namespaces/{nsq(NS)}/status")[1]["lineage"]
     st, g = req("POST", "/v1/admin/gc", {"lineage": lid})
     check("GC 清掉了 2 个 blob", g.get("blobs") == 2, g)
     check("GC 清掉了 2 个向量", g.get("vectors") == 2, g)
@@ -266,7 +266,7 @@ def main():
     check("返回 400 diverged", st == 400 and c2.get("error") == "diverged", (st, c2))
 
     print("\n[10] 血统隔离 + adopt")
-    NS2 = "other-xyz@fp1"
+    NS2 = istore.canonical_namespace("other", "fp1", "main", "default")
     other = {
         "repoId": "other",
         "chunkFp": "fp1",
@@ -278,13 +278,13 @@ def main():
     }
     st, o1 = sync(NS2, other)
     check("另一血统里 h1 也算缺（不跨血统共享）", o1.get("missing") == ["h1"], o1.get("missing"))
-    lid2 = req("GET", f"/v1/namespaces/{NS2}/status")[1]["lineage"]
+    lid2 = req("GET", f"/v1/namespaces/{nsq(NS2)}/status")[1]["lineage"]
     check("两个血统 id 不同", lid != lid2)
     st, ad = req("POST", f"/v1/lineages/{lid2}/adopt", {"from": lid, "hashes": ["h1"]})
     check("adopt 复制了 1 个向量", ad.get("vectors") == 1, ad)
     st, o2 = sync(NS2, {"repoState": "o2", "mode": "full", "chunkFp": "fp1", "upsert": other["upsert"], "remove": []})
     check("adopt 后 h1 不再缺", o2.get("missing") == [], o2.get("missing"))
-    lid2b = req("GET", f"/v1/namespaces/{NS2}/status")[1]["lineage"]
+    lid2b = req("GET", f"/v1/namespaces/{nsq(NS2)}/status")[1]["lineage"]
     check("最小载荷不会造出新血统", lid2b == lid2, (lid2, lid2b))
 
     print("\n[11] 存储上界 → 507")
@@ -303,8 +303,8 @@ def main():
     check("resume 生效", rs.get("paused") is False, rs)
 
     print("\n[13] gzip 请求体")
-    NS3 = "gz-abc@fp1"
-    m3pay = manifest(files, "g1"); m3pay["namespace"] = NS3
+    NS3 = istore.canonical_namespace("gz", "fp1", "main", "default")
+    m3pay = manifest(files, "g1"); m3pay["repoId"] = "gz"; m3pay["namespace"] = NS3
     st, g3 = req("POST", "/v1/namespaces/sync", m3pay, gz=True)
     check("gzip 同步成功", st == 200 and g3.get("chunks") == sum(len(v) for v in files.values()), (st, g3))
 
@@ -363,8 +363,15 @@ def main():
                 if e.reason != c["reason"]:
                     bad.append((c["reason"], e.reason))
         check("invalid_cases：6 条 reason 全对", not bad, bad[:2])
-        bad = [c for c in fixture["legacy_cases"] if istore.legacy_namespace(c["namespace"]) != c["expect"]]
-        check("legacy_cases：原样保留不规范化", not bad, bad[:1])
+        bad = []
+        for c in fixture["legacy_cases"]:
+            try:
+                istore.legacy_namespace(c["namespace"])
+                bad.append((c["namespace"], "没有报错"))
+            except istore.ScopeFormatError as e:
+                if e.reason != "legacy-not-supported":
+                    bad.append((c["namespace"], e.reason))
+        check("legacy_cases：旧格式一律拒绝（legacy-not-supported）", not bad, bad[:1])
 
     print("\n[16] scope 注册 / resolve / 列表 / status / health")
     REPO = "scopedemo"
@@ -395,7 +402,7 @@ def main():
     check("health 顶层 scopes 汇总", hh.get("scopes", {}).get("byKind", {}).get("branch", 0) >= 1
           and hh["scopes"].get("total", 0) >= 1, hh.get("scopes"))
 
-    print("\n[17] legacy 命名空间永久保留")
+    print("\n[17] legacy 旧格式已废弃（同步直接 400，不再入账）")
     LEG = "legacy-demo@fp1"
     st, lg = req("POST", "/v1/namespaces/sync", {
         "namespace": LEG,
@@ -403,11 +410,15 @@ def main():
         "upsert": [{"path": "l.java", "hash": "file-l.java", "chunks": [{"hash": "hl1", "start": 1, "end": 2}]}],
         "remove": [],
     })
-    check("legacy 同步成功", st == 200, (st, lg))
+    check("旧格式 namespace 同步被拒绝", st == 400 and lg.get("reason") == "legacy-not-supported", (st, lg))
+    legacy_rejected = False
+    try:
+        istore.legacy_namespace(LEG)
+    except istore.ScopeFormatError as e:
+        legacy_rejected = e.reason == "legacy-not-supported"
+    check("legacy_namespace() 已不再原样放行", legacy_rejected)
     st, lstt = req("GET", f"/v1/namespaces/{nsq(LEG)}/status")
-    check("legacy 作用域无 TTL/pin 字段", lstt.get("scope", {}).get("kind") == "legacy"
-          and "expiresAt" not in lstt.get("scope", {}) and "pinned" not in lstt.get("scope", {}),
-          lstt.get("scope"))
+    check("旧格式 namespace 不会出现在列表/状态里", st == 404, st)
 
     print("\n[18] 作用域永久：PR 不再过期/自动删除")
     NS_PR = istore.canonical_namespace(REPO, "fp1", "pr", "42")
@@ -534,12 +545,17 @@ def main():
     conn.execute("insert into lineages values ('L1', 'u', 1000, 1000)")
     conn.execute("insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
                  " repo_state_chunks, updated_at) values ('old@fp', 'L1', 'old', 'fp', 3, null, null, 0, 1000)")
+    conn.execute("insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
+                 " repo_state_chunks, updated_at) values ('keep@fp#main:default', 'L1', 'keep', 'fp', 3, null, null, 0, 1000)")
     conn.commit()
     conn.close()
     m1 = istore.IndexStore(old_db)
-    row = m1.repo("old@fp")
-    check("老库补列后 legacy 可读且不再依赖 pinned/expiry",
-          row["scope_kind"] == "legacy" and row["created_at"] == 1000, row)
+    check("老库启动时旧格式作用域被清理（不再兼容）", m1.repo("old@fp") is None)
+    check("旧库里残留的旧格式 chunks 一并删除",
+          int(m1.db.execute("select count(*) as n from chunks where namespace = 'old@fp'").fetchone()["n"]) == 0)
+    row = m1.repo("keep@fp#main:default")
+    check("canonical 行保留并补 main 默认值",
+          row is not None and row["scope_kind"] == "main" and row["created_at"] == 1000, row)
     check("created_at 回填 updated_at", row["created_at"] == 1000, row.get("created_at"))
     simhash_cols = {"simhash_path", "simhash_content", "simhash_algo", "simhash_files", "simhash_at"}
     check("老库幂等补上 simhash 5 列（值保持 null）",
@@ -548,7 +564,7 @@ def main():
           simhash_cols <= {r["name"] for r in m1.db.execute("pragma table_info(repos)").fetchall()})
     m1.close()
     m2 = istore.IndexStore(old_db)
-    check("二次启动迁移幂等", m2.repo("old@fp")["created_at"] == 1000)
+    check("二次启动迁移幂等", m2.repo("keep@fp#main:default")["created_at"] == 1000)
     m2.close()
 
     print("\n[23] sync 显式 tag=null → 服务端补默认 tag（review-service 旧 payload 回归）")
@@ -1016,8 +1032,8 @@ def main():
     A_ONLY = "sh-cand-only"       # 只属于候选：绝不能出现在目标
     STALE = "sh-stale-tag-only"   # 候选只有旧 tag 向量：不能算 overlap、不能复制
     B_NEW = "sh-target-new"       # 只属于目标：adopt 后仍要嵌入
-    NS_CA = "simcand@fp1"         # 候选血统（legacy ns 即可）
-    NS_TB = "simtarg@fp1"         # 目标血统（另一个 URL → 另一个 lineage）
+    NS_CA = istore.canonical_namespace("simcand01", "fp1", "main", "default")   # 候选血统
+    NS_TB = istore.canonical_namespace("simtarg01", "fp1", "main", "default")   # 目标血统（另一个 URL → 另一个 lineage）
 
     def _sim_manifest(repo_id, repo_name, url, state, hashes, path,
                       simhash=None, adopt=False, reuse=None, no_embed=True):
@@ -1051,7 +1067,7 @@ def main():
           and isinstance(row_ca["simhash_at"], int), row_ca)
     bodies_a = [{"hash": h, "body": "body-" + h} for h in A_SHARED + [A_ONLY]]
     bodies_a.append({"hash": STALE, "body": "body-" + STALE})  # 候选有正文，但只有 stale tag 向量
-    req("POST", f"/v1/namespaces/{NS_CA}/chunks", {"bodies": bodies_a})
+    req("POST", f"/v1/namespaces/{nsq(NS_CA)}/chunks", {"bodies": bodies_a})
     stv = wait_vectors(NS_CA, len(A_SHARED) + 1)
     check("候选仓库块全部嵌入（adopt 的前提）", stv.get("vectors") == 9, stv.get("vectors"))
     stale_vec = server.embedder.embed(["stale-tag-probe"])[0]
@@ -1152,7 +1168,7 @@ def main():
         server.API_KEY = old_api_key
 
     # ---- 非法 simhash：sync 不失败、不落库
-    NS_BAD = "simbad@fp1"
+    NS_BAD = istore.canonical_namespace("simbad01", "fp1", "main", "default")
     st, rbad = sync(NS_BAD, _sim_manifest("simbad01", "sim-bad", "https://git.example.com/team/sim-bad.git",
                                           "bad-1", ["bad1"], "bad.java",
                                           simhash={"v": 1, "path": "z" * 17, "content": "0" * 16, "files": 1}))
@@ -1168,13 +1184,13 @@ def main():
           st == 200 and server.store.repo(NS_BAD)["simhash_path"] is None, (st, rbad2))
 
     # ---- overlap 门槛 / 无关 simhash
-    NS_LOW = "simlow@fp1"
+    NS_LOW = istore.canonical_namespace("simlow01", "fp1", "main", "default")
     st, rlow = sync(NS_LOW, _sim_manifest("simlow01", "sim-low", "https://git.example.com/team/sim-low.git",
                                           "low-1", A_SHARED[:5] + ["low1", "low2", "low3", "low4", "low5"],
                                           "low.java", simhash=SIM_OBJ, adopt=True, reuse="auto"))
     check("overlap 5/10 低于 0.80 → 不 adopt，missing 保持全量",
           st == 200 and "adopted" not in rlow and len(rlow.get("missing") or []) == 10, (st, rlow))
-    NS_FAR = "simfar@fp1"
+    NS_FAR = istore.canonical_namespace("simfar01", "fp1", "main", "default")
     far_obj = {"v": 1, "path": "0" * 16, "content": "0" * 16, "files": 1}
     st, rfar = sync(NS_FAR, _sim_manifest("simfar01", "sim-far", "https://git.example.com/team/sim-far.git",
                                           "far-1", ["far1", "far2"], "far.java",
@@ -1182,13 +1198,13 @@ def main():
     check("无关 simhash → 不 adopt", st == 200 and "adopted" not in rfar, (st, rfar))
 
     # ---- 兼容只传 reuse 的客户端：reuse=auto 视为显式 adopt 开关；suggest 不复制
-    NS_TB2 = "simtarg2@fp1"
+    NS_TB2 = istore.canonical_namespace("simtarg02", "fp1", "main", "default")
     st, rtb2 = sync(NS_TB2, _sim_manifest(
         "simtarg02", "sim-target2", "https://git.example.com/team/sim-target-2.git",
         "tb2-1", A_SHARED + [STALE, B_NEW], "target2.java", simhash=SIM_OBJ, reuse="auto"))
     check("只传 reuse=auto（无 adopt 字段）→ 也执行 adopt（兼容当前插件契约）",
           st == 200 and (rtb2.get("adopted") or {}).get("vectors") == 8, rtb2.get("adopted") or rtb2)
-    NS_TB3 = "simtarg3@fp1"
+    NS_TB3 = istore.canonical_namespace("simtarg03", "fp1", "main", "default")
     st, rtb3 = sync(NS_TB3, _sim_manifest(
         "simtarg03", "sim-target3", "https://git.example.com/team/sim-target-3.git",
         "tb3-1", A_SHARED + [STALE, B_NEW], "target3.java", simhash=SIM_OBJ, reuse="suggest"))
@@ -1202,12 +1218,12 @@ def main():
 
     server.store.similar_lineages = _simhash_boom
     try:
-        st, roff = sync("simoff@fp1", _sim_manifest(
+        st, roff = sync(istore.canonical_namespace("simoff01", "fp1", "main", "default"), _sim_manifest(
             "simoff01", "sim-off", "https://git.example.com/team/sim-off.git",
             "off-1", ["off1"], "off.java", simhash=SIM_OBJ, adopt=True, reuse="off"))
         check("reuse=off → 不查候选（sync 200，无 adopted / adoptError）",
               st == 200 and "adopted" not in roff and "adoptError" not in roff, roff)
-        st, rno = sync("simnoflag@fp1", _sim_manifest(
+        st, rno = sync(istore.canonical_namespace("simnf01", "fp1", "main", "default"), _sim_manifest(
             "simnf01", "sim-noflag", "https://git.example.com/team/sim-noflag.git",
             "nf-1", ["nf1"], "nf.java", simhash=SIM_OBJ))
         check("full 但无 adopt 开关 → 不查候选 / 不 adopt（不会对所有 sync 做候选查询）",
@@ -1215,26 +1231,26 @@ def main():
         diff_payload = _sim_manifest("simdf01", "sim-diff", "https://git.example.com/team/sim-diff.git",
                                      "df-1", ["df1"], "df.java", simhash=SIM_OBJ, adopt=True, reuse="auto")
         diff_payload["mode"] = "diff"
-        st, rdiff = sync("simdiff@fp1", diff_payload)
+        st, rdiff = sync(istore.canonical_namespace("simdf01", "fp1", "main", "default"), diff_payload)
         check("mode=diff + adopt 开关 → 仍不查候选",
               st == 200 and "adopted" not in rdiff and "adoptError" not in rdiff, rdiff)
-        st, rfail = sync("simfail@fp1", _sim_manifest(
+        st, rfail = sync(istore.canonical_namespace("simfl01", "fp1", "main", "default"), _sim_manifest(
             "simfl01", "sim-fail", "https://git.example.com/team/sim-fail.git",
             "fl-1", ["fl1", "fl2"], "fl.java", simhash=SIM_OBJ, adopt=True, reuse="auto"))
         check("adopt 抛异常不影响 sync：200 + 正常 missing 清单",
               st == 200 and sorted(rfail.get("missing") or []) == ["fl1", "fl2"], rfail)
         check("adopt 失败被记录在 adoptError（不抛 500）", bool(rfail.get("adoptError")),
               rfail.get("adoptError"))
-        row_fail = server.store.repo("simfail@fp1")
+        row_fail = server.store.repo(istore.canonical_namespace("simfl01", "fp1", "main", "default"))
         fail_chunks = int(db.execute("select count(*) as n from chunks where namespace = ?",
-                                     ("simfail@fp1",)).fetchone()["n"])
+                                     (istore.canonical_namespace("simfl01", "fp1", "main", "default"),)).fetchone()["n"])
         check("adopt 失败回滚后目标 chunks 完好", row_fail is not None and fail_chunks == 2,
               (row_fail is not None, fail_chunks))
     finally:
         server.store.similar_lineages = orig_similar
 
     # ---- 旧客户端不带 simhash → null；后来带则每次 sync 更新
-    NS_OLD = "simold@fp1"
+    NS_OLD = istore.canonical_namespace("simold01", "fp1", "main", "default")
     st, rold = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
                                           "old-1", ["old1"], "old.java"))
     row_old = server.store.repo(NS_OLD)

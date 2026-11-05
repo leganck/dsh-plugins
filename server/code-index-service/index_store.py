@@ -47,7 +47,7 @@ create table if not exists repos (
   repo_state text,
   repo_state_chunks integer,
   updated_at integer not null,
-  scope_kind text not null default 'legacy',
+  scope_kind text not null default 'main',
   scope_ref text,
   commit_sha text,
   ttl_days integer,
@@ -91,7 +91,7 @@ create table if not exists vectors (
 
 # ---------------------------------------------------------------- 作用域（档 3）
 # 规则见 docs/scope-tier3.md §2；夹具 scope_format.json 是本文件的验收标准。
-SCOPE_KINDS = ("legacy", "main", "branch", "pr", "worktree")
+SCOPE_KINDS = ("main", "branch", "pr", "worktree")
 
 # ---------------------------------------------------------------- simhash 候选（跨血统冷启动）
 # 客户端把整棵文件清单压成两个 64-bit simhash（path-aware / content-only）。
@@ -172,27 +172,28 @@ def canonical_namespace(repo_id, chunk_fp, kind, ref):
 
 
 def legacy_namespace(namespace):
-    """legacy 命名空间原样保留（不做规范化）；带 "#" 的说明其实是 scope，不当 legacy。"""
+    """已废弃：不再支持 legacy 命名空间。不带 # 的 namespace 一律拒绝。"""
     ns = "" if namespace is None else str(namespace)
-    if "#" in ns:
-        raise ScopeFormatError("not-legacy", f"带 # 的 namespace 不是 legacy：{ns}")
-    return ns
+    raise ScopeFormatError(
+        "legacy-not-supported",
+        f"namespace 不含 #（旧格式已废弃）：{ns}；请用 canonical 格式 {{repoId}}@{{chunkFp}}#{{kind}}:{{ref}}",
+    )
 
 
 def parse_scope_namespace(namespace):
-    """从 canonical namespace 反推 scope 元信息（legacy 返回 kind='legacy'）。
+    """从 canonical namespace 反推 scope 元信息（不含 # 的旧格式返回 kind=None，调用方应拒绝）。
 
     返回 {kind, token, scope_ref}；scope_ref 按 §3 的列值口径：
     main -> "default"、branch -> token、pr -> token、worktree -> "wt:<sha8>"。
     """
     ns = "" if namespace is None else str(namespace)
     if "#" not in ns:
-        return {"kind": "legacy", "token": None, "scope_ref": None}
+        return {"kind": None, "token": None, "scope_ref": None}
     _, _, tail = ns.rpartition("#")
     prefix, _, token = tail.partition(":")
     kind = _TOKEN_KINDS.get(prefix)
     if not kind:
-        return {"kind": "legacy", "token": token or None, "scope_ref": None}
+        return {"kind": None, "token": token or None, "scope_ref": None}
     if kind == "worktree":
         scope_ref = f"wt:{token}" if token else None
     else:
@@ -343,7 +344,7 @@ class IndexStore:
         # 幂等迁移：历史库补齐列；TTL/pinned 列保留但不再读写。
         cols = {r["name"] for r in self.db.execute("pragma table_info(repos)").fetchall()}
         for name, ddl in (
-            ("scope_kind", "text not null default 'legacy'"),
+            ("scope_kind", "text not null default 'main'"),
             ("scope_ref", "text"),
             ("commit_sha", "text"),
             ("ttl_days", "integer"),
@@ -357,7 +358,6 @@ class IndexStore:
         if "repo_state_chunks" not in cols:
             self.db.execute("alter table repos add column repo_state_chunks integer")
         # P3 simhash：只增不删的幂等列（旧库启动自动补齐；旧客户端不写 → 保持 null）。
-        # 刻意与 scope 的 `scope_added` 回填解耦：补 simhash 列不能触发 legacy 重新 pin。
         for name, ddl in (
             ("simhash_path", "text"),
             ("simhash_content", "text"),
@@ -367,6 +367,17 @@ class IndexStore:
         ):
             if name not in cols:
                 self.db.execute(f"alter table repos add column {name} {ddl}")
+        # 废弃 legacy：删除旧格式作用域（scope_kind='legacy' 或 namespace 不含 #）及其 chunks。
+        # blob/vector 按内容哈希共享，交给 janitor/retention 回收，不在这里删。
+        legacy_rows = self.db.execute(
+            "select namespace from repos where scope_kind = 'legacy' or namespace not like '%#%'"
+        ).fetchall()
+        if legacy_rows:
+            for lr in legacy_rows:
+                self.db.execute("delete from chunks where namespace = ?", (lr["namespace"],))
+                self.db.execute("delete from repos where namespace = ?", (lr["namespace"],))
+            self.db.commit()
+            self._invalidate()
         self.db.execute("update repos set created_at = updated_at where created_at is null")
         self.db.commit()
 
@@ -393,7 +404,7 @@ class IndexStore:
             if not row:
                 # 行先按 namespace 反推 scope 元信息落库；带 scope 的同步随后由 register_scope() 校准。
                 meta = parse_scope_namespace(namespace)
-                kind = meta["kind"]
+                kind = meta["kind"] or "main"
                 self.db.execute(
                     "insert into repos(namespace, lineage_id, repo_id, repo_name, chunk_fp, revision, tag,"
                     " repo_state, repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, created_at)"
@@ -458,7 +469,7 @@ class IndexStore:
     def register_scope(self, namespace, kind, ref, commit_sha=None, scope_ref=None):
         """写/更新 scope 元数据；作用域永久，不再计算 TTL/pin。"""
         now = int(time.time())
-        kind = kind or "legacy"
+        kind = kind or "main"
         if kind not in SCOPE_KINDS:
             raise ScopeFormatError("unknown-kind", f"kind={kind!r}")
         if scope_ref is None:
@@ -547,7 +558,8 @@ class IndexStore:
             where.append("r.scope_kind = ?")
             args.append(kind)
         sql = (
-            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks"
+            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks,"
+            " (select url_norm from lineages l where l.id = r.lineage_id) as lineage_url"
             " from repos r"
         )
         if where:
@@ -561,8 +573,9 @@ class IndexStore:
             item = dict(r)
             item.update(self.counts(r["namespace"]))
             item.update(self.lineage_bytes(r["lineage_id"]))
+            item["lineageUrl"] = r["lineage_url"] or ""
             item["scope"] = {
-                "kind": r["scope_kind"] or "legacy",
+                "kind": r["scope_kind"] or "main",
                 "ref": r["scope_ref"],
                 "commit": r["commit_sha"],
                 "createdAt": r["created_at"],
@@ -609,7 +622,8 @@ class IndexStore:
         offset = max(0, int(offset))
         count_sql = "select count(*) as n from repos r" + clause
         data_sql = (
-            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks"
+            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks,"
+            " (select url_norm from lineages l where l.id = r.lineage_id) as lineage_url"
             " from repos r" + clause + f" order by {sort_col} {direction}, r.namespace asc limit ? offset ?"
         )
         with self.lock:
@@ -632,10 +646,10 @@ class IndexStore:
             ]
             facets_kinds = {k: 0 for k in SCOPE_KINDS}
             for r in kind_rows:
-                key = r["scope_kind"] or "legacy"
+                key = r["scope_kind"] or "main"
                 facets_kinds[key] = facets_kinds.get(key, 0) + int(r["n"])
             variants = {
-                (r["repo_id"], r["scope_kind"] or "legacy", r["scope_ref"] or ""): int(r["n"])
+                (r["repo_id"], r["scope_kind"] or "main", r["scope_ref"] or ""): int(r["n"])
                 for r in variant_rows
             }
             items = []
@@ -647,16 +661,38 @@ class IndexStore:
                     "select count(distinct path) as n from chunks where namespace = ?", (r["namespace"],)
                 ).fetchone()["n"])
                 item["updatedAt"] = r["updated_at"]
+                item["lineageUrl"] = r["lineage_url"] or ""
                 item["variantCount"] = variants.get(
-                    (r["repo_id"], r["scope_kind"] or "legacy", r["scope_ref"] or ""), 1
+                    (r["repo_id"], r["scope_kind"] or "main", r["scope_ref"] or ""), 1
                 )
                 item["scope"] = {
-                    "kind": r["scope_kind"] or "legacy",
+                    "kind": r["scope_kind"] or "main",
                     "ref": r["scope_ref"],
                     "commit": r["commit_sha"],
                     "createdAt": r["created_at"],
                 }
                 items.append(item)
+            # 重复身份检测：同一 repoName 出现多个 repoId 时，只有"有 git URL 的血统"是 canonical，
+            # 其余标 duplicateIdentity（历史上读不到 origin 时回退成路径哈希会造成这种分裂）。
+            id_rows = self.db.execute(
+                "select r.repo_id, coalesce(r.repo_name, r.repo_id) as name,"
+                " coalesce((select url_norm from lineages l where l.id = r.lineage_id), '') as url"
+                " from repos r"
+            ).fetchall()
+            by_name = {}
+            for r in id_rows:
+                by_name.setdefault(r["name"], []).append((r["repo_id"], r["url"]))
+            canonical = {}
+            for name, lst in by_name.items():
+                ids = {rid for rid, _ in lst}
+                if len(ids) <= 1:
+                    continue
+                with_url = [rid for rid, url in lst if url]
+                canonical[name] = with_url[0] if with_url else lst[0][0]
+            for item in items:
+                name = item.get("repo_name") or item["repo_id"]
+                want = canonical.get(name)
+                item["duplicateIdentity"] = bool(want) and item["repo_id"] != want
         return {
             "scopes": items,
             "total": total,
@@ -676,7 +712,7 @@ class IndexStore:
             rows = self.db.execute("select scope_kind, count(*) as n from repos group by scope_kind").fetchall()
             by_kind = {k: 0 for k in SCOPE_KINDS}
             for r in rows:
-                key = r["scope_kind"] or "legacy"
+                key = r["scope_kind"] or "main"
                 by_kind[key] = by_kind.get(key, 0) + int(r["n"])
             chunks = int(self.db.execute("select count(*) as n from chunks").fetchone()["n"])
             vectors = int(self.db.execute(
@@ -703,8 +739,6 @@ class IndexStore:
         """§3 的 scope_ref 列口径：main:default / branch 原名 / pr:<iid> / wt:<sha8>。"""
         if kind == "main":
             return "default"
-        if kind == "legacy":
-            return None
         token = "" if ref is None else str(ref)
         if kind == "pr":
             return str(int(token)) if _DIGITS_RE.match(token) else token

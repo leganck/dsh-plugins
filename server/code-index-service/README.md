@@ -221,12 +221,12 @@ namespace 规范（`index_store.canonical_namespace()`，与 `scope_format.json`
 ```
 "{repoId}@{chunkFp}#{kind}:{refToken}"
 main → default ; branch → safe(ref)-sha1(ref)[:6] ; pr → int(ref) ; worktree → sha1(ref)[:8]
-legacy（不含 #）原样保留，scope_kind='legacy'、pinned=1、expires_at=null
+legacy（不含 #）已废弃：sync 直接 400 legacy-not-supported，启动时清理旧行
 ```
 
 ### 永久作用域
 
-作用域不再有过期时间或自动清理：`main / branch / pr / worktree / legacy` 全部永久保留。
+作用域不再有过期时间或自动清理：`main / branch / pr / worktree` 全部永久保留。
 需要清理时由管理员在控制台勾选删除，或调用：
 
 ```text
@@ -235,6 +235,12 @@ POST   /v1/scopes/bulk-delete {"namespaces":[...]}
 ```
 
 删除后立即回收该血统内已无任何 chunk 引用的 blob/vector；仍被其他作用域引用的内容不会删。
+
+> **同一仓库出现多行"main"**：通常是同一个 git 仓库被两个根目录各建了一次索引
+> （仓库根 + 子目录），它们的 `(repoId, kind, ref)` 相同、只有 `chunkFp` 不同。
+> 插件会在 `code_index` 输出里提示"索引的是仓库子目录"；不需要独立索引时只索引仓库根即可。
+> 另一个常见来源是 detached HEAD（rebase 期间）—— 旧插件会把 short sha 当分支名写成
+> `#branch:<sha8>`；0.15.2 起改为解析"指向 HEAD 的分支"，解析不到才回退 `main:default`。
 
 ### 多作用域检索（`/v1/search`）
 
@@ -251,7 +257,8 @@ POST   /v1/scopes/bulk-delete {"namespaces":[...]}
 ### 升级 / 回滚
 
 - **升级零手工步骤**：`IndexStore.__init__` 对旧 `repos` 表做幂等 `alter table` 补历史列；
-  老行回填 `scope_kind='legacy'`、`created_at=updated_at`。历史 `ttl_days/expires_at/pinned` 保留但不再读写。
+  老行回填 `created_at=updated_at`；旧格式作用域（`scope_kind='legacy'` 或 namespace 不含 `#`）
+  在启动时被清理。历史 `ttl_days/expires_at/pinned` 保留但不再读写。
   P3 又补了 5 个 `simhash_*` 列（同样幂等；旧客户端不写 → 保持 `null`）。
 - **回滚**：换回旧镜像/旧插件即可 —— 多出的列旧代码不读不写；旧 DB 删列需要手工（SQLite 不支持 drop column 的旧版本，
   一般没必要回滚数据结构）。
