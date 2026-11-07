@@ -151,17 +151,17 @@
           "ast"
         ],
         "sortKeys": {
-          "published": 1794037209
+          "published": 1794037928
         }
       },
       "versions": [
         {
-          "version": "0.15.3",
-          "publishTimestamp": 1794037209,
+          "version": "0.15.4",
+          "publishTimestamp": 1794037928,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "56a42ce5ca960801b8ced2a2a76b31c5622b4ccf",
+            "commit": "023e0a8d059679094d92005ed6504a1ef0cdc1a5",
             "path": "plugins/dsh-code-index"
           },
           "engines": {
@@ -204,17 +204,17 @@
           "archive"
         ],
         "sortKeys": {
-          "published": 1794037209
+          "published": 1794037928
         }
       },
       "versions": [
         {
-          "version": "1.2.1",
-          "publishTimestamp": 1794037209,
+          "version": "1.2.2",
+          "publishTimestamp": 1794037928,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "56a42ce5ca960801b8ced2a2a76b31c5622b4ccf",
+            "commit": "023e0a8d059679094d92005ed6504a1ef0cdc1a5",
             "path": "plugins/dsh-memory-archive"
           }
         }
@@ -254,17 +254,17 @@
           "scaffold"
         ],
         "sortKeys": {
-          "published": 1794037209
+          "published": 1794037928
         }
       },
       "versions": [
         {
-          "version": "0.1.0",
-          "publishTimestamp": 1794037209,
+          "version": "0.2.0",
+          "publishTimestamp": 1794037928,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "56a42ce5ca960801b8ced2a2a76b31c5622b4ccf",
+            "commit": "023e0a8d059679094d92005ed6504a1ef0cdc1a5",
             "path": "plugins/dsh-multiroot"
           },
           "engines": {
