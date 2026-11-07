@@ -276,8 +276,8 @@
     {
       "name": "@local/dsh-report",
       "title": {
-        "zh": "报告与统计",
-        "en": "Reports & Stats"
+        "zh": "工作报告",
+        "en": "Work Reports"
       },
       "description": {
         "zh": "GitLab 提交同步、确定性统计（贡献墙/提交记录/仓库树）、AI 报告生成与改写、作者别名推断；报告页 + 统计页 + 设置分区。",
@@ -299,17 +299,17 @@
           "sync"
         ],
         "sortKeys": {
-          "published": 1794034598
+          "published": 1794034900
         }
       },
       "versions": [
         {
-          "version": "0.3.3",
-          "publishTimestamp": 1794034598,
+          "version": "0.3.4",
+          "publishTimestamp": 1794034900,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "32cef6073da49422b3423f8892edd3a7c68a5832",
+            "commit": "695d6e27ab9c1eb507ce7c31a06ec587f4be9b3a",
             "path": "plugins/dsh-report"
           },
           "engines": {
