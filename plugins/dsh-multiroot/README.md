@@ -1,6 +1,6 @@
 # dsh-multiroot
 
-> **接入状态**：已可被插件源发现（`market/index.json` 含 `@local/dsh-multiroot`），
+> **接入状态**：已可被插件源发现（`market/index.json` 含 `dsh-multiroot`），
 > 但尚未在 profile 安装；`root_write` / `root_edit` / `root_run` 仅有设计，未实现。
 
 
