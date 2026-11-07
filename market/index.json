@@ -151,17 +151,17 @@
           "ast"
         ],
         "sortKeys": {
-          "published": 1793859013
+          "published": 1794023306
         }
       },
       "versions": [
         {
           "version": "0.15.3",
-          "publishTimestamp": 1793859013,
+          "publishTimestamp": 1794023306,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "99a25988667b11f6ed11eaa5db11ba3396755005",
+            "commit": "b604becf147e708168fa74ce244c21b1ac212b02",
             "path": "plugins/dsh-code-index"
           },
           "engines": {
@@ -204,17 +204,17 @@
           "archive"
         ],
         "sortKeys": {
-          "published": 1792631196
+          "published": 1794023306
         }
       },
       "versions": [
         {
-          "version": "1.2.0",
-          "publishTimestamp": 1792631196,
+          "version": "1.2.1",
+          "publishTimestamp": 1794023306,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "07a7b15cd31dd78facb3eb2752ef6b4fab370e5a",
+            "commit": "b604becf147e708168fa74ce244c21b1ac212b02",
             "path": "plugins/dsh-memory-archive"
           }
         }
@@ -254,17 +254,17 @@
           "scaffold"
         ],
         "sortKeys": {
-          "published": 1792631196
+          "published": 1794023306
         }
       },
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 1792631196,
+          "publishTimestamp": 1794023306,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "07a7b15cd31dd78facb3eb2752ef6b4fab370e5a",
+            "commit": "b604becf147e708168fa74ce244c21b1ac212b02",
             "path": "plugins/dsh-multiroot"
           },
           "engines": {
@@ -299,17 +299,17 @@
           "sync"
         ],
         "sortKeys": {
-          "published": 1794022715
+          "published": 1794023306
         }
       },
       "versions": [
         {
-          "version": "0.3.0",
-          "publishTimestamp": 1794022715,
+          "version": "0.3.1",
+          "publishTimestamp": 1794023306,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "4c9d13a4004adcac77b1083c64b9ef97a2eec218",
+            "commit": "b604becf147e708168fa74ce244c21b1ac212b02",
             "path": "plugins/dsh-report"
           },
           "engines": {
