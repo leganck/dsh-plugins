@@ -4632,6 +4632,12 @@ addClientCSS(`
 
 addClientCSS(`
 .dsr-connList { display: flex; flex-direction: column; gap: 6px; }
+.dsr-scopeConns { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsr-scopeConn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 14px; border: 0.5px solid var(--dsw-alias-border-l4); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-secondary); font-size: 12px; cursor: pointer; }
+.dsr-scopeConn.is-on { border-color: var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-weight: 600; }
+.dsr-scopeConnDot { width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-border-l2); }
+.dsr-scopeConn.is-on .dsr-scopeConnDot { background: var(--dsw-alias-status-success, #22c55e); }
+.dsr-scopeConnWarn { font-size: 10px; color: var(--dsw-alias-status-warning, #d97706); }
 .dsr-connRow {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 8px 10px; border-radius: 8px;
@@ -4811,6 +4817,54 @@ function syBuildProjectTree(projects) {
   return [...root.children.values()].map(materialize);
 }
 
+function syProjectConnectionId(project) {
+  if (!project) return '';
+  return String(project.connectionId || project.connection_id || '');
+}
+
+/** 跨连接唯一 key：connectionId:projectId。 */
+function syProjectKey(project) {
+  const id = syProjectId(project);
+  if (!id) return '';
+  const connectionId = syProjectConnectionId(project);
+  return connectionId ? `${connectionId}:${id}` : id;
+}
+
+function syPrefixTreeKeys(nodes, prefix) {
+  for (const node of nodes) {
+    node.key = prefix ? `${prefix}:${node.key}` : node.key;
+    syPrefixTreeKeys(node.children, prefix);
+  }
+  return nodes;
+}
+
+/** 多连接树：连接 → 命名空间 → 仓库（与 workbench 的 connection 根一致）。 */
+function syBuildConnectionTree(projects, connections) {
+  const byConnection = new Map();
+  for (const project of projects) {
+    const connectionId = syProjectConnectionId(project);
+    if (!byConnection.has(connectionId)) byConnection.set(connectionId, []);
+    byConnection.get(connectionId).push(project);
+  }
+  const labelOf = (connectionId) => {
+    const found = (connections || []).find((item) => String(item.id) === String(connectionId));
+    return (found && (found.displayName || found.username || found.baseUrl)) || connectionId || '未命名连接';
+  };
+  return Array.from(byConnection.entries())
+    .sort(([left], [right]) => labelOf(left).localeCompare(labelOf(right), 'zh-CN'))
+    .map(([connectionId, items]) => {
+      const children = syPrefixTreeKeys(syBuildProjectTree(items), connectionId);
+      return {
+        type: 'connection',
+        connectionId,
+        key: `conn:${connectionId}`,
+        label: labelOf(connectionId),
+        projects: [],
+        children,
+      };
+    });
+}
+
 function syCollectProjects(node) {
   const out = [...node.projects];
   for (const child of node.children) out.push(...syCollectProjects(child));
@@ -4839,7 +4893,7 @@ function ProjectTree({ t, nodes, selected, collapsed, onToggleGroup, onTogglePro
 
 function ProjectTreeNode({ t, node, selected, collapsed, onToggleGroup, onToggleProject }) {
   const all = syCollectProjects(node);
-  const selectedCount = all.filter((project) => selected[syProjectId(project)]).length;
+  const selectedCount = all.filter((project) => selected[syProjectKey(project)]).length;
   const checked = all.length > 0 && selectedCount === all.length;
   const indeterminate = selectedCount > 0 && !checked;
   const open = !collapsed[node.key];
@@ -4868,7 +4922,7 @@ function ProjectTreeNode({ t, node, selected, collapsed, onToggleGroup, onToggle
           'div',
           { className: 'dsr-repoChildren' },
           ...node.projects.map((project) => {
-            const id = syProjectId(project);
+            const id = syProjectKey(project);
             const path = syProjectName(project);
             return h(
               'label',
@@ -5157,140 +5211,142 @@ function SyncConnectionCard(props) {
 // ---------------------------------------------------------------- 同步仓库范围（设置页）
 /** 仓库范围卡：连接选择 + 命名空间树 + 保存；同步对话框只读取已保存范围。 */
 function SyncScopeCard(props) {
-  const { t, actions } = props || {}
-  const tr = (key, fallback) => (typeof t === 'function' ? tx(t, key, fallback) : fallback)
+  const { t, actions } = props || {};
+  const tr = (key, fallback) => (typeof t === 'function' ? tx(t, key, fallback) : fallback);
 
-  const [connectionId, setConnectionId] = React.useState('')
-  const [connections, setConnections] = React.useState([])
-  const [connError, setConnError] = React.useState('')
-  const [connLoading, setConnLoading] = React.useState(false)
+  const [connections, setConnections] = React.useState([]);
+  const [checked, setChecked] = React.useState({});
+  const [projects, setProjects] = React.useState([]);
+  const [selected, setSelected] = React.useState({});
+  const [query, setQuery] = React.useState('');
+  const [collapsed, setCollapsed] = React.useState({});
+  const [loading, setLoading] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [notice, setNotice] = React.useState('');
 
-  const [projects, setProjects] = React.useState([])
-  const [projectQuery, setProjectQuery] = React.useState('')
-  const [selected, setSelected] = React.useState({})
-  const [projLoading, setProjLoading] = React.useState(false)
-  const [projSaving, setProjSaving] = React.useState(false)
-  const [projError, setProjError] = React.useState('')
-  const [projNotice, setProjNotice] = React.useState('')
-  const [projCollapsed, setProjCollapsed] = React.useState({})
-
-  const loadConnections = React.useCallback(async () => {
-    setConnLoading(true)
-    setConnError('')
+  const load = React.useCallback(async (refresh) => {
+    setLoading(true);
+    setError('');
     try {
-      const data = await api.get('/gitlab/connections')
-      const list = Array.isArray(data && data.connections) ? data.connections : []
-      setConnections(list)
-      setConnectionId((current) => {
-        if (current && list.some((item) => String(item.id) === String(current))) return current
-        return list.length ? String(list[0].id) : current
-      })
-    } catch (error) {
-      setConnError(syErrText(error))
+      const [connData] = await Promise.all([
+        api.get('/gitlab/connections'),
+        actions && typeof actions.loadConfig === 'function' ? actions.loadConfig() : api.get('/config').catch(() => null),
+      ]);
+      const list = Array.isArray(connData && connData.connections) ? connData.connections : [];
+      setConnections(list);
+      setChecked((current) => {
+        const next = {};
+        for (const connection of list) next[String(connection.id)] = current[String(connection.id)] !== false;
+        return next;
+      });
+
+      const loadedProjects = [];
+      const nextSelected = {};
+      await Promise.all(
+        list.map(async (connection) => {
+          const connectionId = String(connection.id || '');
+          if (!connectionId) return;
+          try {
+            const params = new URLSearchParams({ connectionId });
+            if (refresh) params.set('refresh', '1');
+            const [projectData, selectionData] = await Promise.all([
+              api.get(`/gitlab/projects?${params.toString()}`),
+              api.get(`/gitlab/selection?connectionId=${encodeURIComponent(connectionId)}`),
+            ]);
+            const rows = Array.isArray(projectData && projectData.projects) ? projectData.projects : [];
+            for (const row of rows) loadedProjects.push({ ...row, connectionId });
+            const selectedRows = Array.isArray(selectionData && selectionData.projects) ? selectionData.projects : [];
+            for (const row of selectedRows) {
+              const key = `${connectionId}:${syProjectId(row)}`;
+              if (key !== ':') nextSelected[key] = true;
+            }
+          } catch (loadError) {
+            setError(syErrText(loadError));
+          }
+        }),
+      );
+      setProjects(loadedProjects);
+      setSelected(nextSelected);
+    } catch (loadError) {
+      setError(syErrText(loadError));
     } finally {
-      setConnLoading(false)
+      setLoading(false);
     }
-  }, [])
-
-  const loadSelection = React.useCallback(async (id) => {
-    if (!id) {
-      setSelected({})
-      return
-    }
-    try {
-      const data = await api.get(`/gitlab/selection?connectionId=${encodeURIComponent(id)}`)
-      const list = Array.isArray(data && data.projects) ? data.projects : []
-      const next = {}
-      for (const item of list) next[syProjectId(item)] = true
-      setSelected(next)
-    } catch (error) {
-      setProjError(syErrText(error))
-    }
-  }, [])
-
-  const loadProjects = React.useCallback(async (id, query, refresh) => {
-    if (!id) return
-    setProjLoading(true)
-    setProjError('')
-    try {
-      const params = new URLSearchParams({ connectionId: id })
-      if (query) params.set('q', query)
-      if (refresh) params.set('refresh', '1')
-      const data = await api.get(`/gitlab/projects?${params.toString()}`)
-      setProjects(Array.isArray(data && data.projects) ? data.projects : [])
-    } catch (error) {
-      setProjError(syErrText(error))
-    } finally {
-      setProjLoading(false)
-    }
-  }, [])
+  }, [actions]);
 
   React.useEffect(() => {
-    loadConnections()
-  }, [loadConnections])
+    load(false);
+  }, [load]);
 
-  React.useEffect(() => {
-    if (!connectionId) return
-    loadSelection(connectionId)
-    loadProjects(connectionId, '', false)
-  }, [connectionId, loadProjects, loadSelection])
+  const shownConnections = connections.filter((connection) => checked[String(connection.id)] !== false);
+  const shownConnectionIds = new Set(shownConnections.map((connection) => String(connection.id)));
+  const shownProjects = projects.filter((project) => shownConnectionIds.has(syProjectConnectionId(project)));
+  const filteredProjects = shownProjects.filter((project) => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return true;
+    return `${syProjectName(project)} ${syProjectId(project)}`.toLowerCase().includes(needle);
+  });
+  const tree = syBuildConnectionTree(filteredProjects, connections);
+  const selectedCount = shownProjects.filter((project) => selected[syProjectKey(project)]).length;
+
+  const toggleConnection = (connectionId) => {
+    setChecked((current) => ({ ...current, [String(connectionId)]: current[String(connectionId)] === false }));
+  };
+  const toggleProject = (project) => {
+    const key = syProjectKey(project);
+    if (!key) return;
+    setSelected((current) => ({ ...current, [key]: !current[key] }));
+  };
+  const toggleGroup = (node, value) => {
+    const items = syCollectProjects(node);
+    setSelected((current) => {
+      const next = { ...current };
+      for (const project of items) {
+        const key = syProjectKey(project);
+        if (key) next[key] = Boolean(value);
+      }
+      return next;
+    });
+  };
+  const toggleCollapsed = (key) => setCollapsed((current) => ({ ...current, [key]: !current[key] }));
 
   const saveSelection = React.useCallback(async () => {
-    if (!connectionId) {
-      setProjError(tr('connectionRequired', '请先保存并选择 GitLab 连接'))
-      return
+    if (!shownConnections.length) {
+      setError(tr('noConnectionSelected', '请至少选择一个 GitLab 连接'));
+      return;
     }
-    setProjSaving(true)
-    setProjError('')
-    setProjNotice('')
+    setSaving(true);
+    setError('');
+    setNotice('');
     try {
-      const payload = projects
-        .filter((project) => selected[syProjectId(project)])
-        .map((project) => ({ id: syProjectId(project), pathWithNamespace: syProjectName(project), name: project.name || '' }))
-      await api.put('/gitlab/selection', { connectionId, projects: payload })
-      setProjNotice(`${tr('saved', '已保存')} · ${payload.length} ${tr('repos', '仓库')}`)
-      showToast('ok', tr('saved', '已保存'))
-    } catch (error) {
-      setProjError(syErrText(error))
-    } finally {
-      setProjSaving(false)
-    }
-  }, [connectionId, projects, selected, t])
-
-  const filteredProjects = projects.filter((project) => {
-    const query = projectQuery.trim().toLowerCase()
-    if (!query) return true
-    return syProjectName(project).toLowerCase().includes(query) || String(project.name || '').toLowerCase().includes(query)
-  })
-  const selectedCount = Object.keys(selected).filter((key) => selected[key]).length
-  const projectTree = syBuildProjectTree(filteredProjects)
-  const toggleGroupCollapsed = (key) => setProjCollapsed((current) => ({ ...current, [key]: !current[key] }))
-  const toggleProject = (project) => {
-    const id = syProjectId(project)
-    setSelected((current) => ({ ...current, [id]: !current[id] }))
-  }
-  const toggleGroupSelection = (key, value) => {
-    const node = (function find(nodes) {
-      for (const item of nodes) {
-        if (item.key === key) return item
-        const nested = find(item.children)
-        if (nested) return nested
+      const groups = new Map();
+      for (const connection of shownConnections) groups.set(String(connection.id), []);
+      for (const project of shownProjects) {
+        const connectionId = syProjectConnectionId(project);
+        if (!groups.has(connectionId)) continue;
+        if (!selected[syProjectKey(project)]) continue;
+        groups.get(connectionId).push({
+          id: syProjectId(project),
+          pathWithNamespace: syProjectName(project),
+          name: project.name || '',
+        });
       }
-      return null
-    })(projectTree)
-    if (!node) return
-    const ids = syCollectProjects(node).map(syProjectId).filter(Boolean)
-    setSelected((current) => {
-      const next = { ...current }
-      for (const id of ids) next[id] = Boolean(value)
-      return next
-    })
-  }
-
-  const connectionOptions = connections.map((item) => ({
-    value: String(item.id),
-    label: `${item.displayName || item.baseUrl || item.id}${item.hasToken ? '' : ` · ${tr('tokenMissing', '未保存 Token')}`}`,
-  }))
+      const results = await Promise.all(
+        Array.from(groups.entries()).map(([connectionId, rows]) =>
+          api.put('/gitlab/selection', { connectionId, projects: rows }),
+        ),
+      );
+      const total = Array.from(groups.values()).reduce((sum, rows) => sum + rows.length, 0);
+      setNotice(`${tr('saved', '已保存')} · ${total} ${tr('repos', '仓库')}（${groups.size} ${tr('connections', '个连接')}）`);
+      showToast('ok', tr('saved', '已保存'));
+      if (typeof props.onSaved === 'function') props.onSaved();
+    } catch (saveError) {
+      setError(syErrText(saveError));
+    } finally {
+      setSaving(false);
+    }
+  }, [props, selected, shownConnections, shownProjects, t]);
 
   return h(
     SyncCard,
@@ -5301,54 +5357,82 @@ function SyncScopeCard(props) {
         'span',
         { className: 'dsr-inlineMeta' },
         h(Badge, null, `${tr('selected', '已选')} ${selectedCount}`),
+        h(Badge, null, `${tr('connections', '连接')} ${shownConnections.length}/${connections.length}`),
         h(Badge, null, `${tr('available', '可选')} ${filteredProjects.length}`),
       ),
-      hint: tr('syncScopeHint', '这里决定 GitLab 同步会覆盖哪些仓库；同步对话框只读取这里保存的范围。'),
+      hint: tr('syncScopeHint', '勾选要纳入同步的 GitLab 连接，可跨连接一起选仓库；保存后同步/生成会覆盖所有已选连接。'),
     },
-    connError ? h(SyncErrorBar, null, connError) : null,
-    h(
-      'div',
-      { className: 'dsr-formGrid' },
-      h(
-        Field,
-        { label: tr('connection', 'GitLab 连接'), hint: connLoading ? tr('loading', '加载中…') : undefined },
-        connectionOptions.length
-          ? h(Select, { options: connectionOptions, value: connectionId, onChange: setConnectionId })
-          : h(Input, { value: '', placeholder: tr('noConnection', '尚未配置连接'), disabled: true, readOnly: true }),
-      ),
-      h(Field, { label: tr('projectQuery', '搜索仓库'), hint: tr('projectQueryHint', '按 path / 名称过滤') }, h(Input, {
-        value: projectQuery,
-        placeholder: 'erp-eai / group/sub/repo',
-        onChange: (event) => setProjectQuery(event.target.value),
-        spellCheck: false,
-      })),
-    ),
+    connections.length
+      ? h(
+          'div',
+          { className: 'dsr-scopeConns' },
+          ...connections.map((connection) => {
+            const id = String(connection.id);
+            const active = checked[id] !== false;
+            return h(
+              'button',
+              {
+                key: id,
+                type: 'button',
+                className: `dsr-scopeConn${active ? ' is-on' : ''}`,
+                'aria-pressed': active,
+                onClick: () => toggleConnection(id),
+              },
+              h('span', { className: 'dsr-scopeConnDot' }),
+              String(connection.displayName || connection.username || connection.baseUrl || id),
+              connection.hasToken ? null : h('span', { className: 'dsr-scopeConnWarn' }, tr('tokenMissing', '未保存 Token')),
+            );
+          }),
+        )
+      : h('p', { className: 'dsr-hint' }, tr('noConnections', '还没有 GitLab 连接；请先在上方「GitLab 连接」里添加。')),
     h(
       'div',
       { className: 'dsr-btnRow' },
-      h(Button, { onClick: () => loadConnections(), disabled: connLoading }, tr('refreshConnection', '刷新连接')),
-      h(Button, { onClick: () => loadProjects(connectionId, projectQuery.trim(), true), disabled: projLoading || !connectionId }, projLoading ? tr('loading', '加载中…') : tr('refreshProjects', '刷新仓库')),
-      h(Button, { onClick: () => { const next = {}; for (const project of filteredProjects) next[syProjectId(project)] = true; setSelected((current) => ({ ...current, ...next })) } }, tr('selectAll', '全选')),
-      h(Button, { onClick: () => setSelected({}) }, tr('clearAll', '清空')),
-      h(Button, { variant: 'primary', onClick: saveSelection, disabled: projSaving || !connectionId }, projSaving ? tr('saving', '保存中…') : tr('saveSelection', '保存仓库范围')),
+      h(Input, {
+        value: query,
+        placeholder: tr('projectQuery', '搜索仓库'),
+        onChange: (event) => setQuery(event.target.value),
+        spellCheck: false,
+        style: { maxWidth: '260px' },
+      }),
+      h(Button, { onClick: () => load(true), disabled: loading }, loading ? tr('loading', '加载中…') : tr('refreshProjects', '刷新仓库')),
+      h(Button, { onClick: () => { const next = {}; for (const project of filteredProjects) next[syProjectKey(project)] = true; setSelected((current) => ({ ...current, ...next })); } }, tr('selectAll', '全选')),
+      h(Button, { onClick: () => { const next = {}; for (const project of filteredProjects) next[syProjectKey(project)] = false; setSelected((current) => ({ ...current, ...next })); } }, tr('clearAll', '清空')),
+      h(Button, { variant: 'primary', onClick: saveSelection, disabled: saving || loading || !shownConnections.length }, saving ? tr('saving', '保存中…') : tr('saveSelection', '保存仓库范围')),
     ),
-    projError ? h(SyncErrorBar, null, projError) : null,
-    projNotice ? h(SyncNoticeBar, null, projNotice) : null,
+    error ? h(SyncErrorBar, null, error) : null,
+    notice ? h(SyncNoticeBar, null, notice) : null,
     h(
       'div',
       { className: 'dsr-repoTreePicker' },
       filteredProjects.length
         ? h(ProjectTree, {
             t,
-            nodes: projectTree,
+            nodes: tree,
             selected,
-            collapsed: projCollapsed,
-            onToggleGroup: (key, value) => (value === undefined ? toggleGroupCollapsed(key) : toggleGroupSelection(key, value)),
+            collapsed,
+            onToggleGroup: (key, value) => {
+              const findNode = (nodes) => {
+                for (const item of nodes) {
+                  if (item.key === key) return item;
+                  const nested = findNode(item.children);
+                  if (nested) return nested;
+                }
+                return null;
+              };
+              const node = findNode(tree);
+              if (!node) return;
+              if (value === undefined) toggleCollapsed(key);
+              else toggleGroup(node, value);
+            },
             onToggleProject: toggleProject,
           })
-        : h(EmptyState, { title: projLoading ? tr('loading', '加载中…') : tr('noProjects', '没有可选仓库'), hint: connectionId ? tr('noProjectsHint', '点击「刷新仓库」从 GitLab 拉取成员项目') : tr('connectionRequired', '请先保存并选择 GitLab 连接') }),
+        : h(EmptyState, {
+            title: loading ? tr('loading', '加载中…') : tr('noProjects', '没有可选仓库'),
+            hint: connections.length ? tr('noProjectsHint', '点击「刷新仓库」从 GitLab 拉取成员项目') : tr('noConnections', '请先添加 GitLab 连接'),
+          }),
     ),
-  )
+  );
 }
 
 // ---------------------------------------------------------------- 同步页
@@ -5361,7 +5445,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
   const [connError, setConnError] = React.useState('');
   const [connLoading, setConnLoading] = React.useState(false);
 
-  const [selection, setSelection] = React.useState({ ids: [], names: [] });
+  const [scope, setScope] = React.useState({ total: 0, connections: [], names: [] });
 
   const initialRange = (() => {
     const isDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
@@ -5413,29 +5497,45 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     }
   }, []);
 
-  const loadSelection = React.useCallback(async (id) => {
-    if (!id) {
-      setSelection({ ids: [], names: [] });
-      return;
-    }
+  /** 读取所有连接的已保存范围（多连接同步时一起用）。 */
+  const loadScopes = React.useCallback(async () => {
     try {
-      const data = await api.get(`/gitlab/selection?connectionId=${encodeURIComponent(id)}`);
-      const list = Array.isArray(data && data.projects) ? data.projects : [];
-      const ids = list.map((item) => syProjectId(item)).filter(Boolean);
-      const names = list.map((item) => syProjectName(item)).filter(Boolean);
-      setSelection({ ids, names });
+      const data = await api.get('/gitlab/connections');
+      const list = Array.isArray(data && data.connections) ? data.connections : [];
+      const rows = await Promise.all(
+        list.map(async (connection) => {
+          const id = String(connection.id || '');
+          try {
+            const selectionData = await api.get(`/gitlab/selection?connectionId=${encodeURIComponent(id)}`);
+            const projects = Array.isArray(selectionData && selectionData.projects) ? selectionData.projects : [];
+            return {
+              id,
+              name: String(connection.displayName || connection.username || connection.baseUrl || id),
+              count: projects.length,
+              names: projects.map((item) => syProjectName(item)).filter(Boolean),
+            };
+          } catch {
+            return { id, name: String(connection.displayName || connection.baseUrl || id), count: 0, names: [] };
+          }
+        }),
+      );
+      const active = rows.filter((row) => row.count > 0);
+      setScope({
+        total: active.reduce((sum, row) => sum + row.count, 0),
+        connections: active,
+        names: active.flatMap((row) => row.names),
+      });
     } catch (error) {
       setSyncError(syErrText(error));
     }
   }, []);
 
   const loadCoverage = React.useCallback(async () => {
-    if (!connectionId || !startDate || !endDate) return;
+    if (!connections.length || !startDate || !endDate) return;
     setCoverageLoading(true);
     setCoverageError('');
     try {
       const params = new URLSearchParams({ startDate, endDate });
-      if (connectionId) params.set('connectionId', connectionId);
       const data = await api.get(`/sync/coverage?${params.toString()}`);
       setCoverage(data || null);
     } catch (error) {
@@ -5443,7 +5543,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     } finally {
       setCoverageLoading(false);
     }
-  }, [connectionId, endDate, startDate]);
+  }, [connections, endDate, startDate]);
 
   // 首屏：连接列表 + 任务历史
   React.useEffect(() => {
@@ -5451,11 +5551,11 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     loadJobs();
   }, [loadConnections, loadJobs]);
 
-  // 连接变化：读取设置里保存的仓库范围
+  // 连接变化：读取所有连接已保存的仓库范围
   React.useEffect(() => {
-    if (!connectionId) return;
-    loadSelection(connectionId);
-  }, [connectionId, loadSelection]);
+    if (!connections.length) return;
+    loadScopes();
+  }, [connections, loadScopes]);
 
   // 轮询运行中的同步任务（2s，最多 30 分钟）
   // 依赖只保留 polling + 稳定的 loader，job 通过 ref 读取，避免每次渲染重置计时器。
@@ -5513,7 +5613,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
       setSyncError(tr('connectionRequired', '请先保存并选择 GitLab 连接'));
       return;
     }
-    if (!selection.ids.length) {
+    if (!scope.total) {
       setSyncError(tr('noScopeNotice', '还没有保存同步仓库范围，请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。'));
       return;
     }
@@ -5528,12 +5628,10 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     setStarting(true);
     setSyncError('');
     try {
-      const projectIds = selection.ids.slice();
-      const body = { connectionId, startDate, endDate };
-      if (projectIds.length) body.projectIds = projectIds;
+      const body = { connectionIds: scope.connections.map((row) => row.id), startDate, endDate };
       const data = await api.post('/sync/start', body);
       const jobId = data && (data.jobId || data.job_id);
-      const nextJob = { jobId, connectionId, status: 'running', progress: { projectsDone: 0, projectsTotal: projectIds.length || 0, commitsSynced: 0 } };
+      const nextJob = { jobId, connectionId: scope.connections[0] && scope.connections[0].id, status: 'running', progress: { projectsDone: 0, projectsTotal: scope.total, commitsSynced: 0 } };
       setJob(nextJob);
       startedAtRef.current = Date.now();
       setPolling(true);
@@ -5544,7 +5642,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     } finally {
       setStarting(false);
     }
-  }, [connectionId, endDate, loadJobs, selection, startDate, t]);
+  }, [connectionId, endDate, loadJobs, scope, startDate, t]);
 
   const viewJobStats = React.useCallback(
     (item) => {
@@ -5589,7 +5687,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     label: `${item.displayName || item.baseUrl || item.id}${item.hasToken ? '' : ` · ${tr('tokenMissing', '未保存 Token')}`}`,
   }));
 
-  const selectedCount = selection.ids.length;
+  const selectedCount = scope.total;
   const progress = (job && job.progress) || {};
   const projectsTotal = Number(progress.projectsTotal || 0);
   const projectsDone = Number(progress.projectsDone || 0);
@@ -5632,14 +5730,14 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
         connLoading
           ? tr('loading', '加载中…')
           : selectedCount
-            ? `${tr('selected', '已选')} ${selectedCount} ${tr('repos', '仓库')} · ${(connections.find((item) => String(item.id) === String(connectionId)) || {}).displayName || connectionId || '—'}`
+            ? `${tr('selected', '已选')} ${selectedCount} ${tr('repos', '仓库')} · ${scope.connections.length} ${tr('connections', '个连接')}`
             : tr('noScopeShort', '还没有选择同步仓库：请到 设置 → 报告与统计 → 同步仓库范围 选择'),
       ),
       h('span', { className: 'dsr-syncScopeHint' }, tr('syncScopeSummaryHint', '仓库范围在 设置 → 报告与统计 → 同步仓库范围 修改')),
       h(
         'span',
         { className: 'dsr-syncScopeActions' },
-        h(Button, { size: 'sm', onClick: () => loadSelection(connectionId), disabled: !connectionId }, tr('reloadScope', '重新读取')),
+        h(Button, { size: 'sm', onClick: () => loadScopes(), disabled: !connections.length }, tr('reloadScope', '重新读取')),
         h(Button, { size: 'sm', onClick: () => loadConnections(), disabled: connLoading }, tr('refreshConnection', '刷新连接')),
       ),
     ),
@@ -5679,7 +5777,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
         h(Button, { onClick: () => applyRangeKind('month') }, tr('thisMonth', '本月')),
         h(Button, { onClick: () => applyRangeKind('last12') }, tr('last12', '近 12 个月')),
         h(Button, { onClick: loadCoverage, disabled: coverageLoading }, coverageLoading ? tr('loading', '加载中…') : tr('previewCoverage', '预览覆盖度')),
-        h(Button, { variant: 'primary', onClick: startSync, disabled: starting || polling || !connectionId || !selectedCount }, starting ? tr('starting', '启动中…') : tr('startSync', '开始同步')),
+        h(Button, { variant: 'primary', onClick: startSync, disabled: starting || polling || !selectedCount }, starting ? tr('starting', '启动中…') : tr('startSync', '开始同步')),
         polling || (job && job.status === 'running') ? h(Button, { variant: 'danger', onClick: cancelSync }, tr('cancelSync', '取消同步')) : null,
       ),
       syncError ? h(SyncErrorBar, null, syncError) : null,

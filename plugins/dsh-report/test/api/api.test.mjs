@@ -984,3 +984,16 @@ test('多连接：DELETE /gitlab/token?connectionId= 只清对应连接', async 
   assert.equal(response.status, 200)
   assert.deepEqual(cleared, ['conn-b'])
 })
+
+test('POST /sync/start 支持 connectionIds（多连接一次同步）', async () => {
+  const syncService = createFakeSync()
+  const { handler } = boot({ syncService })
+  const response = await callApi(handler, {
+    method: 'POST',
+    url: api('/sync/start'),
+    body: { connectionIds: ['conn-a', 'conn-b'], startDate: '2026-10-20', endDate: '2026-10-26' },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(syncService.state.startCalls.length, 1)
+  assert.deepEqual(syncService.state.startCalls[0].connectionIds, ['conn-a', 'conn-b'])
+})

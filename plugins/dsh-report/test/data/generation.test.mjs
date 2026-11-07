@@ -144,7 +144,7 @@ test('范围内没有数据且已设置范围时，自动同步该窗口后再�
     }
     const result = await harness.services.generateReport(PERIOD)
     assert.equal(calls.length, 1)
-    assert.deepEqual(calls[0], { connectionId: 'conn-1', startDate: PERIOD.startDate, endDate: PERIOD.endDate })
+    assert.deepEqual(calls[0], { connectionIds: ['conn-1'], startDate: PERIOD.startDate, endDate: PERIOD.endDate })
     assert.equal(harness.prompts.length, 1)
     assert.equal(result.reportId, 'week:2026-11-02:2026-11-08')
     assert.ok(harness.events.some((item) => item.event === 'generate-auto-sync-finish'))

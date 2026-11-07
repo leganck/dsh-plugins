@@ -278,7 +278,9 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
 
   /** 写进度 + 状态（只传要改的字段）。 */
   function flushProgress(jobId, progress, extra = {}) {
-    updateSyncJob(db, jobId, { progress, ...extra })
+    const current = getSyncJob(db, jobId)
+    const cancelRequested = current?.progress?.cancelRequested === true || progress?.cancelRequested === true
+    updateSyncJob(db, jobId, { progress: { ...progress, cancelRequested }, ...extra })
   }
 
   // ------------------------------------------------------------ 同步范围
@@ -505,25 +507,34 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
     if (String(startDate) > String(endDate)) throw new Error('startDate 不能晚于 endDate')
   }
 
-  /** 启动同步任务（立即返回 jobId，后台异步执行）。 */
-  async function start({ connectionId, startDate, endDate, projectIds } = {}) {
-    const id = String(connectionId ?? '').trim()
-    if (!id) throw new Error('start 需要 connectionId')
+  /** 启动同步任务（立即返回 jobId，后台异步执行）。支持多个 GitLab 连接一起同步。 */
+  async function start({ connectionId, connectionIds, startDate, endDate, projectIds } = {}) {
+    const ids = Array.isArray(connectionIds)
+      ? [...new Set(connectionIds.map((value) => String(value ?? '').trim()).filter(Boolean))]
+      : [String(connectionId ?? '').trim()].filter(Boolean)
+    if (!ids.length) throw new Error('start 需要 connectionId 或 connectionIds')
     validateWindow(startDate, endDate)
 
     const active = getActiveSyncJob(db)
     if (active) return { jobId: active.jobId, reused: true, totalProjects: active.progress?.totalProjects ?? 0 }
 
-    const selection = selectedProjects(db, id).filter((item) => Number(item.enabled ?? 1) !== 0)
     const wanted = Array.isArray(projectIds) ? new Set(projectIds.map((value) => Number(value))) : null
-    const projects = (wanted ? selection.filter((item) => wanted.has(Number(item.projectId))) : selection).map(
-      (item) => ({
-        connectionId: id,
-        projectId: Number(item.projectId),
-        pathWithNamespace: item.pathWithNamespace,
-        name: item.name,
-      }),
-    )
+    const usedConnections = []
+    const projects = []
+    for (const id of ids) {
+      const selection = selectedProjects(db, id).filter((item) => Number(item.enabled ?? 1) !== 0)
+      const picked = wanted ? selection.filter((item) => wanted.has(Number(item.projectId))) : selection
+      if (!picked.length) continue
+      usedConnections.push(id)
+      for (const item of picked) {
+        projects.push({
+          connectionId: id,
+          projectId: Number(item.projectId),
+          pathWithNamespace: item.pathWithNamespace,
+          name: item.name,
+        })
+      }
+    }
     if (!projects.length) {
       throw new Error('没有已选择（或匹配 projectIds 的）GitLab 项目，请先保存同步范围')
     }
@@ -544,13 +555,13 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
     }
     createSyncJob(db, {
       jobId,
-      connectionId: id,
+      connectionId: usedConnections[0] ?? ids[0],
       status: SYNC_STATUS.PENDING,
       startedAt: nowIso(),
       progress,
-      scope: { connectionId: id, startDate, endDate, projects },
+      scope: { connectionId: usedConnections[0] ?? ids[0], connectionIds: usedConnections, startDate, endDate, projects },
     })
-    log('sync-start', { jobId, connectionId: id, projects: projects.length, startDate, endDate })
+    log('sync-start', { jobId, connectionIds: usedConnections, projects: projects.length, startDate, endDate })
 
     const promise = Promise.resolve()
       .then(() => runJob(jobId))
@@ -614,6 +625,8 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
    */
   function finalize(jobId, status, options = {}) {
     const job = getSyncJob(db, jobId)
+    // 已取消的任务不能被 runner 的收尾覆盖（取消可能发生在 run 启动前/收尾竞态里）。
+    if (job && job.status === SYNC_STATUS.CANCELLED && status !== SYNC_STATUS.CANCELLED) return jobView(job)
     // options.progress 优先：runner 收尾时携带内存里的最新计数（incompleteProjects 等未落盘）
     const progress = { ...(options.progress ?? job?.progress ?? {}) }
     if (status === SYNC_STATUS.CANCELLED) progress.cancelRequested = true
@@ -811,6 +824,7 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
   async function runJob(jobId) {
     const job = getSyncJob(db, jobId)
     if (!job) return null
+    if (TERMINAL_STATUSES.has(job.status)) return jobView(job)
     const scope = job.scope ?? {}
     const progress = { ...(job.progress ?? {}) }
     if (progress.cancelRequested) {
@@ -819,17 +833,20 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
     updateSyncJob(db, jobId, { status: SYNC_STATUS.RUNNING })
     flushProgress(jobId, progress)
 
-    const connectionId = String(scope.connectionId ?? job.connectionId ?? '')
+    const jobConnectionId = String(scope.connectionId ?? job.connectionId ?? '')
     const matcherCache = new Map()
+    const clientCache = new Map()
     const keep = new Set()
-    const completeProjects = []
+    const completeByConnection = new Map()
     const projects = Array.isArray(scope.projects) ? scope.projects : []
 
     try {
-      const client = await clientFor(connectionId)
       for (let index = 0; index < projects.length; index += 1) {
         if (isCancelled(jobId)) return finalize(jobId, SYNC_STATUS.CANCELLED, { progress })
+        const connectionId = String(projects[index].connectionId || jobConnectionId)
         const project = { ...projects[index], connectionId }
+        if (!clientCache.has(connectionId)) clientCache.set(connectionId, await clientFor(connectionId))
+        const client = clientCache.get(connectionId)
         const matcher = await matcherFor(connectionId, matcherCache)
 
         progress.currentProjectId = project.projectId
@@ -852,7 +869,8 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
         if (result.cancelled) return finalize(jobId, SYNC_STATUS.CANCELLED, { progress })
         if (result.complete) {
           progress.syncedProjects = Number(progress.syncedProjects ?? 0) + 1
-          completeProjects.push({ connectionId, projectId: project.projectId })
+          if (!completeByConnection.has(connectionId)) completeByConnection.set(connectionId, [])
+          completeByConnection.get(connectionId).push({ connectionId, projectId: project.projectId })
         }
         progress.currentProjectCommitCount = result.commitCount
         flushProgress(jobId, progress)
@@ -860,7 +878,9 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
 
       if (isCancelled(jobId)) return finalize(jobId, SYNC_STATUS.CANCELLED, { progress })
 
-      if (completeProjects.length) {
+      let completedCount = 0
+      for (const [connectionId, completeProjects] of completeByConnection) {
+        completedCount += completeProjects.length
         try {
           pruneCommits(db, {
             connectionIds: [connectionId],
@@ -877,10 +897,10 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
       }
 
       const errorCount = Number(progress.errors ?? 0)
-      const incompleteProjects = Math.max(0, projects.length - completeProjects.length)
+      const incompleteProjects = Math.max(0, projects.length - completedCount)
       progress.incompleteProjects = incompleteProjects
       const hadTrouble = errorCount > 0 || incompleteProjects > 0
-      const anySuccess = Number(progress.totalCommits ?? 0) > 0 || completeProjects.length > 0
+      const anySuccess = Number(progress.totalCommits ?? 0) > 0 || completedCount > 0
 
       // 终态：完全成功 → succeeded；部分成功（有错误/未完整项目）→ succeeded + partial；
       // 零成功且有错误 → failed（见 CONTRACTS §4「实现偏差登记」）。

@@ -202,29 +202,20 @@ export function createServices({ ctx, config, log }) {
       throw new Error('该日期范围内还没有提交数据，且还没有设置同步仓库范围：请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。')
     }
 
-    const jobIds = []
-    for (const target of targets) {
-      log('generate-auto-sync-start', { connectionId: target.connectionId, startDate, endDate })
-      const job = await syncService.start({
-        connectionId: target.connectionId,
-        startDate,
-        endDate,
-      })
-      const done = await syncService.waitForJob(job.jobId)
-      const status = String((done && done.status) || '')
-      if (status === 'failed' || status === 'cancelled') {
-        throw new Error(
-          `该范围内没有数据，自动同步未成功（${status}，连接 ${target.displayName || target.connectionId}）：${(done && done.error) || '请到任务历史查看原因'}`,
-        )
-      }
-      jobIds.push(job.jobId)
+    const connectionIds = targets.map((target) => target.connectionId)
+    log('generate-auto-sync-start', { connectionIds, startDate, endDate })
+    const job = await syncService.start({ connectionIds, startDate, endDate })
+    const done = await syncService.waitForJob(job.jobId)
+    const status = String((done && done.status) || '')
+    if (status === 'failed' || status === 'cancelled') {
+      throw new Error(`该范围内没有数据，自动同步未成功（${status}）：${(done && done.error) || '请到任务历史查看原因'}`)
     }
     const after = getCommitsInPeriod(startDate, endDate)
     if (!after.length) {
       throw new Error('自动同步已完成，但该范围内仍然没有提交：请确认同步仓库范围是否包含有提交的仓库。')
     }
-    log('generate-auto-sync-finish', { jobIds, commits: after.length })
-    return { autoSynced: true, commits: after.length, jobIds }
+    log('generate-auto-sync-finish', { jobId: job.jobId, commits: after.length })
+    return { autoSynced: true, commits: after.length, jobIds: [job.jobId] }
   }
 
   async function generateReport({ type, startDate, endDate, guidance }) {
