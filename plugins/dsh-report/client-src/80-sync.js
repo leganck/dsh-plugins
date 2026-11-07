@@ -1072,7 +1072,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
       return;
     }
     if (!scope.total) {
-      setSyncError(tr('noScopeNotice', '还没有保存同步仓库范围，请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。'));
+      setSyncError(tr('noScopeNotice', '还没有保存同步仓库范围，请先到 设置 → 工作报告 → 同步仓库范围 选择仓库。'));
       return;
     }
     if (!startDate || !endDate) {
@@ -1174,7 +1174,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
           'div',
           { className: 'dsr-syncNotice', role: 'status' },
           h('strong', null, tr('noConnectionNotice', '还没有 GitLab 连接')),
-          h('div', { className: 'dsr-hint' }, tr('noConnectionNoticeHint', '请先到 设置 → 报告与统计 保存 GitLab 地址与 Token，再回来同步。')),
+          h('div', { className: 'dsr-hint' }, tr('noConnectionNoticeHint', '请先到 设置 → 工作报告 保存 GitLab 地址与 Token，再回来同步。')),
         )
       : null,
 
@@ -1189,9 +1189,9 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
           ? tr('loading', '加载中…')
           : selectedCount
             ? `${tr('selected', '已选')} ${selectedCount} ${tr('repos', '仓库')} · ${scope.connections.length} ${tr('connections', '个连接')}`
-            : tr('noScopeShort', '还没有选择同步仓库：请到 设置 → 报告与统计 → 同步仓库范围 选择'),
+            : tr('noScopeShort', '还没有选择同步仓库：请到 设置 → 工作报告 → 同步仓库范围 选择'),
       ),
-      h('span', { className: 'dsr-syncScopeHint' }, tr('syncScopeSummaryHint', '仓库范围在 设置 → 报告与统计 → 同步仓库范围 修改')),
+      h('span', { className: 'dsr-syncScopeHint' }, tr('syncScopeSummaryHint', '仓库范围在 设置 → 工作报告 → 同步仓库范围 修改')),
       h(
         'span',
         { className: 'dsr-syncScopeActions' },

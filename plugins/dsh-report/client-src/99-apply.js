@@ -918,7 +918,7 @@ addClientCSS(`
 // ---------------------------------------------------------------- 文案
 const zh = {
   nav: '报告',
-  title: '报告与统计',
+  title: '工作报告',
   close: '关闭',
   settings: '设置',
   back: '返回',
@@ -1097,11 +1097,11 @@ function ReportsPanel(props) {
 
   return h(
     'section',
-    { className: 'dsr-root', 'aria-label': tx(t, 'title', '报告与统计') },
+    { className: 'dsr-root', 'aria-label': tx(t, 'title', '工作报告') },
     h(
       'header',
       { className: 'dsr-pageHead' },
-      h('h1', { className: 'dsr-pageTitle' }, tx(t, 'title', '报告与统计')),
+      h('h1', { className: 'dsr-pageTitle' }, tx(t, 'title', '工作报告')),
       h('span', { className: 'dsr-pageSub' }, tx(t, 'subtitle', '提交统计与报告生成')),
       h('span', { className: 'dsr-spacer' }),
       h(Button, { size: 'sm', onClick: () => actions.refreshReports(), disabled: state.reportsLoading }, state.reportsLoading ? tx(t, 'loading', '加载中…') : tx(t, 'refresh', '刷新')),
@@ -1173,7 +1173,7 @@ function apply(ctx) {
             name: 'sidebar.panellist',
             id: 'dsh-report',
             order: 40,
-            label: () => tx(t, 'title', '报告与统计'),
+            label: () => tx(t, 'title', '工作报告'),
             locale: NS,
           },
           (props) => h(PanelIcon, props),
@@ -1206,7 +1206,7 @@ function apply(ctx) {
             name: 'settings.section',
             id: 'dsh-report',
             order: 50,
-            label: () => tx(t, 'title', '报告与统计'),
+            label: () => tx(t, 'title', '工作报告'),
             locale: NS,
             inject: () => ({ t }),
           },

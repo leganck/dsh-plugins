@@ -671,7 +671,7 @@ function ReportMain({ t, state, actions }) {
     const reports = Array.isArray(state.reports) ? state.reports : [];
     return h(
       'section',
-      { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '报告与统计') },
+      { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '工作报告') },
       h(
         'div',
         { className: 'dsr-rpt-empty' },
@@ -1047,7 +1047,7 @@ function ReportMain({ t, state, actions }) {
 
   return h(
     'section',
-    { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '报告与统计') },
+    { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '工作报告') },
     tabStrip,
     h(
       'div',

@@ -2227,7 +2227,7 @@ function ReportMain({ t, state, actions }) {
     const reports = Array.isArray(state.reports) ? state.reports : [];
     return h(
       'section',
-      { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '报告与统计') },
+      { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '工作报告') },
       h(
         'div',
         { className: 'dsr-rpt-empty' },
@@ -2603,7 +2603,7 @@ function ReportMain({ t, state, actions }) {
 
   return h(
     'section',
-    { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '报告与统计') },
+    { className: 'dsr-rpt-main', 'aria-label': tx(t, 'title', '工作报告') },
     tabStrip,
     h(
       'div',
@@ -4471,7 +4471,7 @@ function StatsMain(props) {
         h(
           'div',
           { className: 'dsr-stt-syncBody' },
-          h('p', { className: 'dsr-stt-note' }, tr('syncDialogHint', '窗口默认等于当前统计范围；仓库范围在 设置 → 报告与统计 → 同步仓库范围 维护。')),
+          h('p', { className: 'dsr-stt-note' }, tr('syncDialogHint', '窗口默认等于当前统计范围；仓库范围在 设置 → 工作报告 → 同步仓库范围 维护。')),
           typeof SyncPage === 'function'
             ? h(SyncPage, {
                 t,
@@ -5670,7 +5670,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
       return;
     }
     if (!scope.total) {
-      setSyncError(tr('noScopeNotice', '还没有保存同步仓库范围，请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。'));
+      setSyncError(tr('noScopeNotice', '还没有保存同步仓库范围，请先到 设置 → 工作报告 → 同步仓库范围 选择仓库。'));
       return;
     }
     if (!startDate || !endDate) {
@@ -5772,7 +5772,7 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
           'div',
           { className: 'dsr-syncNotice', role: 'status' },
           h('strong', null, tr('noConnectionNotice', '还没有 GitLab 连接')),
-          h('div', { className: 'dsr-hint' }, tr('noConnectionNoticeHint', '请先到 设置 → 报告与统计 保存 GitLab 地址与 Token，再回来同步。')),
+          h('div', { className: 'dsr-hint' }, tr('noConnectionNoticeHint', '请先到 设置 → 工作报告 保存 GitLab 地址与 Token，再回来同步。')),
         )
       : null,
 
@@ -5787,9 +5787,9 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
           ? tr('loading', '加载中…')
           : selectedCount
             ? `${tr('selected', '已选')} ${selectedCount} ${tr('repos', '仓库')} · ${scope.connections.length} ${tr('connections', '个连接')}`
-            : tr('noScopeShort', '还没有选择同步仓库：请到 设置 → 报告与统计 → 同步仓库范围 选择'),
+            : tr('noScopeShort', '还没有选择同步仓库：请到 设置 → 工作报告 → 同步仓库范围 选择'),
       ),
-      h('span', { className: 'dsr-syncScopeHint' }, tr('syncScopeSummaryHint', '仓库范围在 设置 → 报告与统计 → 同步仓库范围 修改')),
+      h('span', { className: 'dsr-syncScopeHint' }, tr('syncScopeSummaryHint', '仓库范围在 设置 → 工作报告 → 同步仓库范围 修改')),
       h(
         'span',
         { className: 'dsr-syncScopeActions' },
@@ -7210,7 +7210,7 @@ addClientCSS(`
 // ---------------------------------------------------------------- 文案
 const zh = {
   nav: '报告',
-  title: '报告与统计',
+  title: '工作报告',
   close: '关闭',
   settings: '设置',
   back: '返回',
@@ -7389,11 +7389,11 @@ function ReportsPanel(props) {
 
   return h(
     'section',
-    { className: 'dsr-root', 'aria-label': tx(t, 'title', '报告与统计') },
+    { className: 'dsr-root', 'aria-label': tx(t, 'title', '工作报告') },
     h(
       'header',
       { className: 'dsr-pageHead' },
-      h('h1', { className: 'dsr-pageTitle' }, tx(t, 'title', '报告与统计')),
+      h('h1', { className: 'dsr-pageTitle' }, tx(t, 'title', '工作报告')),
       h('span', { className: 'dsr-pageSub' }, tx(t, 'subtitle', '提交统计与报告生成')),
       h('span', { className: 'dsr-spacer' }),
       h(Button, { size: 'sm', onClick: () => actions.refreshReports(), disabled: state.reportsLoading }, state.reportsLoading ? tx(t, 'loading', '加载中…') : tx(t, 'refresh', '刷新')),
@@ -7465,7 +7465,7 @@ function apply(ctx) {
             name: 'sidebar.panellist',
             id: 'dsh-report',
             order: 40,
-            label: () => tx(t, 'title', '报告与统计'),
+            label: () => tx(t, 'title', '工作报告'),
             locale: NS,
           },
           (props) => h(PanelIcon, props),
@@ -7498,7 +7498,7 @@ function apply(ctx) {
             name: 'settings.section',
             id: 'dsh-report',
             order: 50,
-            label: () => tx(t, 'title', '报告与统计'),
+            label: () => tx(t, 'title', '工作报告'),
             locale: NS,
             inject: () => ({ t }),
           },

@@ -1,4 +1,4 @@
-# 报告与统计（dsh-report）
+# 工作报告（dsh-report）
 
 DSH bundle：把 GitLab 提交同步、确定性统计、AI 报告生成三件事收进一个面板。
 
@@ -29,7 +29,7 @@ UI 走 DSH 三处插槽（`sidebar.panellist` / `main` / `settings.section`）�
 
 | 位置 | 内容 |
 |---|---|
-| 设置 →「报告与统计」 | GitLab 地址/Token、同步仓库范围、提交作者别名、时区/默认报告类型、模板与写作指引 |
+| 设置 →「工作报告」 | GitLab 地址/Token、同步仓库范围、提交作者别名、时区/默认报告类型、模板与写作指引 |
 | `<dataDir>/report.db` | 本地提交、报告、同步任务（SQLite WAL） |
 | `<dataDir>/author-aliases.json` | 提交作者别名 |
 | `<dataDir>/prompts.json` | 模板/写作指引覆盖 |
