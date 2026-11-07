@@ -10,8 +10,22 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { createHash } from 'node:crypto'
 
 export const TOKEN_RECORD_KEY = 'dsh-report/gitlab-token'
+
+/** 单个连接的 token 记录键：一个连接一条 credentials 记录。 */
+export function tokenRecordKey(connectionId) {
+  const id = String(connectionId ?? '').trim()
+  return id ? `${TOKEN_RECORD_KEY}/${id}` : TOKEN_RECORD_KEY
+}
+
+/** 旧版单连接 token 对应的连接 id（按 config.gitlab.baseUrl 派生）。 */
+export function legacyConnectionId(baseUrl) {
+  const normalized = String(baseUrl ?? '').trim().replace(/\/+$/, '')
+  if (!normalized) return ''
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 24)
+}
 
 /** 递归解包 volatile 配置引用。 */
 export function unwrapConfig(value) {
@@ -51,6 +65,7 @@ export function createConfigService({ ctx, rawConfig, log }) {
   let tokenCache = null
   let tokenCacheAt = 0
   const TOKEN_CACHE_MS = 5000
+  const tokenCacheById = new Map()
 
   const configEditor = ctx.get('configEditor')
   const credentials = ctx.get('credentials')
@@ -102,6 +117,10 @@ export function createConfigService({ ctx, rawConfig, log }) {
     return path.join(dataDir, 'token.json')
   }
 
+  function tokensFilePath() {
+    return path.join(dataDir, 'tokens.json')
+  }
+
   async function readTokenFromFile() {
     try {
       const raw = fs.readFileSync(fileTokenPath(), 'utf8')
@@ -118,8 +137,28 @@ export function createConfigService({ ctx, rawConfig, log }) {
     fs.writeFileSync(file, JSON.stringify({ token, savedAt: new Date().toISOString() }), { mode: 0o600 })
   }
 
-  async function resolveToken({ force = false } = {}) {
-    if (!force && tokenCache && Date.now() - tokenCacheAt < TOKEN_CACHE_MS) return tokenCache
+  function readTokenMapFile() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(tokensFilePath(), 'utf8'))
+      return parsed && typeof parsed.tokens === 'object' && parsed.tokens ? parsed.tokens : {}
+    } catch {
+      return {}
+    }
+  }
+
+  function writeTokenMapFile(map) {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true })
+      fs.writeFileSync(tokensFilePath(), JSON.stringify({ tokens: map, savedAt: new Date().toISOString() }, null, 2), {
+        mode: 0o600,
+      })
+    } catch (error) {
+      log('tokens-file-write-failed', { message: String(error?.message ?? error) })
+    }
+  }
+
+  /** 旧版单 token（credentials 记录 / token.json）。 */
+  async function readLegacyToken() {
     let token = null
     if (credentials && typeof credentials.readRecord === 'function') {
       try {
@@ -130,45 +169,119 @@ export function createConfigService({ ctx, rawConfig, log }) {
       }
     }
     if (!token) token = await readTokenFromFile()
-    tokenCache = token || null
-    tokenCacheAt = Date.now()
-    return tokenCache
+    return token || null
   }
 
-  async function setToken(token) {
+  async function resolveToken(options = {}) {
+    const opts = typeof options === 'string' ? { connectionId: options } : options || {}
+    const connectionId = String(opts.connectionId ?? '').trim()
+    const force = Boolean(opts.force)
+    if (!connectionId) {
+      if (!force && tokenCache && Date.now() - tokenCacheAt < TOKEN_CACHE_MS) return tokenCache
+      tokenCache = await readLegacyToken()
+      tokenCacheAt = Date.now()
+      return tokenCache
+    }
+    if (!force && tokenCacheById.has(connectionId) && Date.now() - tokenCacheAt < TOKEN_CACHE_MS) {
+      return tokenCacheById.get(connectionId)
+    }
+    let token = null
+    const recordKey = tokenRecordKey(connectionId)
+    if (credentials && typeof credentials.readRecord === 'function') {
+      try {
+        const record = await credentials.readRecord(recordKey)
+        if (record && record.kind === 'api-key' && typeof record.key === 'string') token = record.key
+      } catch (error) {
+        log('token-read-failed', { connectionId, message: String(error?.message ?? error) })
+      }
+    }
+    if (!token) {
+      const map = readTokenMapFile()
+      if (typeof map[connectionId] === 'string' && map[connectionId]) token = map[connectionId]
+    }
+    // 旧版单 token 只回退给「旧配置 baseUrl 对应的那个连接」，避免新连接误用别人的 token。
+    if (!token && connectionId === legacyConnectionId(config.gitlab?.baseUrl)) {
+      token = await readLegacyToken()
+    }
+    token = token || null
+    tokenCacheById.set(connectionId, token)
+    tokenCacheAt = Date.now()
+    return token
+  }
+
+  async function setToken(token, connectionId) {
     const value = String(token ?? '').trim()
     if (!value) return false
+    const id = String(connectionId ?? '').trim()
+    if (!id) {
+      if (credentials && typeof credentials.modifyRecord === 'function') {
+        try {
+          await credentials.modifyRecord(TOKEN_RECORD_KEY, async () => ({ kind: 'api-key', key: value }))
+          tokenCache = value
+          tokenCacheAt = Date.now()
+          return true
+        } catch (error) {
+          log('token-write-credentials-failed', { message: String(error?.message ?? error) })
+        }
+      }
+      await writeTokenToFile(value)
+      tokenCache = value
+      tokenCacheAt = Date.now()
+      log('token-write-fallback-file', { file: fileTokenPath() })
+      return true
+    }
+
     if (credentials && typeof credentials.modifyRecord === 'function') {
       try {
-        await credentials.modifyRecord(TOKEN_RECORD_KEY, async () => ({ kind: 'api-key', key: value }))
-        tokenCache = value
+        await credentials.modifyRecord(tokenRecordKey(id), async () => ({ kind: 'api-key', key: value }))
+        tokenCacheById.set(id, value)
         tokenCacheAt = Date.now()
         return true
       } catch (error) {
-        log('token-write-credentials-failed', { message: String(error?.message ?? error) })
+        log('token-write-credentials-failed', { connectionId: id, message: String(error?.message ?? error) })
       }
     }
-    await writeTokenToFile(value)
-    tokenCache = value
+    const map = readTokenMapFile()
+    map[id] = value
+    writeTokenMapFile(map)
+    tokenCacheById.set(id, value)
     tokenCacheAt = Date.now()
-    log('token-write-fallback-file', { file: fileTokenPath() })
+    log('token-write-fallback-file', { file: tokensFilePath() })
     return true
   }
 
-  async function clearToken() {
+  async function clearToken(connectionId) {
+    const id = String(connectionId ?? '').trim()
+    if (!id) {
+      if (credentials && typeof credentials.deleteRecord === 'function') {
+        try {
+          await credentials.deleteRecord(TOKEN_RECORD_KEY)
+        } catch {
+          /* 忽略 */
+        }
+      }
+      try {
+        fs.rmSync(fileTokenPath(), { force: true })
+      } catch {
+        /* 忽略 */
+      }
+      tokenCache = null
+      tokenCacheAt = Date.now()
+      return
+    }
     if (credentials && typeof credentials.deleteRecord === 'function') {
       try {
-        await credentials.deleteRecord(TOKEN_RECORD_KEY)
+        await credentials.deleteRecord(tokenRecordKey(id))
       } catch {
         /* 忽略 */
       }
     }
-    try {
-      fs.rmSync(fileTokenPath(), { force: true })
-    } catch {
-      /* 忽略 */
+    const map = readTokenMapFile()
+    if (map[id]) {
+      delete map[id]
+      writeTokenMapFile(map)
     }
-    tokenCache = null
+    tokenCacheById.delete(id)
     tokenCacheAt = Date.now()
   }
 

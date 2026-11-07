@@ -104,14 +104,15 @@ export function apply(ctx, rawConfig = {}) {
   const connections = {
     async list() {
       const rows = store.listConnections(services.db) ?? []
-      const hasToken = Boolean(await config.resolveToken())
-      return rows.map((row) => ({
-        id: row.connection_id,
-        baseUrl: row.base_url,
-        displayName: row.display_name,
-        username: row.username,
-        hasToken,
-      }))
+      return Promise.all(
+        rows.map(async (row) => ({
+          id: row.connection_id,
+          baseUrl: row.base_url,
+          displayName: row.display_name,
+          username: row.username,
+          hasToken: Boolean(await config.resolveToken({ connectionId: row.connection_id })),
+        })),
+      )
     },
     async create({ baseUrl, token, displayName }) {
       const normalized = String(baseUrl ?? '').trim().replace(/\/+$/, '')
@@ -125,9 +126,13 @@ export function apply(ctx, rawConfig = {}) {
         const user = await client.getCurrentUser()
         username = String(user?.username ?? '')
         name = name || String(user?.name ?? '')
-        await config.setToken(String(token).trim())
+        await config.setToken(String(token).trim(), connectionId)
       }
-      await config.update({ gitlab: { baseUrl: normalized } })
+      // 多连接：config.gitlab.baseUrl 只作为旧版单连接兼容值；仅首条连接写入，避免覆盖已有连接。
+      const existingConnections = store.listConnections(services.db) ?? []
+      if (!existingConnections.some((row) => row.connection_id !== connectionId)) {
+        await config.update({ gitlab: { baseUrl: normalized } })
+      }
       store.upsertConnection(services.db, {
         connectionId,
         baseUrl: normalized,
@@ -135,8 +140,16 @@ export function apply(ctx, rawConfig = {}) {
         username,
         createdAt: new Date().toISOString(),
       })
-      const hasToken = Boolean(await config.resolveToken())
+      const hasToken = Boolean(await config.resolveToken({ connectionId }))
       return { id: connectionId, baseUrl: normalized, displayName: name, username, hasToken }
+    },
+    async remove(connectionId) {
+      const id = String(connectionId ?? '').trim()
+      if (!id) throw new Error('connectionId 必填')
+      const result = store.deleteConnection(services.db, id)
+      await config.clearToken(id)
+      log('connection-removed', { connectionId: id, removed: Boolean(result && result.removed) })
+      return { removed: Boolean(result && result.removed) }
     },
   }
 
@@ -149,9 +162,9 @@ export function apply(ctx, rawConfig = {}) {
     connections,
     getConfig: () => config.getConfig(),
     updateConfig: (patch) => config.update(patch),
-    resolveToken: () => config.resolveToken(),
-    saveToken: (token) => config.setToken(token),
-    clearToken: () => config.clearToken(),
+    resolveToken: (options) => config.resolveToken(options),
+    saveToken: (token, connectionId) => config.setToken(token, connectionId),
+    clearToken: (connectionId) => config.clearToken(connectionId),
     getTemplates: () => config.getTemplates(),
     updateTemplates: (patch) => config.updateTemplates(patch),
     getAuthorAliases: () => config.getAuthorAliases(),

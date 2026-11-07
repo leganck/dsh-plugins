@@ -33,6 +33,19 @@
 // tx（99-apply）。
 
 addClientCSS(`
+.dsr-connList { display: flex; flex-direction: column; gap: 6px; }
+.dsr-connRow {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: 8px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-layer-3);
+}
+.dsr-connMain { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.dsr-connName { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsr-connUrl { font-size: 12px; color: var(--dsw-alias-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsr-connUser { font-size: 11px; color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); }
+.dsr-connActions { display: flex; gap: 6px; margin-left: auto; }
+.dsr-connForm { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-3); border: 0.5px solid var(--dsw-alias-border-l4); }
 .dsr-syncScopeBar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 8px 12px; border-radius: 8px;
@@ -314,120 +327,232 @@ function SyncCheckbox({ checked, onChange, label }) {
  * 契约：PUT /config { gitlab: { baseUrl, token } }；POST /gitlab/connections 为可选的验证/注册。
  */
 function SyncConnectionCard(props) {
-  const { t, actions, onSaved } = props;
+  const { t, actions } = props || {};
   const tr = (key, fallback) => (typeof t === 'function' ? tx(t, key, fallback) : fallback);
+
+  const [connections, setConnections] = React.useState([]);
   const [config, setConfig] = React.useState(null);
-  const [baseUrl, setBaseUrl] = React.useState('');
-  const [token, setToken] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
   const [notice, setNotice] = React.useState('');
+  const [formOpen, setFormOpen] = React.useState(false);
+  const [editingId, setEditingId] = React.useState('');
+  const [baseUrl, setBaseUrl] = React.useState('');
+  const [token, setToken] = React.useState('');
+  const [confirmId, setConfirmId] = React.useState('');
 
-  const applyConfig = React.useCallback((next) => {
-    setConfig(next || null);
-    const gitlab = (next && next.gitlab) || {};
-    setBaseUrl(String(gitlab.baseUrl || ''));
-  }, []);
+  const notifyChanged = () => {
+    try {
+      window.dispatchEvent(new CustomEvent('dsh-report:connections-changed'));
+    } catch {
+      /* 忽略 */
+    }
+  };
+
+  const reload = React.useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const [listData, cfg] = await Promise.all([
+        api.get('/gitlab/connections'),
+        actions && typeof actions.loadConfig === 'function' ? actions.loadConfig() : api.get('/config'),
+      ]);
+      const list = Array.isArray(listData && listData.connections) ? listData.connections : [];
+      setConnections(list);
+      setConfig(cfg || null);
+      if (!list.length) setFormOpen(true);
+    } catch (loadError) {
+      setError(syErrText(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [actions]);
 
   React.useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const loaded = actions && typeof actions.loadConfig === 'function' ? await actions.loadConfig() : await api.get('/config');
-        if (alive) applyConfig(loaded);
-      } catch (loadError) {
-        if (alive) setError(syErrText(loadError));
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [actions, applyConfig]);
+    reload();
+  }, [reload]);
 
-  const save = React.useCallback(async () => {
+  const openAdd = () => {
+    setEditingId('');
+    setBaseUrl('');
+    setToken('');
+    setFormOpen(true);
+    setError('');
+    setNotice('');
+    setConfirmId('');
+  };
+
+  const openToken = (connection) => {
+    setEditingId(String(connection.id || ''));
+    setBaseUrl(String(connection.baseUrl || ''));
+    setToken('');
+    setFormOpen(true);
+    setError('');
+    setNotice('');
+    setConfirmId('');
+  };
+
+  const closeForm = () => {
+    setFormOpen(false);
+    setEditingId('');
+    setBaseUrl('');
+    setToken('');
+  };
+
+  const save = async () => {
     const nextBaseUrl = baseUrl.trim();
     const nextToken = token.trim();
     if (!nextBaseUrl) {
       setError(tr('baseUrlRequired', '请填写 GitLab 地址'));
       return;
     }
+    if (!nextToken && !editingId) {
+      setError(tr('tokenRequired', '新连接需要填写 Access Token'));
+      return;
+    }
     setBusy(true);
     setError('');
     setNotice('');
     try {
-      const patch = { gitlab: { baseUrl: nextBaseUrl } };
-      if (nextToken) patch.gitlab.token = nextToken;
-      const saved = await api.put('/config', patch);
-      applyConfig(saved);
+      const payload = { baseUrl: nextBaseUrl };
+      if (nextToken) payload.token = nextToken;
+      const result = await api.post('/gitlab/connections', payload);
+      const connection = (result && result.connection) || {};
+      setNotice(
+        nextToken
+          ? `${tr('connectionSaved', '连接已保存')} · ${connection.username || connection.baseUrl || nextBaseUrl}`
+          : tr('connectionExists', '连接已存在；要更新 Token 请填写新 Token'),
+      );
       setToken('');
-      if (actions && typeof actions.loadConfig === 'function') await actions.loadConfig();
-
-      let verifyError = '';
-      if (nextToken) {
-        try {
-          await api.post('/gitlab/connections', { baseUrl: nextBaseUrl, token: nextToken });
-        } catch (connError) {
-          verifyError = syErrText(connError);
-        }
-      }
-      if (verifyError) {
-        setError(`${tr('connectionSavedNoVerify', '配置已保存，但连接验证失败')}：${verifyError}`);
-      } else {
-        setNotice(tr('connectionSaved', '连接已保存'));
-        showToast('ok', tr('saved', '已保存'));
-      }
-      if (typeof onSaved === 'function') onSaved();
+      closeForm();
+      await reload();
+      notifyChanged();
+      if (typeof props.onSaved === 'function') props.onSaved();
+      if (nextToken) showToast('ok', tr('saved', '已保存'));
     } catch (saveError) {
       setError(syErrText(saveError));
     } finally {
       setBusy(false);
     }
-  }, [actions, applyConfig, baseUrl, onSaved, t, token]);
+  };
 
-  const hasToken = Boolean(config && config.gitlab && config.gitlab.hasToken);
+  const remove = async (connection) => {
+    const id = String(connection.id || '');
+    if (!id) return;
+    if (confirmId !== id) {
+      setConfirmId(id);
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await api.del(`/gitlab/connections/${encodeURIComponent(id)}`);
+      setConfirmId('');
+      setNotice(tr('connectionRemoved', '连接已删除（本地已同步的提交仍保留）'));
+      await reload();
+      notifyChanged();
+      if (typeof props.onSaved === 'function') props.onSaved();
+      showToast('ok', tr('deleted', '已删除'));
+    } catch (removeError) {
+      setError(syErrText(removeError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const hasAnyToken = connections.some((item) => item.hasToken);
 
   return h(
     SyncCard,
     {
-      title: tr('connection', 'GitLab 连接'),
+      title: tr('gitlabConnections', 'GitLab 连接'),
       icon: SyncGlyph,
       aside: h(
         'span',
         { className: 'dsr-inlineMeta' },
-        h(Badge, { tone: hasToken ? 'ok' : 'warn' }, hasToken ? tr('tokenSaved', 'Token 已保存') : tr('tokenMissing', '未保存 Token')),
+        h(Badge, { tone: connections.length ? 'ok' : 'warn' }, `${tr('connectionCount', '连接')} ${connections.length}`),
+        h(Badge, { tone: hasAnyToken ? 'ok' : 'warn' }, hasAnyToken ? tr('tokenSaved', 'Token 已保存') : tr('tokenMissing', '未保存 Token')),
       ),
-      hint: tr('settingsHint', 'Token 保存在本机 DSH 凭据库，不写入明文配置。'),
+      hint: tr('connectionsHint', '可添加多个 GitLab 实例/账号；每个连接各自保存 Token，Token 存本机凭据库，不写明文配置。'),
     },
-    h(
-      'div',
-      { className: 'dsr-formGrid' },
-      h(Field, { label: tr('baseUrl', 'GitLab 地址') }, h(Input, {
-        value: baseUrl,
-        placeholder: 'https://gitlab.example.com',
-        onChange: (event) => setBaseUrl(event.target.value),
-        spellCheck: false,
-      })),
-      h(Field, {
-        label: tr('token', 'Access Token'),
-        hint: hasToken ? tr('tokenKeepHint', '留空表示沿用已保存的 Token') : tr('tokenNewHint', '需要 read_api 权限'),
-      }, h(Input, {
-        value: token,
-        type: 'password',
-        placeholder: hasToken ? '••••••••' : 'glpat-…',
-        onChange: (event) => setToken(event.target.value),
-        autoComplete: 'off',
-        spellCheck: false,
-      })),
-    ),
+    loading ? h('p', { className: 'dsr-hint' }, tr('loading', '加载中…')) : null,
+    connections.length
+      ? h(
+          'div',
+          { className: 'dsr-connList' },
+          ...connections.map((connection) =>
+            h(
+              'div',
+              { className: 'dsr-connRow', key: String(connection.id || connection.baseUrl) },
+              h(
+                'div',
+                { className: 'dsr-connMain' },
+                h('span', { className: 'dsr-connName' }, connection.displayName || connection.username || connection.baseUrl || connection.id),
+                h('span', { className: 'dsr-connUrl' }, connection.baseUrl || '—'),
+                connection.username ? h('span', { className: 'dsr-connUser' }, `@${connection.username}`) : null,
+              ),
+              h(Badge, { tone: connection.hasToken ? 'ok' : 'warn' }, connection.hasToken ? tr('tokenSaved', 'Token 已保存') : tr('tokenMissing', '未保存 Token')),
+              h(
+                'span',
+                { className: 'dsr-connActions' },
+                h(Button, { size: 'sm', onClick: () => openToken(connection), disabled: busy }, tr('updateToken', '更新 Token')),
+                h(
+                  Button,
+                  { size: 'sm', variant: confirmId === String(connection.id) ? 'danger' : undefined, onClick: () => remove(connection), disabled: busy },
+                  confirmId === String(connection.id) ? tr('confirmRemove', '确认删除') : tr('removeConnection', '删除'),
+                ),
+              ),
+            ),
+          ),
+        )
+      : h('p', { className: 'dsr-hint' }, tr('noConnections', '还没有 GitLab 连接；填写地址与 Token 后保存。')),
+
     error ? h(SyncErrorBar, null, error) : null,
     notice ? h(SyncNoticeBar, null, notice) : null,
+
+    formOpen
+      ? h(
+          'div',
+          { className: 'dsr-connForm' },
+          h(
+            'div',
+            { className: 'dsr-formGrid' },
+            h(Field, { label: tr('baseUrl', 'GitLab 地址'), hint: editingId ? tr('baseUrlLocked', '已有连接的地址不可改；换地址请新增连接') : undefined }, h(Input, {
+              value: baseUrl,
+              placeholder: 'https://gitlab.example.com',
+              disabled: Boolean(editingId),
+              onChange: (event) => setBaseUrl(event.target.value),
+              spellCheck: false,
+            })),
+            h(Field, {
+              label: tr('token', 'Access Token'),
+              hint: editingId ? tr('tokenUpdateHint', '填写新 Token 覆盖该连接已保存的 Token') : tr('tokenNewHint', '需要 read_api 权限'),
+            }, h(Input, {
+              value: token,
+              type: 'password',
+              placeholder: editingId ? tr('tokenKeepPlaceholder', '输入新 Token') : 'glpat-…',
+              onChange: (event) => setToken(event.target.value),
+              autoComplete: 'off',
+              spellCheck: false,
+            })),
+          ),
+          h(
+            'div',
+            { className: 'dsr-btnRow' },
+            h(Button, { variant: 'primary', onClick: save, disabled: busy }, busy ? tr('saving', '保存中…') : tr('saveConnection', '保存连接')),
+            h(Button, { onClick: closeForm, disabled: busy }, tr('cancel', '取消')),
+          ),
+        )
+      : h(
+          'div',
+          { className: 'dsr-btnRow' },
+          h(Button, { variant: 'primary', onClick: openAdd, disabled: busy }, tr('addConnection', '添加连接')),
+          h(Button, { onClick: () => reload(), disabled: loading || busy }, loading ? tr('loading', '加载中…') : tr('refresh', '刷新')),
+        ),
+
     config && config.dataDir ? h('div', { className: 'dsr-hint' }, `${tr('dataDir', '数据目录')}：${config.dataDir}`) : null,
-    h(
-      'div',
-      { className: 'dsr-btnRow' },
-      h(Button, { variant: 'primary', onClick: save, disabled: busy }, busy ? tr('saving', '保存中…') : tr('saveConnection', '保存连接')),
-      baseUrl ? h(Button, { onClick: () => setBaseUrl('') }, tr('reset', '重置')) : null,
-    ),
   );
 }
 
@@ -711,7 +836,8 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
     setCoverageLoading(true);
     setCoverageError('');
     try {
-      const params = new URLSearchParams({ startDate, endDate, connectionId });
+      const params = new URLSearchParams({ startDate, endDate });
+      if (connectionId) params.set('connectionId', connectionId);
       const data = await api.get(`/sync/coverage?${params.toString()}`);
       setCoverage(data || null);
     } catch (error) {

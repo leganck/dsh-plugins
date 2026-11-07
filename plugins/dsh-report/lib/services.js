@@ -81,8 +81,8 @@ export function createServices({ ctx, config, log }) {
     const { baseUrl: configBaseUrl } = config.getGitLab()
     const baseUrl = rowBaseUrl || configBaseUrl
     if (!baseUrl) throw new Error('尚未配置 GitLab 地址（设置 → GitLab 连接）')
-    const token = await config.resolveToken()
-    if (!token) throw new Error('尚未配置 GitLab Access Token（设置 → GitLab 连接）')
+    const token = await config.resolveToken(id ? { connectionId: id } : {})
+    if (!token) throw new Error('该 GitLab 连接还没有保存 Access Token（设置 → GitLab 连接）')
     return createGitLabClient({ baseUrl, token })
   }
 
@@ -188,7 +188,7 @@ export function createServices({ ctx, config, log }) {
     if (!connections.length) {
       throw new Error('该日期范围内还没有提交数据，且尚未配置 GitLab 连接：请先到 设置 → 报告与统计 保存连接并设置同步仓库范围。')
     }
-    let target = null
+    const targets = []
     for (const connection of connections) {
       let selection = []
       try {
@@ -196,32 +196,35 @@ export function createServices({ ctx, config, log }) {
       } catch (error) {
         log('generate-scope-read-failed', { connectionId: connection.connectionId, message: String(error && error.message ? error.message : error) })
       }
-      if (selection.some((item) => Number(item.enabled ?? 1) !== 0)) {
-        target = connection
-        break
-      }
+      if (selection.some((item) => Number(item.enabled ?? 1) !== 0)) targets.push(connection)
     }
-    if (!target) {
+    if (!targets.length) {
       throw new Error('该日期范围内还没有提交数据，且还没有设置同步仓库范围：请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。')
     }
 
-    log('generate-auto-sync-start', { connectionId: target.connectionId, startDate, endDate })
-    const job = await syncService.start({
-      connectionId: target.connectionId,
-      startDate,
-      endDate,
-    })
-    const done = await syncService.waitForJob(job.jobId)
-    const status = String((done && done.status) || '')
-    if (status === 'failed' || status === 'cancelled') {
-      throw new Error(`该范围内没有数据，自动同步未成功（${status}）：${(done && done.error) || '请到任务历史查看原因'}`)
+    const jobIds = []
+    for (const target of targets) {
+      log('generate-auto-sync-start', { connectionId: target.connectionId, startDate, endDate })
+      const job = await syncService.start({
+        connectionId: target.connectionId,
+        startDate,
+        endDate,
+      })
+      const done = await syncService.waitForJob(job.jobId)
+      const status = String((done && done.status) || '')
+      if (status === 'failed' || status === 'cancelled') {
+        throw new Error(
+          `该范围内没有数据，自动同步未成功（${status}，连接 ${target.displayName || target.connectionId}）：${(done && done.error) || '请到任务历史查看原因'}`,
+        )
+      }
+      jobIds.push(job.jobId)
     }
     const after = getCommitsInPeriod(startDate, endDate)
     if (!after.length) {
       throw new Error('自动同步已完成，但该范围内仍然没有提交：请确认同步仓库范围是否包含有提交的仓库。')
     }
-    log('generate-auto-sync-finish', { jobId: job.jobId, commits: after.length })
-    return { autoSynced: true, commits: after.length, jobId: job.jobId }
+    log('generate-auto-sync-finish', { jobIds, commits: after.length })
+    return { autoSynced: true, commits: after.length, jobIds }
   }
 
   async function generateReport({ type, startDate, endDate, guidance }) {

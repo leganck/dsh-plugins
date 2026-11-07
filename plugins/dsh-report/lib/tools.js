@@ -395,25 +395,25 @@ export function createRuntime(deps = {}) {
       if (!updateConfig) throw internal('配置写回不可用：index.js 未注入 updateConfig')
       await updateConfig(patch)
     },
-    /** 读 GitLab token（无 resolveToken 时返回空串）。 */
-    async resolveToken() {
+    /** 读 GitLab token（可选按连接；无 resolveToken 时返回空串）。 */
+    async resolveToken(options) {
       if (!resolveToken) return ''
       try {
-        const token = await resolveToken()
+        const token = await resolveToken(options)
         return typeof token === 'string' ? token : ''
       } catch {
         return ''
       }
     },
-    /** 清掉 GitLab token（未注入时静默成功）。 */
-    async clearToken() {
+    /** 清掉 GitLab token（可选按连接；未注入时静默成功）。 */
+    async clearToken(connectionId) {
       if (!clearTokenDep) return
-      await clearTokenDep()
+      await clearTokenDep(connectionId)
     },
-    /** 写 GitLab token（无 saveToken 时抛 INTERNAL）。 */
-    async saveToken(token) {
+    /** 写 GitLab token（可选按连接；无 saveToken 时抛 INTERNAL）。 */
+    async saveToken(token, connectionId) {
       if (!saveToken) throw internal('token 保存不可用：index.js 未注入 saveToken')
-      await saveToken(token)
+      await saveToken(token, connectionId)
     },
     /** 读「提交作者别名」（未注入时返回空数组）。 */
     async getAuthorAliases() {

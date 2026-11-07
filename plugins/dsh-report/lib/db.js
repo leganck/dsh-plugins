@@ -418,6 +418,21 @@ export function getConnection(db, connectionId) {
 }
 
 /** 列出全部连接。 */
+/**
+ * 删除连接及其仓库范围（提交/任务历史保留，避免误删数据）。
+ * @param {any} db
+ * @param {string} connectionId
+ */
+export function deleteConnection(db, connectionId) {
+  const id = str(connectionId)
+  if (!id) return { removed: false }
+  return withTransaction(db, () => {
+    stmt(db, 'DELETE FROM selected_projects WHERE connection_id = ?').run(id)
+    const result = stmt(db, 'DELETE FROM connections WHERE connection_id = ?').run(id)
+    return { removed: Number(result.changes ?? 0) > 0 }
+  })
+}
+
 export function listConnections(db) {
   const rows = stmt(db, 'SELECT connection_id FROM connections ORDER BY created_at, connection_id').all()
   return rows.map((row) => getConnection(db, row.connection_id))
