@@ -1,6 +1,6 @@
-# DSH 插件仓（记忆 + 索引加速 + 多根工作空间）
+# DSH 插件仓（记忆 + 索引加速 + 多根工作空间 + 报告与统计）
 
-本仓库是一个**多插件仓库**：三个 DSH 插件 + 一个可选的远端检索服务。
+本仓库是一个**多插件仓库**：四个 DSH 插件 + 一个可选的远端检索服务。
 插件尽量保持轻依赖（code-index 仅多一个纯 JS 的 `ignore` 解析器），版本以各自的 `package.json` 为准（下表不再写死版本号，避免漂移）。
 
 | 插件 | 作用 | 依赖 |
@@ -8,6 +8,7 @@
 | [`plugins/dsh-memory-archive`](plugins/dsh-memory-archive/) | **记忆**：每次压缩（compaction）把被折叠的**逐字**轮次写成 `segment_NNN.md`，并维护 `INDEX.md`，同时向会话注入指针，让早期工具输出在长会话里可被重新检索 | 无（纯 node 内置模块） |
 | [`plugins/dsh-code-index`](plugins/dsh-code-index/) | **索引加速**：本地 SQLite FTS5/BM25 + 可选**远端**语义检索/重排（RRF 融合），五个工具 `code_index` / `code_search` / `code_map` / `code_index_status` / `code_index_deps` | 纯 JS（`ignore`；parser 组为可选增强，按需装） |
 | [`plugins/dsh-multiroot`](plugins/dsh-multiroot/) | **多根工作空间**（脚手架）：`.dshworkspace.json` 声明多个根目录，`workspace_roots` 工具列出根 id/路径/只读/主根 | 无 |
+| [`plugins/dsh-report`](plugins/dsh-report/) | **报告与统计**：GitLab 提交同步、确定性统计（贡献墙/提交记录/仓库树）、AI 报告生成与改写、作者别名推断；9 个 Agent 工具 | 无（Host 用 `node:sqlite`，客户端零依赖） |
 
 > 0.10.0 起 code-index 为 **remote-only**：本地不再有嵌入模型与重排模型，
 > 向量与重排都交给 [`server/code-index-service`](server/code-index-service/)；

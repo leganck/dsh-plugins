@@ -1,0 +1,82 @@
+{
+  "name": "@local/dsh-report",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH bundle: GitLab 提交同步 + 确定性统计 + AI 报告生成（报告列表/详情/统计/同步、作者别名、模板与写作契约、9 个 Agent 工具）。",
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "client-src",
+    "scripts/build-client.mjs",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "INSTALL.md",
+    "CONTRACTS.md",
+    "docs",
+    "test"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    },
+    "market": {
+      "title": {
+        "zh": "报告与统计",
+        "en": "Reports & Stats"
+      },
+      "description": {
+        "zh": "GitLab 提交同步、确定性统计（贡献墙/提交记录/仓库树）、AI 报告生成与改写、作者别名推断；报告页 + 统计页 + 设置分区。",
+        "en": "GitLab commit sync, deterministic stats (contribution wall, commit log, repo tree), AI report generation/rewrite, author-alias inference; reports page, stats page and a settings section."
+      },
+      "category": "reporting",
+      "labels": [
+        "gitlab",
+        "reports",
+        "statistics",
+        "sync"
+      ],
+      "icon": "./icon.svg"
+    }
+  },
+  "scripts": {
+    "build:client": "node scripts/build-client.mjs",
+    "test": "node test/run.mjs",
+    "build:release": "node build-release.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  }
+}

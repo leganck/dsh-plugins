@@ -1,0 +1,19 @@
+# dsh-report bundle 自带的插件行。
+#
+# name 用包名：bundle 经 plugin_manager install_bundle 安装后由 profile 解析。
+# 机器相关取值（GitLab 连接、token、时区、数据目录）请在用户 profile 的
+# cordis.patch.yml 里按 id: dsh-report 覆盖 —— 用户补丁层在所有 bundle 层之后应用。
+- insert:
+    - id: dsh-report
+      name: '@local/dsh-report'
+      config:
+        # 空 = <DSH_HOME>/dsh-report
+        dataDir: ''
+        # GitLab 连接（可在插件「设置 > GitLab」里写；token 存 credentials 记录）
+        gitlab:
+          baseUrl: ''
+          tokenRef: 'dsh-report/gitlab-token'
+        # 报告日期口径使用的固定时区（Go 版硬编码 UTC+8）
+        timezone: 'Asia/Shanghai'
+        # 首次打开时展示的默认周期
+        defaultReportType: 'week'
