@@ -302,7 +302,7 @@ Host 侧实现：创建/复用 DSH 会话（`ctx.sessionController.create` + `pr
 
 | 插槽 | 注册 | 组件 | 职责 |
 |---|---|---|---|
-| `sidebar.panellist` | id=`dsh-report`, order=40 | `PanelIcon` | 左侧栏「报告与统计」图标（props: size/active） |
+| `sidebar.panellist` | id=`dsh-report`, order=40 | `PanelIcon` | 左侧栏「工作报告」图标（props: size/active） |
 | `main` | key=`dsh-report`, inject→{t} | `ReportsPanel` | 整页面板：标题行 + 「报告/统计」页签 + 左右分栏；报告页签挂 `ReportRail`+`ReportMain`，统计页签挂 `StatsAside`+`StatsMain` |
 | `settings.section` | id=`dsh-report`, order=50 | `ReportSettings` | DSH 设置页分区，复用 `SettingsPage`（连接/时区/模板） |
 

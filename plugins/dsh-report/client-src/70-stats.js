@@ -1844,7 +1844,7 @@ function StatsMain(props) {
         h(
           'div',
           { className: 'dsr-stt-syncBody' },
-          h('p', { className: 'dsr-stt-note' }, tr('syncDialogHint', '窗口默认等于当前统计范围；仓库范围在 设置 → 报告与统计 → 同步仓库范围 维护。')),
+          h('p', { className: 'dsr-stt-note' }, tr('syncDialogHint', '窗口默认等于当前统计范围；仓库范围在 设置 → 工作报告 → 同步仓库范围 维护。')),
           typeof SyncPage === 'function'
             ? h(SyncPage, {
                 t,
