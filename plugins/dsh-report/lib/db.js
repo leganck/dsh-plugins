@@ -433,6 +433,19 @@ export function deleteConnection(db, connectionId) {
   })
 }
 
+/**
+ * 更新连接别名（display_name）。返回是否命中。
+ * @param {any} db
+ * @param {string} connectionId
+ * @param {string} displayName
+ */
+export function updateConnectionDisplayName(db, connectionId, displayName) {
+  const id = str(connectionId)
+  if (!id) return { updated: false }
+  const result = stmt(db, 'UPDATE connections SET display_name = ? WHERE connection_id = ?').run(str(displayName), id)
+  return { updated: Number(result.changes ?? 0) > 0 }
+}
+
 export function listConnections(db) {
   const rows = stmt(db, 'SELECT connection_id FROM connections ORDER BY created_at, connection_id').all()
   return rows.map((row) => getConnection(db, row.connection_id))

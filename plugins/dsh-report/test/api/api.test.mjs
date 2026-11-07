@@ -997,3 +997,40 @@ test('POST /sync/start 支持 connectionIds（多连接一次同步）', async (
   assert.equal(syncService.state.startCalls.length, 1)
   assert.deepEqual(syncService.state.startCalls[0].connectionIds, ['conn-a', 'conn-b'])
 })
+
+test('POST /gitlab/connections 的 name 作为别名写入 displayName', async () => {
+  const baseUrl = 'https://gitlab.example.com'
+  const store = createFakeStore()
+  const { handler } = boot({ store, gitlab: createGitLabFactory(), config: {} })
+  const response = await callApi(handler, {
+    method: 'POST',
+    url: api('/gitlab/connections'),
+    body: { baseUrl, token: 'good-token', name: '公司主账号' },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(store.state.connectionUpserts.length, 1)
+  assert.equal(store.state.connectionUpserts[0].displayName, '公司主账号')
+})
+
+test('PUT /gitlab/connections/:id 通过 connections.rename 改别名', async () => {
+  const renamed = []
+  const { handler } = boot({
+    connections: {
+      list: async () => [],
+      create: async () => ({}),
+      remove: async () => ({ removed: true }),
+      rename: async (id, name) => {
+        renamed.push({ id, name })
+        return { id, displayName: name }
+      },
+    },
+  })
+  const response = await callApi(handler, {
+    method: 'PUT',
+    url: api('/gitlab/connections/conn-a'),
+    body: { name: '公司主账号' },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(renamed, [{ id: 'conn-a', name: '公司主账号' }])
+  assert.equal(response.json.connection.displayName, '公司主账号')
+})

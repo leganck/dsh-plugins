@@ -848,7 +848,7 @@ async function createConnection(rt, deps, body) {
     throw new ReportError('baseUrl 需要 http(s):// 前缀', 'VALIDATION')
   }
   const token = text(body.token)
-  const displayName = text(body.displayName)
+  const displayName = text(body.displayName ?? body.name ?? body.alias)
   const connectionId = deriveConnectionId(baseUrl)
 
   // 无 token：只返回已有记录，hasToken=false（不写库、不联网）。
@@ -989,6 +989,40 @@ async function removeConnection(rt, deps, connectionId) {
   const result = await fn(rt.handle, id)
   if (typeof rt.clearToken === 'function') await rt.clearToken(id)
   return { connection: { removed: Boolean(result && result.removed) } }
+}
+
+/**
+ * PUT /gitlab/connections/:id：只改连接别名。
+ *
+ * @param {import('./tools.js').ReportRuntime} rt
+ * @param {Record<string, any>} deps
+ * @param {string} connectionId
+ * @param {Record<string, any>} body
+ */
+async function renameConnection(rt, deps, connectionId, body) {
+  const id = text(connectionId)
+  const name = text(body.name ?? body.displayName ?? body.alias)
+  if (!id) throw new ReportError('connectionId 必填', 'VALIDATION')
+  if (!name) throw new ReportError('连接名称不能为空', 'VALIDATION')
+  const port = deps.connections
+  if (port && typeof port.rename === 'function') {
+    return { connection: await port.rename(id, name) }
+  }
+  const fn = rt.store && rt.store.updateConnectionDisplayName
+  if (typeof fn !== 'function') throw new ReportError('db.updateConnectionDisplayName 不可用', 'INTERNAL')
+  const result = await fn(rt.handle, id, name)
+  if (!result || result.updated === false) throw new ReportError(`连接不存在：${id}`, 'NOT_FOUND')
+  const row = await readConnectionRow(rt, id)
+  const camel = toCamelRow(row ?? {})
+  return {
+    connection: {
+      id,
+      baseUrl: camel.baseUrl ?? '',
+      displayName: name,
+      username: camel.username ?? '',
+      hasToken: await tokenPresent(rt, id),
+    },
+  }
 }
 
 async function clearGitlabToken(rt, params) {
@@ -1257,6 +1291,11 @@ const ROUTES = [
     method: 'PUT',
     pattern: /^\/gitlab\/selection\/?$/,
     handle: async ({ rt, body }) => putSelection(rt, await body()),
+  },
+  {
+    method: 'PUT',
+    pattern: /^\/gitlab\/connections\/([^/]+)\/?$/,
+    handle: async ({ rt, deps, capture, body }) => renameConnection(rt, deps, capture(1), await body()),
   },
   {
     method: 'DELETE',
