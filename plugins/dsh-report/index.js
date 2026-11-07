@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report —— DSH 报告工作台插件（Host 半，完整实现）
+ * dsh-report —— DSH 报告工作台插件（Host 半，完整实现）
  *
  * 组成：
  *   - lib/db.js        SQLite（commits/report 投影/sync jobs）

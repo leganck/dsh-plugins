@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report · Host 工具面：9 个 report_* Agent 工具
+ * dsh-report · Host 工具面：9 个 report_* Agent 工具
  *
  * 契约来源：`CONTRACTS.md` §6（9 个工具）+ `docs/plugin-extraction/03-agent-flow.md` §1
  * （参数 / 返回 / 分页 / 截断 / 审批矩阵的逐条证据）。
@@ -28,7 +28,7 @@
  * `loadReportDetail` / `loadReportList` / `readStats` / `readCommits` 等）。
  * 它们不是对外稳定 API，只保证插件内两个文件之间一致。
  *
- * @module @local/dsh-report/lib/tools
+ * @module dsh-report/lib/tools
  */
 
 /** 报告类型（顺序即 UI 顺序）。 */

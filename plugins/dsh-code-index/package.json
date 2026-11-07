@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-code-index",
+  "name": "dsh-code-index",
   "version": "0.15.3",
   "private": true,
   "type": "module",

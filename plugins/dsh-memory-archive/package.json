@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-memory-archive",
+  "name": "dsh-memory-archive",
   "version": "1.2.1",
   "private": true,
   "type": "module",

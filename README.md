@@ -155,7 +155,7 @@ server/
 
 ## 多插件仓库约定（新增插件照做即可）
 
-1. 建目录 `plugins/<name>/`，至少含：`package.json`（`name` 用 `@local/dsh-*`、`dsh.bundle.patch`、
+1. 建目录 `plugins/<name>/`，至少含：`package.json`（`name` 用 `dsh-*`、`dsh.bundle.patch`、
    `repository.directory`、`engines.node`、`license`）、`cordis.patch.yml`、`index.js`、`README.md`、`test.mjs`；
 2. `package.json` 补 `dsh.market`（`title` / `description` 用本地化对象、`category`、`labels`、`icon`）——
    插件源与 Discover 直接读它，**不用改生成器**；

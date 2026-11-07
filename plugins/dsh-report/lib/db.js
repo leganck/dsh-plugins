@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report · 数据层（SQLite）
+ * dsh-report · 数据层（SQLite）
  *
  * 职责：建表 / PRAGMA / 事务 / 全部读写函数（CONTRACTS.md §2）。
  * 运行时：`node:sqlite` 的 `DatabaseSync`（宿主 Node 24.21 免 flag；Node 26 本机同样可用）。

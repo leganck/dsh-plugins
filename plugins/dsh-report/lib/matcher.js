@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report · 提交归属匹配器（author matcher）
+ * dsh-report · 提交归属匹配器（author matcher）
  *
  * 逐条复刻 workbench `buildCommitMatcher`（`internal/repository/commitimport/service.go:594-673`），
  * 用于「只收本人的提交」。**规则是业务定制，不要“优化”**：

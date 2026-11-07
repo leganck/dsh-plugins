@@ -23,7 +23,7 @@ const arg = (k, d) => {
 }
 
 const pkgDir =
-  arg('--pkg') ?? path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', '@local', 'dsh-code-index')
+  arg('--pkg') ?? path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-code-index')
 
 /**
  * 隔离运行环境：本脚本会调用 apply()，而插件在 apply() 里会写加载记录（`_boot.log`）

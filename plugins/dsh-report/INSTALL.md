@@ -16,7 +16,7 @@
 按官方技能 `cordis-plugin-development`，通过 `plugin_manager` 安装：
 
 ```text
-plugin_manager(action: "install_bundle", target: "<指向 release/local-dsh-report-<version>.tgz 或包目录的绝对路径>")
+plugin_manager(action: "install_bundle", target: "<指向 release/dsh-report-<version>.tgz 或包目录的绝对路径>")
 ```
 
 优先传 `release/` 里的 `.tgz`：pnpm 对目录用 `link:`，源码目录会成为运行时依赖；

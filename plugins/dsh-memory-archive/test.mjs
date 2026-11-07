@@ -1,5 +1,5 @@
 /**
- * Local self-test for @local/dsh-memory-archive.
+ * Local self-test for dsh-memory-archive.
  * Does NOT need a DSH profile: it drives the plugin through a fake Cordis ctx
  * and feeds it the exact session-event shapes observed in dsh-session /
  * dsh-agent-loop / dsh-compaction-basic sources.

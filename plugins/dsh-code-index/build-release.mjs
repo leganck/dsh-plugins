@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const releaseDir = path.join(PLUGIN_DIR, 'release')
 const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'package.json'), 'utf8'))
-const baseName = `local-dsh-code-index-${pkg.version}`
+const baseName = `dsh-code-index-${pkg.version}`
 
 fs.mkdirSync(releaseDir, { recursive: true })
 const mb = (n) => `${(n / 1048576).toFixed(1)} MB`

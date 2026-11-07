@@ -1,2 +1,1 @@
-1d0b87422b4d4864ee53e8df31510fec39c58992abf8c8042ce266c08edb2c11  dsh-memory-archive-1.2.0.zip
-fad36705fa552da5cba9fd0750b8142c0d0f28bd541e33a6f820abb07a9831cc  local-dsh-memory-archive-1.2.0.tgz
+69f5e688d70f3e7dff6f6283c678a567e6c85f3e4c596696d6e35212c1240610  dsh-memory-archive-1.2.1.tgz  70998

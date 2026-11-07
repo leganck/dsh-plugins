@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const releaseDir = path.join(PLUGIN_DIR, 'release')
 const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'package.json'), 'utf8'))
-const baseName = `local-dsh-report-${pkg.version}`
+const baseName = `dsh-report-${pkg.version}`
 
 fs.mkdirSync(releaseDir, { recursive: true })
 const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
