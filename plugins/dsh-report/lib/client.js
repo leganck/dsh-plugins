@@ -4993,6 +4993,9 @@ function SyncConnectionCard(props) {
   const [baseUrl, setBaseUrl] = React.useState('');
   const [token, setToken] = React.useState('');
   const [confirmId, setConfirmId] = React.useState('');
+  const [alias, setAlias] = React.useState('');
+  const [renameId, setRenameId] = React.useState('');
+  const [renameDraft, setRenameDraft] = React.useState('');
 
   const notifyChanged = () => {
     try {
@@ -5029,10 +5032,12 @@ function SyncConnectionCard(props) {
     setEditingId('');
     setBaseUrl('');
     setToken('');
+    setAlias('');
     setFormOpen(true);
     setError('');
     setNotice('');
     setConfirmId('');
+    setRenameId('');
   };
 
   const openToken = (connection) => {
@@ -5050,6 +5055,7 @@ function SyncConnectionCard(props) {
     setEditingId('');
     setBaseUrl('');
     setToken('');
+    setAlias('');
   };
 
   const save = async () => {
@@ -5068,6 +5074,8 @@ function SyncConnectionCard(props) {
     setNotice('');
     try {
       const payload = { baseUrl: nextBaseUrl };
+      const nextAlias = alias.trim();
+      if (nextAlias) payload.name = nextAlias;
       if (nextToken) payload.token = nextToken;
       const result = await api.post('/gitlab/connections', payload);
       const connection = (result && result.connection) || {};
@@ -5114,6 +5122,40 @@ function SyncConnectionCard(props) {
     }
   };
 
+  const startRename = (connection) => {
+    setRenameId(String(connection.id || ''));
+    setRenameDraft(String(connection.displayName || connection.username || ''));
+    setError('');
+    setNotice('');
+  };
+
+  const saveRename = async (connection) => {
+    const id = String(connection.id || '');
+    const name = renameDraft.trim();
+    if (!id) return;
+    if (!name) {
+      setError(tr('aliasRequired', '连接名称不能为空'));
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await api.put(`/gitlab/connections/${encodeURIComponent(id)}`, { name });
+      setRenameId('');
+      setRenameDraft('');
+      setNotice(tr('aliasSaved', '连接名称已更新'));
+      await reload();
+      notifyChanged();
+      if (typeof props.onSaved === 'function') props.onSaved();
+      showToast('ok', tr('saved', '已保存'));
+    } catch (renameError) {
+      setError(syErrText(renameError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const hasAnyToken = connections.some((item) => item.hasToken);
 
   return h(
@@ -5141,7 +5183,14 @@ function SyncConnectionCard(props) {
               h(
                 'div',
                 { className: 'dsr-connMain' },
-                h('span', { className: 'dsr-connName' }, connection.displayName || connection.username || connection.baseUrl || connection.id),
+                renameId === String(connection.id)
+                  ? h(Input, {
+                      value: renameDraft,
+                      placeholder: tr('aliasPlaceholder', '连接名称，例如：公司主账号'),
+                      onChange: (event) => setRenameDraft(event.target.value),
+                      spellCheck: false,
+                    })
+                  : h('span', { className: 'dsr-connName' }, connection.displayName || connection.username || connection.baseUrl || connection.id),
                 h('span', { className: 'dsr-connUrl' }, connection.baseUrl || '—'),
                 connection.username ? h('span', { className: 'dsr-connUser' }, `@${connection.username}`) : null,
               ),
@@ -5149,12 +5198,19 @@ function SyncConnectionCard(props) {
               h(
                 'span',
                 { className: 'dsr-connActions' },
-                h(Button, { size: 'sm', onClick: () => openToken(connection), disabled: busy }, tr('updateToken', '更新 Token')),
-                h(
-                  Button,
-                  { size: 'sm', variant: confirmId === String(connection.id) ? 'danger' : undefined, onClick: () => remove(connection), disabled: busy },
-                  confirmId === String(connection.id) ? tr('confirmRemove', '确认删除') : tr('removeConnection', '删除'),
-                ),
+                renameId === String(connection.id)
+                  ? h(Button, { size: 'sm', variant: 'primary', onClick: () => saveRename(connection), disabled: busy }, tr('save', '保存'))
+                  : h(Button, { size: 'sm', onClick: () => startRename(connection), disabled: busy }, tr('renameConnection', '改名')),
+                renameId === String(connection.id)
+                  ? h(Button, { size: 'sm', onClick: () => setRenameId(''), disabled: busy }, tr('cancel', '取消'))
+                  : h(Button, { size: 'sm', onClick: () => openToken(connection), disabled: busy }, tr('updateToken', '更新 Token')),
+                renameId === String(connection.id)
+                  ? null
+                  : h(
+                      Button,
+                      { size: 'sm', variant: confirmId === String(connection.id) ? 'danger' : undefined, onClick: () => remove(connection), disabled: busy },
+                      confirmId === String(connection.id) ? tr('confirmRemove', '确认删除') : tr('removeConnection', '删除'),
+                    ),
               ),
             ),
           ),

@@ -114,13 +114,13 @@ export function apply(ctx, rawConfig = {}) {
         })),
       )
     },
-    async create({ baseUrl, token, displayName }) {
+    async create({ baseUrl, token, displayName, name: alias }) {
       const normalized = String(baseUrl ?? '').trim().replace(/\/+$/, '')
       if (!normalized) throw new Error('GitLab 地址不能为空')
       if (!/^https?:\/\//i.test(normalized)) throw new Error('GitLab 地址必须以 http:// 或 https:// 开头')
       const connectionId = connectionIdOf(normalized)
       let username = ''
-      let name = displayName || ''
+      let name = String(displayName || alias || '').trim()
       if (token) {
         const client = createGitLabClient({ baseUrl: normalized, token: String(token).trim() })
         const user = await client.getCurrentUser()
@@ -142,6 +142,22 @@ export function apply(ctx, rawConfig = {}) {
       })
       const hasToken = Boolean(await config.resolveToken({ connectionId }))
       return { id: connectionId, baseUrl: normalized, displayName: name, username, hasToken }
+    },
+    async rename(connectionId, displayName) {
+      const id = String(connectionId ?? '').trim()
+      const name = String(displayName ?? '').trim()
+      if (!id) throw new Error('connectionId 必填')
+      if (!name) throw new Error('连接名称不能为空')
+      const row = store.getConnection(services.db, id)
+      if (!row) throw new Error(`连接不存在：${id}`)
+      store.updateConnectionDisplayName(services.db, id, name)
+      return {
+        id,
+        baseUrl: row.base_url,
+        displayName: name,
+        username: row.username,
+        hasToken: Boolean(await config.resolveToken({ connectionId: id })),
+      }
     },
     async remove(connectionId) {
       const id = String(connectionId ?? '').trim()
