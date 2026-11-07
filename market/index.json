@@ -16,6 +16,12 @@
           "zh": "上下文"
         }
       },
+      "reporting": {
+        "title": {
+          "en": "Reports",
+          "zh": "报告"
+        }
+      },
       "retrieval": {
         "title": {
           "en": "Retrieval",
@@ -48,6 +54,12 @@
           "zh": "压缩"
         }
       },
+      "gitlab": {
+        "title": {
+          "en": "GitLab",
+          "zh": "GitLab"
+        }
+      },
       "keyword-search": {
         "title": {
           "en": "Keyword search",
@@ -60,6 +72,12 @@
           "zh": "多根目录"
         }
       },
+      "reports": {
+        "title": {
+          "en": "Reports",
+          "zh": "报告"
+        }
+      },
       "scaffold": {
         "title": {
           "en": "Scaffold",
@@ -70,6 +88,18 @@
         "title": {
           "en": "Semantic search",
           "zh": "语义检索"
+        }
+      },
+      "statistics": {
+        "title": {
+          "en": "Statistics",
+          "zh": "统计"
+        }
+      },
+      "sync": {
+        "title": {
+          "en": "Sync",
+          "zh": "同步"
         }
       }
     },
@@ -236,6 +266,51 @@
             "url": "https://github.com/leganck/dsh-plugins.git",
             "commit": "07a7b15cd31dd78facb3eb2752ef6b4fab370e5a",
             "path": "plugins/dsh-multiroot"
+          },
+          "engines": {
+            "dsh": "^0.2.0-rc.2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@local/dsh-report",
+      "title": {
+        "zh": "报告与统计",
+        "en": "Reports & Stats"
+      },
+      "description": {
+        "zh": "GitLab 提交同步、确定性统计（贡献墙/提交记录/仓库树）、AI 报告生成与改写、作者别名推断；报告页 + 统计页 + 设置分区。",
+        "en": "GitLab commit sync, deterministic stats (contribution wall, commit log, repo tree), AI report generation/rewrite, author-alias inference; reports page, stats page and a settings section."
+      },
+      "icon": "../plugins/dsh-report/icon.svg",
+      "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-report",
+      "repository": {
+        "url": "https://github.com/leganck/dsh-plugins",
+        "directory": "plugins/dsh-report"
+      },
+      "metadata": {
+        "category": "reporting",
+        "keywords": [],
+        "labels": [
+          "gitlab",
+          "reports",
+          "statistics",
+          "sync"
+        ],
+        "sortKeys": {
+          "published": 1794020163
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1794020163,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/leganck/dsh-plugins.git",
+            "commit": "46777de631b68bd07be8858dee54ddf8fa608a17",
+            "path": "plugins/dsh-report"
           },
           "engines": {
             "dsh": "^0.2.0-rc.2"
