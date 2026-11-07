@@ -3,6 +3,7 @@
  *
  * 由 index.js 调用 createServices({ctx, config, log})，返回 deps 供 lib/tools.js 与 lib/api.js 使用。
  */
+import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 
@@ -144,12 +145,93 @@ export function createServices({ ctx, config, log }) {
     }
   }
 
+  // ---------------------------------------------------------------- 生成会话（所有报告共用一个）
+  const SESSION_FILE = path.join(dataDir, 'generation-session.json')
+
+  function readStoredSessionId() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'))
+      return String(parsed && parsed.sessionId ? parsed.sessionId : '')
+    } catch {
+      return ''
+    }
+  }
+
+  function writeStoredSessionId(sessionId) {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true })
+      fs.writeFileSync(
+        SESSION_FILE,
+        JSON.stringify({ sessionId: String(sessionId), updatedAt: new Date().toISOString() }, null, 2),
+      )
+    } catch (error) {
+      log('generation-session-persist-failed', { message: String(error && error.message ? error.message : error) })
+    }
+  }
+
+  function isMissingSessionError(error) {
+    const message = String((error && (error.message || error.code)) || '')
+    return /unknown session|session not found|not found|不存在|已删除|does not exist|invalid session/i.test(message)
+  }
+
+  /**
+   * 生成前确保范围内有数据：
+   *   - 有数据 → 直接生成；
+   *   - 没数据 → 用设置里的连接 + 已保存仓库范围自动同步该窗口；
+   *   - 没有连接/没有范围 → 抛可读错误，前端提示去设置。
+   */
+  async function ensureCommitsForRange(startDate, endDate) {
+    const existing = getCommitsInPeriod(startDate, endDate)
+    if (existing.length) return { autoSynced: false, commits: existing.length }
+
+    const connections = listConnections(db)
+    if (!connections.length) {
+      throw new Error('该日期范围内还没有提交数据，且尚未配置 GitLab 连接：请先到 设置 → 报告与统计 保存连接并设置同步仓库范围。')
+    }
+    let target = null
+    for (const connection of connections) {
+      let selection = []
+      try {
+        selection = await syncService.getSelection(connection.connectionId)
+      } catch (error) {
+        log('generate-scope-read-failed', { connectionId: connection.connectionId, message: String(error && error.message ? error.message : error) })
+      }
+      if (selection.some((item) => Number(item.enabled ?? 1) !== 0)) {
+        target = connection
+        break
+      }
+    }
+    if (!target) {
+      throw new Error('该日期范围内还没有提交数据，且还没有设置同步仓库范围：请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。')
+    }
+
+    log('generate-auto-sync-start', { connectionId: target.connectionId, startDate, endDate })
+    const job = await syncService.start({
+      connectionId: target.connectionId,
+      startDate,
+      endDate,
+    })
+    const done = await syncService.waitForJob(job.jobId)
+    const status = String((done && done.status) || '')
+    if (status === 'failed' || status === 'cancelled') {
+      throw new Error(`该范围内没有数据，自动同步未成功（${status}）：${(done && done.error) || '请到任务历史查看原因'}`)
+    }
+    const after = getCommitsInPeriod(startDate, endDate)
+    if (!after.length) {
+      throw new Error('自动同步已完成，但该范围内仍然没有提交：请确认同步仓库范围是否包含有提交的仓库。')
+    }
+    log('generate-auto-sync-finish', { jobId: job.jobId, commits: after.length })
+    return { autoSynced: true, commits: after.length, jobId: job.jobId }
+  }
+
   async function generateReport({ type, startDate, endDate, guidance }) {
     if (!type || !startDate || !endDate) throw new Error('type/startDate/endDate 必填')
     const controller = ctx.get('sessionController')
     if (!controller || typeof controller.create !== 'function') {
       throw new Error('当前 profile 没有 sessionController，无法创建生成会话')
     }
+    await ensureCommitsForRange(startDate, endDate)
+
     const templates = await config.getTemplates()
     const brief = getReportBrief({
       type,
@@ -159,25 +241,46 @@ export function createServices({ ctx, config, log }) {
       guidance: guidance && String(guidance).trim() ? String(guidance) : templates.guidance?.[type],
     })
     const reportId = buildReportId(type, startDate, endDate)
-    const created = await controller.create({})
     let text = buildGenerationPrompt({ brief, type, startDate, endDate, reportId })
     const authorAliases = typeof config.getAuthorAliases === 'function' ? config.getAuthorAliases() : []
     if (authorAliases.length) {
       text += '\n\n【本人提交作者别名】\n' + authorAliases.join('、') + '\n（这些作者身份提交的提交也算本人的工作。）'
     }
-    // DSH 0.2.2 的 sessionController.prompt(request, signal) 需要 AbortSignal（缺少时内部 throwIfAborted 会报错）
-    const abort = new AbortController()
-    await controller.prompt(
-      {
-        requestId: crypto.randomUUID(),
-        sessionId: created.sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text }],
-      },
-      abort.signal,
-    )
-    log('generate-session-created', { sessionId: created.sessionId, reportId })
-    return { reportId, sessionId: created.sessionId }
+
+    const storedSessionId = readStoredSessionId()
+    const promptInto = (sessionId) => {
+      // DSH 0.2.2 的 sessionController.prompt(request, signal) 需要 AbortSignal（缺少时内部 throwIfAborted 会报错）
+      const abort = new AbortController()
+      return controller.prompt(
+        {
+          requestId: crypto.randomUUID(),
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+        },
+        abort.signal,
+      )
+    }
+
+    let sessionId = storedSessionId
+    if (sessionId) {
+      try {
+        await promptInto(sessionId)
+        log('generate-session-reused', { sessionId, reportId })
+        return { reportId, sessionId }
+      } catch (error) {
+        if (!isMissingSessionError(error)) throw error
+        log('generate-session-stale', { sessionId, message: String(error && error.message ? error.message : error) })
+        sessionId = ''
+      }
+    }
+
+    const created = await controller.create({})
+    sessionId = created.sessionId
+    await promptInto(sessionId)
+    writeStoredSessionId(sessionId)
+    log('generate-session-created', { sessionId, reportId })
+    return { reportId, sessionId }
   }
 
   return {

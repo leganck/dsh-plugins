@@ -1844,8 +1844,17 @@ function StatsMain(props) {
         h(
           'div',
           { className: 'dsr-stt-syncBody' },
-          h('p', { className: 'dsr-stt-note' }, tr('syncDialogHint', '连接、仓库范围、同步窗口与任务历史都在这个对话框里完成。')),
-          typeof SyncPage === 'function' ? h(SyncPage, { t, state, actions, embedded: true }) : h(EmptyState, { title: tr('syncPageMissing', '同步页面未加载') }),
+          h('p', { className: 'dsr-stt-note' }, tr('syncDialogHint', '窗口默认等于当前统计范围；仓库范围在 设置 → 报告与统计 → 同步仓库范围 维护。')),
+          typeof SyncPage === 'function'
+            ? h(SyncPage, {
+                t,
+                state,
+                actions,
+                embedded: true,
+                initialStartDate: stats.appliedStart,
+                initialEndDate: stats.appliedEnd,
+              })
+            : h(EmptyState, { title: tr('syncPageMissing', '同步页面未加载') }),
         ),
       )
     : null;

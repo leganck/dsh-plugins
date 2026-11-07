@@ -616,7 +616,7 @@ function SyncScopeCard(props) {
 }
 
 // ---------------------------------------------------------------- 同步页
-function SyncPage({ t, state, actions, embedded }) {
+function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDate }) {
   const tr = (key, fallback) => (typeof t === 'function' ? tx(t, key, fallback) : fallback);
   const week = React.useMemo(() => syThisWeek(), []);
 
@@ -627,8 +627,15 @@ function SyncPage({ t, state, actions, embedded }) {
 
   const [selection, setSelection] = React.useState({ ids: [], names: [] });
 
-  const [startDate, setStartDate] = React.useState(week.startDate);
-  const [endDate, setEndDate] = React.useState(week.endDate);
+  const initialRange = (() => {
+    const isDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
+    if (isDate(initialStartDate) && isDate(initialEndDate)) {
+      return { startDate: String(initialStartDate), endDate: String(initialEndDate) };
+    }
+    return week;
+  })();
+  const [startDate, setStartDate] = React.useState(initialRange.startDate);
+  const [endDate, setEndDate] = React.useState(initialRange.endDate);
   const [coverage, setCoverage] = React.useState(null);
   const [coverageLoading, setCoverageLoading] = React.useState(false);
   const [coverageError, setCoverageError] = React.useState('');
@@ -745,6 +752,24 @@ function SyncPage({ t, state, actions, embedded }) {
   React.useEffect(() => {
     loadCoverage();
   }, [loadCoverage]);
+
+  const applyWindow = (nextStart, nextEnd) => {
+    if (nextStart) setStartDate(nextStart);
+    if (nextEnd) setEndDate(nextEnd);
+  };
+  const updateStartDate = (value) => {
+    setStartDate(value);
+    if (value && endDate && value > endDate) setEndDate(value);
+  };
+  const updateEndDate = (value) => {
+    setEndDate(value);
+    if (value && startDate && value < startDate) setStartDate(value);
+  };
+  const applyRangeKind = (kind) => {
+    const range = typeof saRangeForKind === 'function' ? saRangeForKind(kind) : syThisWeek();
+    if (Array.isArray(range) && range.length === 2) applyWindow(range[0], range[1]);
+    else if (range && range.startDate && range.endDate) applyWindow(range.startDate, range.endDate);
+  };
 
   const startSync = React.useCallback(async () => {
     if (!connectionId) {
@@ -904,13 +929,27 @@ function SyncPage({ t, state, actions, embedded }) {
       h(
         'div',
         { className: 'dsr-formGrid' },
-        h(Field, { label: tr('startDate', '开始日期') }, h(Input, { type: 'date', value: startDate, onChange: (event) => setStartDate(event.target.value) })),
-        h(Field, { label: tr('endDate', '结束日期') }, h(Input, { type: 'date', value: endDate, onChange: (event) => setEndDate(event.target.value) })),
+        h(Field, { label: tr('startDate', '开始日期'), hint: tr('startDateHint', '不能晚于结束日期') }, h(Input, {
+          type: 'date',
+          value: startDate,
+          max: endDate || undefined,
+          onChange: (event) => updateStartDate(event.target.value),
+        })),
+        h(Field, { label: tr('endDate', '结束日期'), hint: tr('endDateHint', '不能早于开始日期') }, h(Input, {
+          type: 'date',
+          value: endDate,
+          min: startDate || undefined,
+          onChange: (event) => updateEndDate(event.target.value),
+        })),
       ),
       h(
         'div',
         { className: 'dsr-btnRow' },
-        h(Button, { onClick: () => { setStartDate(week.startDate); setEndDate(week.endDate); } }, tr('thisWeek', '本周')),
+        h(Button, { onClick: () => applyRangeKind('last7') }, tr('last7', '近 7 天')),
+        h(Button, { onClick: () => applyRangeKind('last30') }, tr('last30', '近 30 天')),
+        h(Button, { onClick: () => applyRangeKind('week') }, tr('thisWeek', '本周')),
+        h(Button, { onClick: () => applyRangeKind('month') }, tr('thisMonth', '本月')),
+        h(Button, { onClick: () => applyRangeKind('last12') }, tr('last12', '近 12 个月')),
         h(Button, { onClick: loadCoverage, disabled: coverageLoading }, coverageLoading ? tr('loading', '加载中…') : tr('previewCoverage', '预览覆盖度')),
         h(Button, { variant: 'primary', onClick: startSync, disabled: starting || polling || !connectionId || !selectedCount }, starting ? tr('starting', '启动中…') : tr('startSync', '开始同步')),
         polling || (job && job.status === 'running') ? h(Button, { variant: 'danger', onClick: cancelSync }, tr('cancelSync', '取消同步')) : null,
