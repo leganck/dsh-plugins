@@ -6,7 +6,7 @@
  * - `.dshworkspace.json` 损坏/非法时只警告，并保留 workspace/cwd 边界；
  * - 路径判断使用 path.resolve + path.relative，避免 `D:/Projects2` 误匹配 `D:/Projects`。
  *
- * `.dshworkspace.json` 与 dsh-multiroot 插件使用同一格式，但这里不 import 该插件
+ * `.dshworkspace.json` 与多根工作区约定使用同一格式，但这里不 import 该插件
  * （它不一定安装/加载），只实现所需的最小只读解析。
  */
 import fs from 'node:fs'

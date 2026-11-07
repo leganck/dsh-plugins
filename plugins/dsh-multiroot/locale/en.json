@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "Multiroot",
-    "description": "Cursor-style multi-root workspace: declare multiple roots in .dshworkspace.json and work across them."
-  }
-}
