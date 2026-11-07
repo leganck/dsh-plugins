@@ -1,0 +1,7 @@
+# 构建产物
+release/*.tgz
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+_boot.log

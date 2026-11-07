@@ -1,0 +1,63 @@
+# 报告与统计（@local/dsh-report）
+
+DSH bundle：把 GitLab 提交同步、确定性统计、AI 报告生成三件事收进一个面板。
+
+- **统计页**：贡献墙（按查询范围逐日）、摘要、分支、提交记录（月→日→当天提交、仓库筛选）、仓库树
+- **报告页**：报告树 + 详情（正文/统计）、生成/重生成/导出/删除、编辑模板
+- **同步**：「同步仓库范围」在设置里维护；同步对话框负责窗口、进度、任务历史（可「查看统计」）
+- **设置分区**：GitLab 连接、提交作者别名（可从 GitLab 推断）、时区/默认类型、模板与写作指引
+- **9 个 Agent 工具**：`report_brief` / `report_commits` / `report_stats` / `report_update` /
+  `report_list` / `report_get` / `report_export` / `report_delete` / `report_sync`
+
+UI 走 DSH 三处插槽（`sidebar.panellist` / `main` / `settings.section`），样式只用
+`--dsw-alias-*` 主题 token（亮暗跟随 DSH）。
+
+## 安装
+
+见 [INSTALL.md](INSTALL.md)。一句话：`plugin_manager install_bundle` 指向本包或
+`release/local-dsh-report-<version>.tgz`。
+
+## 配置
+
+| 位置 | 内容 |
+|---|---|
+| 设置 →「报告与统计」 | GitLab 地址/Token、同步仓库范围、提交作者别名、时区/默认报告类型、模板与写作指引 |
+| `<dataDir>/report.db` | 本地提交、报告、同步任务（SQLite WAL） |
+| `<dataDir>/author-aliases.json` | 提交作者别名 |
+| `<dataDir>/prompts.json` | 模板/写作指引覆盖 |
+| DSH 凭据库 | `dsh-report/gitlab-token`（不落明文） |
+
+机器相关配置默认值在 `cordis.patch.yml` 的 `dsh-report` 行；用户 profile 的补丁层可覆盖。
+
+## 数据口径
+
+- 日期一律 `YYYY-MM-DD`，按本机时区取 `00:00–23:59:59`；统计默认「不含合并和拣选」。
+- 同步：`GET /projects/:id/repository/commits` 分页拉取，逐提交取 detail（stats）与 branch refs；
+  merge / cherry-pick 标记按 commit message 逐条解析；大范围覆盖该区间本地数据。
+- 生成：host 创建一个 DSH 会话，提示模型按 `report_brief → report_stats → report_commits →
+  report_update` 链路工作；别名会写进提示，报告落 `reports` 表。
+
+## 开发
+
+```sh
+node scripts/build-client.mjs   # client-src/*.js → lib/client.js
+node test/run.mjs               # 单元/集成测试（node:test）
+node build-release.mjs          # npm pack → release/*.tgz + SHA256SUMS.txt
+```
+
+目录：
+
+```text
+index.js            Host 入口（配置/服务/工具/HTTP 注册）
+lib/                Host：db / gitlab / sync / api / tools / domain / services
+lib/client.js       浏览器半（由 client-src 生成，勿手改）
+client-src/         客户端源码（01 起分文件，99-apply 注册槽位）
+test/               node:test 用例
+docs/               设计与对齐计划
+```
+
+## 与 workbench 的关系
+
+本插件把 workbench 的「报告」功能迁到 DSH：统计口径（`buildRealtimeAnalytics` 等）、
+报告模板/写作契约、`report_*` 工具语义保持一致；UI 结构按 DSH 平台重排（不是逐像素复刻）。
+统计页与 workbench 的差异计划见 [docs/STATS-PARITY-PLAN.md](docs/STATS-PARITY-PLAN.md)。

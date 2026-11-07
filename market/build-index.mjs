@@ -34,6 +34,7 @@ const CATEGORY_TITLES = {
   retrieval: { en: 'Retrieval', zh: '检索' },
   context: { en: 'Context', zh: '上下文' },
   workspace: { en: 'Workspace', zh: '工作空间' },
+  reporting: { en: 'Reports', zh: '报告' },
 }
 const LABEL_TITLES = {
   'keyword-search': { en: 'Keyword search', zh: '关键词检索' },
@@ -43,6 +44,10 @@ const LABEL_TITLES = {
   archive: { en: 'Archive', zh: '归档' },
   'multi-root': { en: 'Multi-root', zh: '多根目录' },
   scaffold: { en: 'Scaffold', zh: '脚手架' },
+  gitlab: { en: 'GitLab', zh: 'GitLab' },
+  reports: { en: 'Reports', zh: '报告' },
+  statistics: { en: 'Statistics', zh: '统计' },
+  sync: { en: 'Sync', zh: '同步' },
 }
 
 const isLocalized = (v) => typeof v === 'object' && v !== null && typeof v.en === 'string'
