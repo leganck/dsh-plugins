@@ -299,17 +299,17 @@
           "sync"
         ],
         "sortKeys": {
-          "published": 1794020260
+          "published": 1794020317
         }
       },
       "versions": [
         {
-          "version": "0.1.1",
-          "publishTimestamp": 1794020260,
+          "version": "0.1.2",
+          "publishTimestamp": 1794020317,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "d4f2ed185e30e89cd2abf934a14c1e63be4f3fc6",
+            "commit": "c9e108ee1c5d98e08ddf19e5bb8759c008f52b9b",
             "path": "plugins/dsh-report"
           },
           "engines": {
