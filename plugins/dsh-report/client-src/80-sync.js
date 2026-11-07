@@ -33,6 +33,19 @@
 // tx（99-apply）。
 
 addClientCSS(`
+.dsr-syncScopeBar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  font-size: 12px; color: var(--dsw-alias-label-secondary);
+}
+.dsr-syncScopeText { color: var(--dsw-alias-label-primary); font-weight: 600; }
+.dsr-syncScopeBarWarn .dsr-syncScopeText { color: var(--dsw-alias-status-warning, var(--dsw-alias-label-primary)); }
+.dsr-syncScopeHint { color: var(--dsw-alias-label-secondary); }
+.dsr-syncScopeActions { margin-left: auto; display: flex; gap: 6px; }
+.dsr-syncSectionHead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.dsr-syncSectionTitle { font-size: 13px; font-weight: 650; color: var(--dsw-alias-label-primary); }
 .dsr-sync, .dsr-settings { display: flex; flex-direction: column; gap: 14px; padding: 14px 16px 22px; max-width: 1080px; }
 .dsr-pageIntro { display: flex; flex-direction: column; gap: 3px; }
 .dsr-pageTitle { font-size: 14px; font-weight: 600; }
@@ -885,37 +898,28 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
         )
       : null,
 
-    // ---- 同步范围（只在设置里编辑，这里只读）
+    // ---- 同步范围摘要（编辑入口在设置里，这里只做一行提示）
     h(
-      SyncCard,
-      {
-        title: tr('syncScopeSummary', '同步范围'),
-        icon: ReportGlyph,
-        aside: h(
-          'span',
-          { className: 'dsr-inlineMeta' },
-          h(Badge, { tone: selectedCount ? 'ok' : 'warn' }, `${tr('selected', '已选')} ${selectedCount}`),
-        ),
-        hint: tr('syncScopeSummaryHint', '仓库范围在 设置 → 报告与统计 → 同步仓库范围 里编辑。'),
-      },
-      connLoading
-        ? h('p', { className: 'dsr-hint' }, tr('loading', '加载中…'))
-        : selectedCount
-          ? h(
-              'div',
-              { className: 'dsr-formGrid' },
-              h(Field, { label: tr('connection', 'GitLab 连接') }, h(Input, { value: (connections.find((item) => String(item.id) === String(connectionId)) || {}).displayName || connectionId || '—', readOnly: true, disabled: true })),
-              h(Field, { label: tr('repos', '仓库') }, h(Input, { value: selection.names.slice(0, 3).join('、') + (selection.names.length > 3 ? ` 等 ${selection.names.length} 个` : ''), readOnly: true, disabled: true })),
-            )
-          : h('p', { className: 'dsr-syncNotice dsr-syncNoticeInline', role: 'status' }, tr('noScopeNotice', '还没有保存同步仓库范围，请先到 设置 → 报告与统计 → 同步仓库范围 选择仓库。')),
+      'div',
+      { className: `dsr-syncScopeBar${selectedCount ? '' : ' dsr-syncScopeBarWarn'}`, role: 'status' },
       h(
-        'div',
-        { className: 'dsr-btnRow' },
-        h(Button, { onClick: () => loadSelection(connectionId), disabled: !connectionId }, tr('reloadScope', '重新读取范围')),
-        h(Button, { onClick: () => loadConnections(), disabled: connLoading }, tr('refreshConnection', '刷新连接')),
+        'span',
+        { className: 'dsr-syncScopeText' },
+        connLoading
+          ? tr('loading', '加载中…')
+          : selectedCount
+            ? `${tr('selected', '已选')} ${selectedCount} ${tr('repos', '仓库')} · ${(connections.find((item) => String(item.id) === String(connectionId)) || {}).displayName || connectionId || '—'}`
+            : tr('noScopeShort', '还没有选择同步仓库：请到 设置 → 报告与统计 → 同步仓库范围 选择'),
       ),
-      connError ? h(SyncErrorBar, null, connError) : null,
+      h('span', { className: 'dsr-syncScopeHint' }, tr('syncScopeSummaryHint', '仓库范围在 设置 → 报告与统计 → 同步仓库范围 修改')),
+      h(
+        'span',
+        { className: 'dsr-syncScopeActions' },
+        h(Button, { size: 'sm', onClick: () => loadSelection(connectionId), disabled: !connectionId }, tr('reloadScope', '重新读取')),
+        h(Button, { size: 'sm', onClick: () => loadConnections(), disabled: connLoading }, tr('refreshConnection', '刷新连接')),
+      ),
     ),
+    connError ? h(SyncErrorBar, null, connError) : null,
 
     // ---- 同步窗口与进度
     h(
@@ -980,6 +984,16 @@ function SyncPage({ t, state, actions, embedded, initialStartDate, initialEndDat
         ? h(
             'div',
             { className: 'dsr-section' },
+            h(
+              'div',
+              { className: 'dsr-syncSectionHead' },
+              h('strong', { className: 'dsr-syncSectionTitle' }, tr('coverageTitle', '本地已有数据（同步前预览）')),
+              h(
+                'span',
+                { className: 'dsr-hint' },
+                tr('coverageHint', '当前窗口内本地库已有的提交与行数，用来判断这个窗口是否已经同步过。'),
+              ),
+            ),
             h(
               'div',
               { className: 'dsr-kvGrid' },
