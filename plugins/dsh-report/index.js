@@ -29,7 +29,14 @@ import { createGitLabClient } from './lib/gitlab.js'
 export const name = 'dsh-report'
 export const inject = ['tools', 'webServer']
 
-const BUILD = '0.1.0'
+const BUILD = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+    return String(pkg.version || '0.0.0')
+  } catch {
+    return '0.0.0'
+  }
+})()
 const GENERATE_PATH = `${API_PREFIX}/reports/generate`
 
 function sendJSON(res, status, body) {
