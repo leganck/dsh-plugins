@@ -41,7 +41,7 @@ node build-release.mjs
 
 ```yaml
 - id: dsh-report
-  name: '@local/dsh-report'
+  name: 'dsh-report'
   config:
     dataDir: ''                 # 空 = <DSH_HOME>/dsh-report
     timezone: Asia/Shanghai

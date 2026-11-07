@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Reports & Stats",
+    "description": "GitLab commit sync, deterministic stats (contribution wall, commit log, repo tree), AI report generation/rewrite, author-alias inference; reports page, stats page and a settings section."
+  }
+}

@@ -1,4 +1,4 @@
-# @local/dsh-memory-archive
+# 会话记忆归档（dsh-memory-archive）
 
 > **安装**：主路径是 DSH 插件源（仓库根 `market/index.json`）或 `plugin_manager` 的
 > `install_bundle`；本插件自带的 `install.ps1` 只是**离线兜底**，且已从 `package.json` 的
@@ -199,7 +199,7 @@ the index keywords above are the cheapest way in. Do not modify these files.
 
 | 路径 | 适用 | 做法 |
 |---|---|---|
-| A. 插件源（推荐） | 能打开 **Plugins → Discover** 的 profile | 添加源 `https://raw.githubusercontent.com/leganck/dsh-plugins/main/market/index.json`，再装 `@local/dsh-memory-archive`。`market/index.json` 里的版本与 git commit 是钉死的 |
+| A. 插件源（推荐） | 能打开 **Plugins → Discover** 的 profile | 添加源 `https://raw.githubusercontent.com/leganck/dsh-plugins/main/market/index.json`，再装 `dsh-memory-archive`（包名以 `package.json` 的 `name` 为准）。`market/index.json` 里的版本与 git commit 是钉死的 |
 | B. `install_bundle` | 已启用 `tool-plugin-manager` 的 profile（含被应用独占管理的 `desktop`） | `plugin_manager(action: "install_bundle", target: "<release/*.tgz 或包目录的绝对路径>")`。**优先传 `.tgz`**：pnpm 对目录用 `link:`（源码目录会成为运行时依赖），对 tarball 是实体安装 |
 | C. 离线兜底 | 没有插件源、也不能用 `plugin_manager` | `pwsh -File install.ps1 -Profile desktop`（`-DryRun` 预演，`-Uninstall` 回滚）。**该脚本已从 `package.json` 的 `files` 移除，重新打包出的 npm 包（`.tgz`）不含它**；只在仓库源码目录（按源码树打的 zip 会带上） |
 | D. 手工（最后手段） | 任意 | 复制包到工作区外 + 在 profile 补丁末尾插入 `memory-archive` 行 + 重启 |
@@ -207,7 +207,7 @@ the index keywords above are the cheapest way in. Do not modify these files.
 要点：
 
 - 本包**已经是 DSH bundle**：`package.json` 声明了 `dsh.bundle.patch`，`cordis.patch.yml` 插入一行
-  `memory-archive`；A/B 路径由包管理器解析，`name` 用包名 `@local/dsh-memory-archive`。
+  `memory-archive`；A/B 路径由包管理器解析，`name` 用 `package.json` 的 `name`。
 - B 路径的前置条件：profile 的 `tool-plugin-manager` 行被 shipped patch 置为 `disabled: true`，
   需要在 profile 补丁层按 id 覆盖成 `disabled: false` 并重启应用。判定是否装好看返回的
   `application` / `warnings`，不要只看插件自己写的标记。
@@ -345,7 +345,7 @@ the index keywords above are the cheapest way in. Do not modify these files.
 ```yaml
 - insert:
     - id: memory-archive
-      name: '@local/dsh-memory-archive'
+      name: '<package-name>'
       config:
         archiveDir: "~/.dsh/archive"   # 引号必需：裸 ~ 在 YAML 里是 null
         includeToolResults: true

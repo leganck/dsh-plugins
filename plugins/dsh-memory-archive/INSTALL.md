@@ -1,4 +1,4 @@
-# 安装 @local/dsh-memory-archive
+# 安装 dsh-memory-archive
 
 > 主路径是 **DSH 插件源**（仓库根 `market/index.json`）或 `plugin_manager` 的 `install_bundle`；
 > `install.ps1` 只是**离线兜底**，且已从 `package.json` 的 `files` 移除——重新打包后不再随
@@ -29,7 +29,7 @@
 https://raw.githubusercontent.com/leganck/dsh-plugins/main/market/index.json
 ```
 
-然后安装 `@local/dsh-memory-archive`。`market/index.json` 里的版本与 git commit 是**钉死**的，
+然后安装 `dsh-memory-archive`。`market/index.json` 里的版本与 git commit 是**钉死**的，
 装到的就是那个 commit 下的 `plugins/dsh-memory-archive/`；不需要你手动跑 pnpm 或命令行。
 
 ### B. `plugin_manager` + `install_bundle`
@@ -121,7 +121,7 @@ dsh plugin --profile <profile> add <本目录 | .tgz | git+https://github.com/le
 ```json
 { "dsh": { "profile": { "bundles": [
   "@deepseek-ai/dsh-base",
-  "@local/dsh-memory-archive"
+  "<package-name>"
 ] } } }
 ```
 

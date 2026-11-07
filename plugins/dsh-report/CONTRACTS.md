@@ -289,7 +289,7 @@ Host 侧实现：创建/复用 DSH 会话（`ctx.sessionController.create` + `pr
 ## 7. 客户端（`client-src/**` → `lib/client.js`）
 
 构建：`node scripts/build-client.mjs`：按文件名排序拼接，外层由 `00-header.js` 打开
-`window.__ModuleLoader__.load({ id:'@local/dsh-report', factory(require){ ... React ... }})`，
+`window.__ModuleLoader__.load({ id:'dsh-report', factory(require){ ... React ... }})`，
 `99-apply.js` 负责 `apply(ctx)` 与两处 slot（`sidebar.footer.action`、`shell.overlay`）。
 
 已有基础（Lead 维护，勿改）：`10-store.js`（state/actions/api/格式化/useStore/useOpen/showToast/bootstrap）、
@@ -298,7 +298,7 @@ Host 侧实现：创建/复用 DSH 会话（`ctx.sessionController.create` + `pr
 
 ### 7.1 组件契约（DSH 框架集成）
 
-插件不再自绘全屏窗口，按 DSH 插槽集成（与 `@local/smartpos-delivery` 一致）：
+插件不再自绘全屏窗口，按 DSH 插槽集成（与 `smartpos-delivery` 一致）：
 
 | 插槽 | 注册 | 组件 | 职责 |
 |---|---|---|---|

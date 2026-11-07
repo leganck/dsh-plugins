@@ -1,4 +1,4 @@
-# @local/dsh-code-index
+# 代码索引（dsh-code-index）
 
 DSH 插件：**本地代码库混合检索**。纯 JavaScript，无 Python。
 
@@ -165,7 +165,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 
 ```yaml
 - id: code-index
-  name: "@local/dsh-code-index"          # 插件源 / install_bundle 安装后，模块名 = 包名
+  name: "<package-name>"          # 包名，见 package.json 的 name
   config:
     # —— 用户只需要这几个 ——
     # 允许路径自动从 DSH workspace / 会话 cwd / .dshworkspace.json 推导，不再配置 roots
@@ -526,7 +526,7 @@ DSH 自带技能 `cordis-plugin-development`（位于 asar 内 `dsh-agent-preset
 | 要求 | 本包做法 |
 |---|---|
 | `package.json` 声明 `dsh.bundle.patch` | ✅ `./cordis.patch.yml` |
-| 包内补丁插入插件行，`name` 用**包名** | ✅ `name: '@local/dsh-code-index'` |
+| 包内补丁插入插件行，`name` 用**包名** | ✅ `name: '<package-name>'` |
 | `export function apply(ctx, config)` | ✅ 单一导出形式，不混用 |
 | 服务依赖必须声明 | ✅ `export const inject = ['tools']` |
 | 导出 `name` | ✅ `code-index` |

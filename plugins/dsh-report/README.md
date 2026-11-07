@@ -1,4 +1,4 @@
-# 报告与统计（@local/dsh-report）
+# 报告与统计（dsh-report）
 
 DSH bundle：把 GitLab 提交同步、确定性统计、AI 报告生成三件事收进一个面板。
 

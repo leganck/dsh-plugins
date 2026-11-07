@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-memory-archive",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "DSH bundle: for every compaction, write a greppable segment_NNN.md holding the checkpoint summary plus the verbatim shadowed turns, maintain INDEX.md, and inject a pointer so the model can recover early tool output. Same-session only.",
@@ -45,7 +45,8 @@
     "CHANGELOG.md",
     "LICENSE",
     "test.mjs",
-    "tools/*.mjs"
+    "tools/*.mjs",
+    "icon.svg"
   ],
   "dsh": {
     "bundle": {

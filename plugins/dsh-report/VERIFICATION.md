@@ -113,7 +113,7 @@
 |---|---|
 | 入仓 | `plugins/dsh-report`（源码 + client-src + lib + test + docs + release 脚本 + icon + INSTALL） |
 | 发布包 | `release/local-dsh-report-0.1.2.tgz`（npm pack --ignore-scripts，含 SHA256SUMS.txt） |
-| 市场索引 | `market/index.json` 收录 `@local/dsh-report@0.1.2`，git 源钉 `plugins/dsh-report` 目录 commit |
+| 市场索引 | `market/index.json` 收录 `dsh-report@0.1.2`，git 源钉 `plugins/dsh-report` 目录 commit |
 | CI | `.github/workflows/ci.yml` matrix 加入 `dsh-report`（`pnpm --filter test`） |
 | 测试 | `node test/run.mjs`：251 项中 245 pass / 6 skipped（跳过的 6 项需要 workbench Go 源码做源级 parity，仓库内没有） |
 | 安装 | profile 依赖改为 `file:.../local-dsh-report-0.1.2.tgz`（实体安装，非 link）；Host 侧需重启 DSH 后从 0.1.0 切到 0.1.2 |
