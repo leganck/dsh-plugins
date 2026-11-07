@@ -10,6 +10,7 @@ DSH bundle：把 GitLab 提交同步、确定性统计、AI 报告生成三件�
 - **生成**：所有报告共用一个 Agent 会话（`<dataDir>/generation-session.json`，会话失效自动重建）；
   报告范围内没有本地提交时，先按设置里的连接/仓库范围**自动同步**该窗口再生成；
   没有连接或没有同步范围时直接提示去设置，不会起一个空会话
+- **多 GitLab 连接**：每个连接独立 baseUrl + Token（Token 按连接存凭据库），同步范围、候选仓库、任务历史、作者别名推断都按连接隔离
 - **设置分区**：GitLab 连接、提交作者别名（可从 GitLab 推断）、时区/默认类型、模板与写作指引
 - **9 个 Agent 工具**：`report_brief` / `report_commits` / `report_stats` / `report_update` /
   `report_list` / `report_get` / `report_export` / `report_delete` / `report_sync`

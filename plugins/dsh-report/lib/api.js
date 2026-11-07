@@ -367,7 +367,18 @@ async function configPayload(rt) {
   const gitlab = cfg.gitlab && typeof cfg.gitlab === 'object' ? cfg.gitlab : {}
   let hasToken = false
   try {
-    hasToken = Boolean(await rt.resolveToken())
+    const rows = await listConnectionRows(rt)
+    if (rows && rows.length) {
+      for (const row of rows) {
+        const id = String(toCamelRow(row).connectionId ?? toCamelRow(row).connection_id ?? '')
+        if (id && (await tokenPresent(rt, id))) {
+          hasToken = true
+          break
+        }
+      }
+    } else {
+      hasToken = await tokenPresent(rt)
+    }
   } catch {
     hasToken = false
   }
@@ -677,9 +688,9 @@ export function deriveConnectionId(baseUrl) {
  * @param {import('./tools.js').ReportRuntime} rt
  * @returns {Promise<boolean>}
  */
-async function tokenPresent(rt) {
+async function tokenPresent(rt, connectionId) {
   try {
-    return Boolean(await rt.resolveToken())
+    return Boolean(await rt.resolveToken(connectionId ? { connectionId } : undefined))
   } catch {
     return false
   }
@@ -782,22 +793,25 @@ async function listConnections(rt, deps) {
     }
   }
 
-  const hasToken = await tokenPresent(rt)
   const rows = await listConnectionRows(rt)
   if (rows && rows.length > 0) {
     return {
-      connections: rows.map((row) => {
-        const camel = toCamelRow(row)
-        return {
-          id: String(camel.connectionId ?? camel.connection_id ?? 'default'),
-          baseUrl: camel.baseUrl ?? '',
-          displayName: camel.displayName ?? '',
-          username: camel.username ?? '',
-          hasToken,
-        }
-      }),
+      connections: await Promise.all(
+        rows.map(async (row) => {
+          const camel = toCamelRow(row)
+          const id = String(camel.connectionId ?? camel.connection_id ?? 'default')
+          return {
+            id,
+            baseUrl: camel.baseUrl ?? '',
+            displayName: camel.displayName ?? '',
+            username: camel.username ?? '',
+            hasToken: await tokenPresent(rt, id),
+          }
+        }),
+      ),
     }
   }
+  const hasToken = await tokenPresent(rt)
 
   const cfg = rt.config()
   const gitlab = asObject(cfg.gitlab)
@@ -863,7 +877,7 @@ async function createConnection(rt, deps, body) {
 
   // token 先落 credentials（失败即中止，避免写了连接却没有凭据）。
   try {
-    await rt.saveToken(token)
+    await rt.saveToken(token, connectionId)
   } catch (error) {
     throw new ReportError(`token 保存失败：${error?.message ?? error}`, 'INTERNAL')
   }
@@ -954,9 +968,33 @@ async function putSelection(rt, body) {
  *
  * @param {import('./tools.js').ReportRuntime} rt
  */
-async function clearGitlabToken(rt) {
-  if (typeof rt.clearToken === 'function') await rt.clearToken()
-  return { cleared: true }
+/**
+ * DELETE /gitlab/connections/:id：删除连接与仓库范围，并清掉该连接的 token。
+ *
+ * @param {import('./tools.js').ReportRuntime} rt
+ * @param {Record<string, any>} deps
+ * @param {string} connectionId
+ */
+async function removeConnection(rt, deps, connectionId) {
+  const id = text(connectionId)
+  if (!id) throw new ReportError('connectionId 必填', 'VALIDATION')
+  const port = deps.connections
+  if (port && typeof port.remove === 'function') {
+    return { connection: await port.remove(id) }
+  }
+  const fn = rt.store && rt.store.deleteConnection
+  if (typeof fn !== 'function') {
+    throw new ReportError('db.deleteConnection 不可用（无法删除连接）', 'INTERNAL')
+  }
+  const result = await fn(rt.handle, id)
+  if (typeof rt.clearToken === 'function') await rt.clearToken(id)
+  return { connection: { removed: Boolean(result && result.removed) } }
+}
+
+async function clearGitlabToken(rt, params) {
+  const connectionId = text(params && params.get ? params.get('connectionId') : '')
+  if (typeof rt.clearToken === 'function') await rt.clearToken(connectionId || undefined)
+  return { cleared: true, connectionId }
 }
 
 /**
@@ -1215,8 +1253,13 @@ const ROUTES = [
   },
   {
     method: 'DELETE',
+    pattern: /^\/gitlab\/connections\/([^/]+)\/?$/,
+    handle: async ({ rt, deps, capture }) => removeConnection(rt, deps, capture(1)),
+  },
+  {
+    method: 'DELETE',
     pattern: /^\/gitlab\/token\/?$/,
-    handle: ({ rt }) => clearGitlabToken(rt),
+    handle: ({ rt, params }) => clearGitlabToken(rt, params),
   },
   {
     method: 'GET',

@@ -901,3 +901,86 @@ test('导出路径不被 JSON 信封覆盖（headers 已发出后不再写第二
   assert.match(res.headers['content-type'], /text\/markdown/)
   assert.doesNotMatch(res.body, /^\{"error"/)
 })
+
+/* ------------------------------------------------------- 多 GitLab 连接 */
+
+test('多连接：GET /gitlab/connections 每行 hasToken 按连接解析', async () => {
+  const store = createFakeStore()
+  store.state.connections.set('conn-a', {
+    connection_id: 'conn-a',
+    base_url: 'https://a.example.com',
+    display_name: 'A',
+    username: 'user-a',
+  })
+  store.state.connections.set('conn-b', {
+    connection_id: 'conn-b',
+    base_url: 'https://b.example.com',
+    display_name: 'B',
+    username: 'user-b',
+  })
+  const { handler } = boot({
+    store,
+    deps: {
+      resolveToken: async (options) => (options && options.connectionId === 'conn-b' ? 'token-b' : null),
+    },
+  })
+  const response = await callApi(handler, { url: api('/gitlab/connections') })
+  assert.equal(response.status, 200)
+  const byId = Object.fromEntries(response.json.connections.map((item) => [item.id, item]))
+  assert.equal(byId['conn-a'].hasToken, false)
+  assert.equal(byId['conn-b'].hasToken, true)
+})
+
+test('多连接：POST /gitlab/connections 把 token 保存到对应 connectionId', async () => {
+  const baseUrl = 'https://gitlab.example.com'
+  const gitlab = createGitLabFactory()
+  const store = createFakeStore()
+  const saved = []
+  const { handler } = boot({
+    store,
+    gitlab,
+    deps: {
+      saveToken: async (token, connectionId) => {
+        saved.push({ token, connectionId })
+      },
+    },
+  })
+  const response = await callApi(handler, {
+    method: 'POST',
+    url: api('/gitlab/connections'),
+    body: { baseUrl, token: 'good-token' },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(saved, [{ token: 'good-token', connectionId: deriveConnectionId(baseUrl) }])
+})
+
+test('多连接：DELETE /gitlab/connections/:id 转发到 connections.remove', async () => {
+  const removed = []
+  const { handler } = boot({
+    connections: {
+      list: async () => [],
+      create: async () => ({}),
+      remove: async (id) => {
+        removed.push(id)
+        return { removed: true }
+      },
+    },
+  })
+  const response = await callApi(handler, { method: 'DELETE', url: api('/gitlab/connections/conn-b') })
+  assert.equal(response.status, 200)
+  assert.deepEqual(removed, ['conn-b'])
+})
+
+test('多连接：DELETE /gitlab/token?connectionId= 只清对应连接', async () => {
+  const cleared = []
+  const { handler } = boot({
+    deps: {
+      clearToken: async (connectionId) => {
+        cleared.push(connectionId)
+      },
+    },
+  })
+  const response = await callApi(handler, { method: 'DELETE', url: api('/gitlab/token?connectionId=conn-b') })
+  assert.equal(response.status, 200)
+  assert.deepEqual(cleared, ['conn-b'])
+})
