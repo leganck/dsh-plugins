@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report · GitLab REST 客户端
+ * dsh-report · GitLab REST 客户端
  *
  * 复刻 workbench 的调用面（`docs/plugin-extraction/05-route-b-data-acquisition.md` §①）：
  *   GET /user

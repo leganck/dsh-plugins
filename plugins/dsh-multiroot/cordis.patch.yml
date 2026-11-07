@@ -2,7 +2,7 @@
 # 也可以用下面的内联 roots 兜底（两者都给时文件优先）。
 - insert:
     - id: multiroot
-      name: '@local/dsh-multiroot'
+      name: 'dsh-multiroot'
       config:
         # 显式指定定义文件；null = 从会话目录向上查找 .dshworkspace.json
         definitionFile: null

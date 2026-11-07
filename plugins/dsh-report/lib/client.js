@@ -3,7 +3,7 @@
 /* ==== client-src/00-header.js ==== */
 window.__ModuleLoader__.load({
   // 官方约定：factory id 必须等于 package.json 的包名。
-  id: '@local/dsh-report',
+  id: 'dsh-report',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -7450,7 +7450,7 @@ function apply(ctx) {
   const t = ctx.locale.bind(NS)
   ctx.effect(() => {
     const style = document.createElement('style');
-    style.dataset.plugin = '@local/dsh-report';
+    style.dataset.plugin = 'dsh-report';
     style.textContent = CLIENT_CSS.join('\n');
     document.head.append(style);
     return () => style.remove();

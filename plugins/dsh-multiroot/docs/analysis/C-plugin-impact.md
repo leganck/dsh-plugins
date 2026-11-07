@@ -221,7 +221,7 @@ const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
 
 | 字段 | code-index | memory-archive | 新插件建议 |
 |---|---|---|---|
-| `name` | `@local/dsh-code-index` | `@local/dsh-memory-archive` | `@local/dsh-workspace`（scope `@local/` 是本地私有的标志） |
+| `name` | `dsh-code-index` | `dsh-memory-archive` | `dsh-workspace`（普通 npm 包名） |
 | `version` | `0.8.4` | `1.2.0` | `0.1.0` 起 |
 | `private` / `type` | `true` / `module` | `true` / `module` | 同 |
 | `main` | `index.js` | —（走 `exports`） | `index.js` |
@@ -240,7 +240,7 @@ const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
 ```yaml
 - insert:
     - id: code-index                     # 与 export const name 对应
-      name: '@local/dsh-code-index'      # 用**包名**，不要写 file:// 路径
+      name: 'dsh-code-index'      # 用**包名**，不要写 file:// 路径
       config:
         indexDirBase: ~/.dsh/code-index  # 只放可移植默认值
 ```
@@ -259,7 +259,7 @@ const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
 
 ```json
 {
-  "name": "@local/my-decoration",
+  "name": "my-decoration",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -283,7 +283,7 @@ const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
 
 ```js
 window.__ModuleLoader__.load({
-  id: '@local/my-decoration',            // id == 包名
+  id: 'my-decoration',            // id == 包名
   factory(require) {
     const React = require('react')       // React 来自浏览器模块表，不要自己的副本
     return {
@@ -312,7 +312,7 @@ Host 半对应 `templates/decoration/index.js` 只有 `export function apply() {
 
 | 约定 | 实证 |
 |---|---|
-| 产物名 = `local-<scope 展平>-<version>.tgz`（`@local/dsh-code-index` → `local-dsh-code-index-0.8.1.tgz`） | `plugins/dsh-code-index/release/SHA256SUMS.txt:2` |
+| 产物名 = `local-<scope 展平>-<version>.tgz`（`dsh-code-index` → `local-dsh-code-index-0.8.1.tgz`） | `plugins/dsh-code-index/release/SHA256SUMS.txt:2` |
 | 同一版本可有多个变体（带/不带模型） | `…-0.8.1-local-model.tgz`（186 MB）与 `…-0.8.1.tgz`（167 KB） |
 | 产物**不进 git**，只提交 `SHA256SUMS.txt` | `.gitignore:8`（`release/*.tgz`）、`plugins/dsh-code-index/.gitignore:8` |
 | `SHA256SUMS.txt` 行格式：`<sha256>  <file>  <size>` | `build-release.mjs:96-100` |
@@ -358,7 +358,7 @@ Host 半对应 `templates/decoration/index.js` 只有 `export function apply() {
 
 | 文件 | 抄自 | 必须保留的东西 |
 |---|---|---|
-| `package.json` | `plugins/dsh-code-index/package.json` + `dsh-memory-archive/package.json` | `@local/` scope、`private:true`、`type:"module"`、`exports`（+`./client`/`./icon`）、`files` 白名单、`dsh.bundle.patch`、optional peerDeps、`engines` |
+| `package.json` | `plugins/dsh-code-index/package.json` + `dsh-memory-archive/package.json` | 普通 npm 包名、`private:true`、`type:"module"`、`exports`（+`./client`/`./icon`）、`files` 白名单、`dsh.bundle.patch`、optional peerDeps、`engines` |
 | `cordis.patch.yml` | code-index 版 | `- insert: - id/name/config`；只放可移植默认值 |
 | `index.js`（Host 半） | code-index 的骨架 | `export const name` / `export const inject` / `export function apply(ctx, config)`；注册与清理都进 `ctx.effect`（`index.js:592-610`） |
 | `locale/{zh,en}.json` | 任一 | `meta.title` / `meta.description` |

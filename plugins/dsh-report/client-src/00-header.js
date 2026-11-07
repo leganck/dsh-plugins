@@ -1,6 +1,6 @@
 window.__ModuleLoader__.load({
   // 官方约定：factory id 必须等于 package.json 的包名。
-  id: '@local/dsh-report',
+  id: 'dsh-report',
   factory(require) {
     const React = require('react');
     const h = React.createElement;

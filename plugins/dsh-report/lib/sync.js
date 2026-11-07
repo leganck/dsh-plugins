@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report · GitLab 提交同步引擎
+ * dsh-report · GitLab 提交同步引擎
  *
  * 职责（CONTRACTS.md §4）：`coverage / getSelection / listCandidates / saveSelection / status / start / cancel`。
  *

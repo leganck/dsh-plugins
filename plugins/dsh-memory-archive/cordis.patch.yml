@@ -2,7 +2,7 @@
 # Install with plugin_manager(action: "install_bundle", target: "<abs dir of this package>").
 - insert:
     - id: memory-archive
-      name: '@local/dsh-memory-archive'
+      name: 'dsh-memory-archive'
       config:
         # `~`, `$DSH_HOME`, `$HOME` and `%USERPROFILE%` are expanded by the plugin;
         # quoted because a bare `~` is YAML null. Defaults to the user's DSH home so

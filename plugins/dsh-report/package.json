@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-report",
+  "name": "dsh-report",
   "version": "0.3.4",
   "private": true,
   "type": "module",

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build the distributable artifacts for @local/dsh-memory-archive.
+  Build the distributable artifacts for dsh-memory-archive.
 
 .DESCRIPTION
   Repeatable, and it refuses to ship an unverified build:
@@ -46,7 +46,7 @@ $version = $pkg.version
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-Write-Host "== @local/dsh-memory-archive $version =="
+Write-Host "== dsh-memory-archive $version =="
 Write-Host "   package : $root"
 Write-Host "   node    : $NodeExe ($(& $NodeExe -v))"
 Write-Host ''

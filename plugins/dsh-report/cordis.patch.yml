@@ -5,7 +5,7 @@
 # cordis.patch.yml 里按 id: dsh-report 覆盖 —— 用户补丁层在所有 bundle 层之后应用。
 - insert:
     - id: dsh-report
-      name: '@local/dsh-report'
+      name: 'dsh-report'
       config:
         # 空 = <DSH_HOME>/dsh-report
         dataDir: ''

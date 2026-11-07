@@ -115,7 +115,7 @@
   },
   "plugins": [
     {
-      "name": "@local/dsh-code-index",
+      "name": "dsh-code-index",
       "title": {
         "en": "Code Index",
         "zh": "代码索引"
@@ -171,7 +171,7 @@
       ]
     },
     {
-      "name": "@local/dsh-memory-archive",
+      "name": "dsh-memory-archive",
       "title": {
         "en": "Memory Archive",
         "zh": "会话记忆归档"
@@ -221,7 +221,7 @@
       ]
     },
     {
-      "name": "@local/dsh-multiroot",
+      "name": "dsh-multiroot",
       "title": {
         "en": "Multiroot",
         "zh": "多根工作空间"
@@ -274,7 +274,7 @@
       ]
     },
     {
-      "name": "@local/dsh-report",
+      "name": "dsh-report",
       "title": {
         "zh": "工作报告",
         "en": "Work Reports"

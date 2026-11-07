@@ -23,7 +23,7 @@ UI 走 DSH 三处插槽（`sidebar.panellist` / `main` / `settings.section`）�
 ## 安装
 
 见 [INSTALL.md](INSTALL.md)。一句话：`plugin_manager install_bundle` 指向本包或
-`release/local-dsh-report-<version>.tgz`。
+`release/dsh-report-<version>.tgz`。
 
 ## 配置
 

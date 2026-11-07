@@ -64,7 +64,7 @@ git+https://github.com/leganck/dsh-plugins.git#<commit>&path:/plugins/dsh-code-i
 | `version` 必须是**精确 SemVer** | `0.10.0` ✅ / `^0.10.0`、`0.10` ❌ |
 | `commit` 必须是**小写 40 位** | 生成器直接取 `git rev-parse HEAD` |
 | `source.url` 必须 https + canonical + ≥2 段路径 + 不能是 tarball | `.../dsh-plugins.git` ✅ |
-| 插件 `name` 必须是合法 npm 包名，且索引内唯一 | `@local/dsh-code-index` ✅ |
+| 插件 `name` 必须是合法 npm 包名，且索引内唯一 | `dsh-code-index` ✅ |
 | `icon` 相对路径按**索引 URL** 解析 | 生成器写 `../plugins/<name>/icon.svg` → 解析到同源 https |
 | 被引用的 `category` / `labels` / `sortKeys` id 必须先在 `metadata` 里声明 | 生成器统一声明 |
 

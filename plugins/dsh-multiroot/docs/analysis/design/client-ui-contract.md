@@ -52,7 +52,7 @@ and a `./client` export beside the bundle patch.
 
 ```js
 window.__ModuleLoader__.load({
-  id: '@local/my-decoration',
+  id: 'my-decoration',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -733,7 +733,7 @@ settings.section
 ### L2 —— 右栏多根树（**必须自定义通道**）
 
 ```
-sidebarRightTabs.register({ id:"@local/dsh-multiroot", kind:"multiroot", priority:"builtin", title })
+sidebarRightTabs.register({ id:"dsh-multiroot", kind:"multiroot", priority:"builtin", title })
 sidebar.right.pane.tab        (key = 你的 id)      → MultiRootBody
 sidebar.right.pane.tab.title  (key = 你的 id)      → 标题 + 根数 chip
 sidebar.right.tab.multiroot.actions (list/session) → 头部动作（刷新/折叠/加根）
@@ -795,7 +795,7 @@ export const inject = [];           // 需要 settings/webServer/typert 时在�
 
 ```json
 {
-  "name": "@local/dsh-multiroot",
+  "name": "dsh-multiroot",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -822,7 +822,7 @@ export const inject = [];           // 需要 settings/webServer/typert 时在�
 
 ```js
 window.__ModuleLoader__.load({
-  id: "@local/dsh-multiroot",                     // ← 必须严格等于 package.json 的 name
+  id: "dsh-multiroot",                     // ← 必须严格等于 package.json 的 name
   factory(require) {
     const React = require("react");
     const h = React.createElement;

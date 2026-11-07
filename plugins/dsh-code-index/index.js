@@ -1,5 +1,5 @@
 /**
- * @local/dsh-code-index —— 本地代码库混合检索插件（纯 JS）
+ * dsh-code-index —— 本地代码库混合检索插件（纯 JS）
  *
  * 四个工具：
  *   code_index         建库 / 增量刷新（写操作，串行）

@@ -8,7 +8,7 @@
 # 用户补丁层在所有 bundle 层之后应用，且能跨插件升级保留。
 - insert:
     - id: code-index
-      name: '@local/dsh-code-index'
+      name: 'dsh-code-index'
       config:
         roots: []
         # 默认 keywords-only，保证 bundle 单独安装也一定能加载；

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Install or remove @local/dsh-memory-archive in a DSH profile.
+  Install or remove dsh-memory-archive in a DSH profile.
 
 .DESCRIPTION
   Copies the bundle to <DshHome>\bundles\dsh-memory-archive, backs up the target
@@ -143,7 +143,7 @@ $rowName = "$fileUri/$PLUGIN_ENTRY"
 
 $block = @(
   $BEGIN
-  "# @local/dsh-memory-archive  (compaction archive + injected pointer)"
+  "# dsh-memory-archive  (compaction archive + injected pointer)"
   "# written by install.ps1 on " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
   "# rollback: pwsh -File install.ps1 -Profile $Profile -Uninstall"
   "# name must resolve to index.js itself; file:// needs no pnpm in the profile."

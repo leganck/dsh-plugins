@@ -1,6 +1,6 @@
 window.__ModuleLoader__.load({
 	// 官方约定：factory id 必须等于 package.json 的包名（不是 Loader 条目 id）。
-	id: "@local/dsh-code-index",
+	id: "dsh-code-index",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -336,7 +336,7 @@ window.__ModuleLoader__.load({
 			ctx.effect(
 				() => {
 					const style = document.createElement("style");
-					style.dataset.plugin = "@local/dsh-code-index";
+					style.dataset.plugin = "dsh-code-index";
 					style.textContent = CSS;
 					document.head.append(style);
 					return () => style.remove();
@@ -351,7 +351,7 @@ window.__ModuleLoader__.load({
 						ctx.slots.register(
 							{
 								name: "plugins.bundle.config",
-								key: "@local/dsh-code-index",
+								key: "dsh-code-index",
 								locale: NS,
 								inject: () => ({ configForm: ctx.configForms.get("code-index"), t }),
 							},

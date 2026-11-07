@@ -1,5 +1,5 @@
 /**
- * @local/dsh-report · Server 侧 JSON API（Client 页面唯一数据来源）
+ * dsh-report · Server 侧 JSON API（Client 页面唯一数据来源）
  *
  * 契约来源：`CONTRACTS.md` §5（HTTP 端点表）。路径前缀 `/plugins/dsh-report/api`，
  * 由 index.js 以 `ctx.webServer.register({ kind:'prefix', path, handler })` 挂载；
@@ -23,7 +23,7 @@
  * }
  * ```
  *
- * @module @local/dsh-report/lib/api
+ * @module dsh-report/lib/api
  */
 
 import { createHash } from 'node:crypto'
