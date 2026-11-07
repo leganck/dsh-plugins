@@ -703,10 +703,13 @@ export function listCoverageRows(db, query) {
   const rows = stmt(
     db,
     `SELECT c.connection_id, c.project_id, c.authored_date,
-            COALESCE(r.path_with_namespace, CAST(c.project_id AS TEXT)) AS path_with_namespace
+            COALESCE(r.path_with_namespace, CAST(c.project_id AS TEXT)) AS path_with_namespace,
+            COALESCE(s.additions, 0) AS additions, COALESCE(s.deletions, 0) AS deletions
      FROM commits c
      LEFT JOIN repositories r
        ON r.connection_id = c.connection_id AND r.project_id = c.project_id
+     LEFT JOIN commit_stats s
+       ON s.connection_id = c.connection_id AND s.project_id = c.project_id AND s.commit_id = c.commit_id
      ${where}
      ORDER BY c.authored_date ASC`,
   ).all(...args)
@@ -715,6 +718,8 @@ export function listCoverageRows(db, query) {
     projectId: num(row.project_id),
     pathWithNamespace: str(row.path_with_namespace),
     authoredDate: str(row.authored_date),
+    additions: num(row.additions),
+    deletions: num(row.deletions),
   }))
 }
 

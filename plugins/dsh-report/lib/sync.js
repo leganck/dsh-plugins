@@ -396,10 +396,14 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
           activeDays: new Set(),
           latestCommitDate: '',
           days: new Map(),
+          additions: 0,
+          deletions: 0,
         }
         repoMap.set(key, repo)
       }
       repo.commitCount += 1
+      repo.additions += Number(row.additions ?? 0) || 0
+      repo.deletions += Number(row.deletions ?? 0) || 0
       if (!repo.firstCommitDate || date < repo.firstCommitDate) repo.firstCommitDate = date
       if (!repo.lastCommitDate || date > repo.lastCommitDate) repo.lastCommitDate = date
       repo.activeDays.add(date)
@@ -418,6 +422,8 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
         lastCommitDate: repo.lastCommitDate,
         activeDayCount: repo.activeDays.size,
         latestCommitDate: repo.latestCommitDate,
+        additions: repo.additions,
+        deletions: repo.deletions,
         contributionDays: [...repo.days.entries()]
           .map(([date, count]) => ({ date, count }))
           .sort((left, right) => (left.date < right.date ? -1 : left.date > right.date ? 1 : 0)),
@@ -434,6 +440,8 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
       )
 
     const datedCount = [...repoMap.values()].reduce((sum, repo) => sum + repo.commitCount, 0)
+    const totalAdditions = [...repoMap.values()].reduce((sum, repo) => sum + repo.additions, 0)
+    const totalDeletions = [...repoMap.values()].reduce((sum, repo) => sum + repo.deletions, 0)
     const dateDistribution = [...dateMap.entries()]
       .map(([date, count]) => ({ date, count }))
       .sort((left, right) => (left.date < right.date ? 1 : left.date > right.date ? -1 : 0))
@@ -447,6 +455,8 @@ export function createSyncService({ db, config, gitlabForConnection, logger } = 
         firstCommitDate,
         lastCommitDate,
         activeDayCount: summaryDates.size,
+        additions: totalAdditions,
+        deletions: totalDeletions,
       },
       repos,
       dateDistribution,
