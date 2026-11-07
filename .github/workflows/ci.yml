@@ -19,9 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin:
-          - dsh-multiroot
-          - dsh-memory-archive
+        plugin:          - dsh-memory-archive
           - dsh-code-index
           - dsh-report
     steps:

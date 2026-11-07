@@ -214,7 +214,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 2. 当前会话 cwd；
 3. 从 cwd 向上找到的 `.dshworkspace.json`。
 
-多根声明与 dsh-multiroot 插件共用同一份文件：
+多根声明使用同一份 `.dshworkspace.json` 格式：
 
 ```json
 // D:/Projects/.dshworkspace.json

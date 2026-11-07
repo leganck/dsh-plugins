@@ -19,7 +19,6 @@ importers:
 
   plugins/dsh-memory-archive: {}
 
-  plugins/dsh-multiroot: {}
 
 packages:
 
