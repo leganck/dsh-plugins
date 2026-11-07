@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "压缩归档",
-    "description": "把每次压缩落成可检索的 segment_NNN.md（含 checkpoint 摘要与被压缩区间的原始轮次），并维护 INDEX.md。"
+    "title": "会话记忆归档",
+    "description": "每次压缩把被折叠的逐字轮次写成可 grep 的段落文件，维护索引并注入指针，让早期工具输出在长会话里仍可检索。"
   }
 }

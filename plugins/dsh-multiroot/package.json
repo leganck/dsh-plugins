@@ -1,6 +1,6 @@
 {
   "name": "dsh-multiroot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "DSH bundle: Cursor-style multi-root workspace — a root registry resolved from .dshworkspace.json, plus root-scoped tools. Scaffold: registry + workspace_roots today; root_write/root_edit/root_run are designed but not implemented.",
@@ -13,14 +13,16 @@
     ".": {
       "default": "./index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "docs"
+    "docs",
+    "locale/*.json"
   ],
   "dsh": {
     "bundle": {

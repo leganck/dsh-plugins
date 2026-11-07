@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "多根工作空间",
+    "description": "Cursor 式多根工作空间：用 .dshworkspace.json 声明多个根目录，工作流可以跨根读取与操作。"
+  }
+}
