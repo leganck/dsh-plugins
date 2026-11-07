@@ -730,3 +730,25 @@ test('辅助函数：localBoundary / extractStats / extractCherryPickSource', ()
   assert.equal(extractCherryPickSource('fix\n\ncherry picked from commit ghi789'), 'ghi789')
   assert.equal(extractCherryPickSource('fix: nothing'), '')
 })
+
+test('多连接：一次任务同步多个 GitLab 连接', async (t) => {
+  const db = tempDb(t)
+  const CONN2 = 'conn-2'
+  const PROJECT2 = 22
+  selectProject(db, PROJECT, CONN)
+  selectProject(db, PROJECT2, CONN2)
+  const { client } = stubClient({
+    projects: {
+      [PROJECT]: [[gitlabCommit({ id: 'sha-a', authored_date: '2026-10-21T10:00:00+08:00', committed_date: '2026-10-21T10:00:00+08:00' })]],
+      [PROJECT2]: [[gitlabCommit({ id: 'sha-b', authored_date: '2026-10-22T10:00:00+08:00', committed_date: '2026-10-22T10:00:00+08:00' })]],
+    },
+  })
+  const svc = makeService(db, client)
+  const started = await svc.start({ connectionIds: [CONN, CONN2], ...WINDOW })
+  assert.equal(started.totalProjects, 2)
+  const job = await svc.waitForJob(started.jobId)
+  assert.equal(job.status, 'succeeded')
+  assert.equal(job.progress.syncedProjects, 2)
+  assert.equal(listCommitsInPeriod(db, WINDOW).length, 2)
+  assert.equal(job.scope.connectionIds.length, 2)
+})

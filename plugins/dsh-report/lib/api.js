@@ -1144,8 +1144,15 @@ async function startSync(rt, body) {
     if (!Array.isArray(body.projectIds)) throw new ReportError('projectIds 必须是数组', 'VALIDATION')
     projectIds = body.projectIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
   }
+  let connectionIds
+  if (body.connectionIds !== undefined) {
+    if (!Array.isArray(body.connectionIds)) throw new ReportError('connectionIds 必须是数组', 'VALIDATION')
+    connectionIds = body.connectionIds.map((value) => text(value)).filter(Boolean)
+    if (!connectionIds.length) throw new ReportError('connectionIds 不能为空数组', 'VALIDATION')
+  }
   const job = await syncCall(rt, 'start', {
     connectionId: text(body.connectionId),
+    ...(connectionIds ? { connectionIds } : {}),
     startDate,
     endDate,
     ...(projectIds ? { projectIds } : {}),
