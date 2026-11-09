@@ -1,6 +1,6 @@
 {
   "name": "dsh-report",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "private": true,
   "type": "module",
   "description": "DSH bundle: GitLab 提交同步 + 确定性统计 + AI 报告生成（共用生成会话、无数据自动同步、窗口联动；报告列表/详情/统计/同步、多 GitLab 连接、作者别名、模板与写作契约、9 个 Agent 工具）。",
