@@ -25,7 +25,8 @@ const SKIP_REASON = goSourceAvailable()
 
 test('默认模板与 guidance 与 Go report 侧逐字节一致', { skip: SKIP_REASON }, () => {
   const go = readGoDomainStrings()
-  for (const key of ['week', 'month', 'quarter', 'year']) {
+  // 周报模板/guidance 已按插件产品需求自定义（编号清单格式），不再与 Go 逐字节比较。
+  for (const key of ['month', 'quarter', 'year']) {
     assert.equal(DEFAULT_TEMPLATES[key], go.templates[key], `template ${key} 与 templates.go 不一致`)
     assert.equal(DEFAULT_GUIDANCE[key], go.guidance[key], `guidance ${key} 与 templates.go 不一致`)
   }
@@ -56,6 +57,13 @@ test('分页 hint 与 Go gather.go 逐字节一致', { skip: SKIP_REASON }, () =
   const go = readGoDomainStrings()
   assert.equal(GATHER_HINT_MORE, go.gatherHints.more)
   assert.equal(GATHER_HINT_COMPLETE, go.gatherHints.complete)
+})
+
+test('周报默认模板使用「本周完成」编号清单格式', () => {
+  assert.match(DEFAULT_TEMPLATES.week, /## 本周完成/)
+  assert.match(DEFAULT_TEMPLATES.week, /1\. SPLAT-5583  /)
+  assert.match(DEFAULT_GUIDANCE.week, /云效编号/)
+  assert.match(DEFAULT_GUIDANCE.week, /版本号修改.*忽略/)
 })
 
 test('默认模板里保留占位符原样（替换只发生在 brief 拼装时）', { skip: SKIP_REASON }, () => {
