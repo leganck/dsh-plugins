@@ -115,8 +115,8 @@ test('HOST_INSTRUCTIONS：包含 4 条行为约束的关键措辞', () => {
   for (const keyword of ['report_commits', 'report_stats', 'hasMore/truncated=true', '不要编造业务背景']) {
     assert.equal(HOST_INSTRUCTIONS.includes(keyword), true, `HOST_INSTRUCTIONS 缺少 ${keyword}`)
   }
-  // 公共段是 4 类 guidance 的前缀（Go: reportGuidanceCommon + 追加句）
-  for (const type of ['week', 'month', 'quarter', 'year']) {
+  // 公共段是月/季/年 guidance 的前缀；周报使用独立的编号清单 guidance。
+  for (const type of ['month', 'quarter', 'year']) {
     assert.equal(DEFAULT_GUIDANCE[type].startsWith(GUIDANCE_COMMON), true)
   }
 })
