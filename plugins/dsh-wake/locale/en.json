@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session wake",
+    "description": "Run a script in the background and wake the session when a stdout line matches."
+  }
+}

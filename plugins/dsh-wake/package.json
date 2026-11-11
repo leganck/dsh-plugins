@@ -1,0 +1,40 @@
+{
+  "name": "dsh-wake",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run a background script and wake the DSH session when a stdout line matches.",
+  "license": "MIT",
+  "author": "leganck",
+  "scripts": {
+    "test": "node --test test.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "title": {
+        "zh": "会话唤醒",
+        "en": "Session wake"
+      },
+      "description": {
+        "zh": "后台跑脚本，stdout 打出一行标记后唤醒发起会话。",
+        "en": "Run a script in the background and wake the session when a stdout line matches."
+      },
+      "category": "workspace"
+    }
+  }
+}

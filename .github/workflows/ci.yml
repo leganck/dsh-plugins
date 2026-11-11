@@ -19,9 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin:          - dsh-memory-archive
+        plugin:
+          - dsh-memory-archive
           - dsh-code-index
           - dsh-report
+          - dsh-wake
     steps:
       - uses: actions/checkout@v4
         with:

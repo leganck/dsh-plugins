@@ -1,0 +1,5 @@
+# dsh-wake：后台脚本打出一行标记后唤醒发起会话。
+- insert:
+    - id: dsh-wake
+      name: 'dsh-wake'
+      config: {}

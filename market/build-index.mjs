@@ -48,6 +48,7 @@ const LABEL_TITLES = {
   reports: { en: 'Reports', zh: '报告' },
   statistics: { en: 'Statistics', zh: '统计' },
   sync: { en: 'Sync', zh: '同步' },
+  automation: { en: 'Automation', zh: '自动化' },
 }
 
 const isLocalized = (v) => typeof v === 'object' && v !== null && typeof v.en === 'string'

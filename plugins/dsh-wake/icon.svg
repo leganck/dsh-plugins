@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Session wake">
+  <rect width="64" height="64" rx="14" fill="#14532d"/>
+  <path d="M32 14a4 4 0 0 1 4 4v2.2a12 12 0 0 1 8 11.3V38l3.2 3.2A2 2 0 0 1 45.8 45H18.2a2 2 0 0 1-1.4-3.4L20 38.4V31.5a12 12 0 0 1 8-11.3V18a4 4 0 0 1 4-4z" fill="#ecfccb"/>
+  <circle cx="32" cy="50" r="3.2" fill="#bef264"/>
+  <path d="M46 18c3.2 2.4 5 6 5 10" fill="none" stroke="#bef264" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M18 18c-3.2 2.4-5 6-5 10" fill="none" stroke="#bef264" stroke-width="2.4" stroke-linecap="round"/>
+</svg>

@@ -19,6 +19,7 @@ importers:
 
   plugins/dsh-memory-archive: {}
 
+  plugins/dsh-wake: {}
 
 packages:
 
