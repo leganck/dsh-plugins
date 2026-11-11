@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import { test } from 'node:test'
 
 import {
@@ -94,7 +95,7 @@ function harness(options = {}) {
       prompts.push(request)
       if (options.failPrompt) throw new Error('session gone')
     },
-    resolveCwd: (requested) => requested || 'D:\\work',
+    resolveCwd: (requested) => requested || path.resolve('work'),
     now: clock.now,
     schedule: clock.schedule,
     clearSchedule: clock.clearSchedule,

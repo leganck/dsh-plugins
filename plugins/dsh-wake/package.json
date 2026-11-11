@@ -6,6 +6,12 @@
   "description": "Run a background script and wake the DSH session when a stdout line matches.",
   "license": "MIT",
   "author": "leganck",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leganck/dsh-plugins.git",
+    "directory": "plugins/dsh-wake"
+  },
+  "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-wake",
   "scripts": {
     "test": "node --test test.mjs"
   },
