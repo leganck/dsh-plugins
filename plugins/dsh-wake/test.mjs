@@ -8,6 +8,7 @@ import {
   compilePattern,
   createWakeHost,
   matchLine,
+  stripTerminalControls,
 } from './index.js'
 
 function fakeClock() {
@@ -105,6 +106,12 @@ async function drain(clock) {
   await clock.advance(POLL_MS)
   await clock.advance(COALESCE_MS)
 }
+
+test('终端控制符不会拆开唤醒行', () => {
+  const cleaned = stripTerminalControls('\u001b[32mDSH_WAKE: 已合并\u001b[0m\r\n')
+  const { re } = compilePattern()
+  assert.equal(matchLine(re, cleaned.trim()), '已合并')
+})
 
 test('默认正则取 DSH_WAKE 后面的文本', () => {
   const { re } = compilePattern()

@@ -23,7 +23,7 @@ const CONTINUE = '请按这段消息继续；不要在本轮里 sleep 等待。'
 
 export function apply(ctx) {
   const host = createWakeHost({
-    spawn: (spec) => ctx.subprocess.spawn(spec),
+    spawn: (spec) => spawnScript(ctx, spec),
     prompt: (request, signal) => ctx.sessionController.prompt(request, signal),
     resolveCwd: (requested, sessionId) => resolveCwd(ctx, requested, sessionId),
   })
@@ -64,6 +64,25 @@ export function clipBytes(text, max) {
   let end = max
   while (end > 0 && (buf[end] & 0b11000000) === 0b10000000) end -= 1
   return `${buf.subarray(0, end).toString('utf8')}…`
+}
+
+/** 去掉终端转义、回车覆盖和退格，只留脚本实际打印的文本。 */
+export function stripTerminalControls(text) {
+  let value = String(text ?? '')
+  value = value.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  value = value.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+  value = value.replace(/\u001b[()][0-9A-Za-z]/g, '')
+  value = value.replace(/[\u0000-\u0008\u000b-\u001a\u001c-\u001f]/g, '')
+  const lines = value.split('\n')
+  return lines.map((line) => {
+    let out = ''
+    for (const char of line) {
+      if (char === '\r') out = ''
+      else if (char === '\b') out = out.slice(0, -1)
+      else out += char
+    }
+    return out
+  }).join('\n')
 }
 
 export function tailBytes(text, max) {
@@ -193,7 +212,7 @@ export function createWakeHost(deps) {
       run.stderrText = tailBytes(run.stderrText + text, STDERR_TAIL)
       return
     }
-    run.stdoutBuffer += text
+    run.stdoutBuffer += stripTerminalControls(text)
     const parts = run.stdoutBuffer.split(/\r?\n/)
     run.stdoutBuffer = parts.pop() ?? ''
     for (const line of parts) onLine(run, line)
@@ -371,6 +390,53 @@ function normalizeArgv(value) {
   return argv
 }
 
+/**
+ * 优先用终端启动。管道在 Windows 上会缓冲整段输出，进程退出前读不到唤醒行。
+ * 没有 spawnTerminal 时退回管道，测试用的 spawn 不受影响。
+ */
+function spawnScript(ctx, spec) {
+  const subprocess = ctx.subprocess
+  if (typeof subprocess.spawnTerminal !== 'function') return subprocess.spawn(spec)
+  let terminal
+  const ready = subprocess.spawnTerminal({
+    argv: spec.argv,
+    cwd: spec.cwd,
+    env: spec.env,
+    rows: 24,
+    cols: 120,
+    terminalType: 'dumb',
+    graceMs: spec.graceMs,
+    signal: spec.signal,
+  }).then((handle) => {
+    terminal = handle
+  })
+  const chunks = []
+  let offset = 0
+  ready.then(() => {
+    terminal.output.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    })
+  }).catch(() => {})
+  return {
+    collected: {
+      stdout: {
+        readFrom(from) {
+          const all = Buffer.concat(chunks)
+          const start = Math.max(0, from)
+          const text = all.subarray(start).toString('utf8')
+          offset = all.length
+          return { text, nextOffset: offset }
+        },
+      },
+      stderr: { readFrom: () => ({ text: '', nextOffset: 0 }) },
+    },
+    done: ready.then(() => terminal.done),
+    terminate() {
+      ready.then(() => terminal?.terminate()).catch(() => {})
+    },
+  }
+}
+
 function resolveCwd(ctx, requested, sessionId) {
   if (requested !== undefined && requested !== null && String(requested).trim()) {
     const cwd = String(requested)
@@ -448,15 +514,39 @@ function registerTools(ctx, host) {
       },
       additionalProperties: false,
     },
-    output: { schema: { type: 'object' }, render: renderResult },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          runs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                status: { type: 'string' },
+                wakeCount: { type: 'number' },
+                exitCode: { description: '退出码；进程还没退出或终端路径拿不到时省略' },
+                lastMatch: { type: 'string' },
+                lastError: { type: 'string' },
+              },
+              required: ['id', 'status', 'wakeCount', 'lastMatch', 'lastError'],
+            },
+          },
+        },
+        required: ['runs'],
+      },
+      render: renderResult,
+    },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const runs = host.status({ sessionId: sessionIdOf(exec), runId: args?.runId }).map(withoutFinished)
       const summary = runs.length
         ? runs.map((run) => {
             const exit = run.exitCode === null ? '' : ` 退出码 ${run.exitCode}`
+            const match = run.lastMatch ? ` 最近匹配：${run.lastMatch}` : ''
             const error = run.lastError ? ` 错误：${run.lastError}` : ''
-            return `${run.id} ${run.status} 已唤醒 ${run.wakeCount} 次${exit}${error}`
+            return `${run.id} ${run.status} 已唤醒 ${run.wakeCount} 次${exit}${match}${error}`
           }).join('\n')
         : '当前会话没有后台脚本'
       return { summary, runs }
