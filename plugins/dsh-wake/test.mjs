@@ -180,6 +180,17 @@ test('非 0 退出唤醒一次并带 stderr', async () => {
   assert.match(prompts[0].content[0].text, /boom/)
 })
 
+test('退出时还没轮询到的标记行也算命中', async () => {
+  const { spawned, prompts, host } = harness()
+  const run = host.start({ sessionId: 'session-a', argv: ['node', 'watch.mjs'], label: '等合并' })
+  spawned[0].proc.push('stdout', 'DSH_WAKE: 已经合并\n')
+  spawned[0].proc.exit({ exitCode: 0, signal: null })
+  await run.finished
+  assert.equal(prompts.length, 1)
+  assert.match(prompts[0].content[0].text, /已经合并/)
+  assert.doesNotMatch(prompts[0].content[0].text, /没有打出唤醒行/)
+})
+
 test('0 退出且没有标记行也唤醒一次', async () => {
   const { spawned, prompts, host } = harness()
   const run = host.start({ sessionId: 'session-a', argv: ['node', 'watch.mjs'] })

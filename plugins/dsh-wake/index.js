@@ -235,10 +235,13 @@ export function createWakeHost(deps) {
 
   async function settle(run, outcome) {
     if (run.closed) return
-    run.closed = true
     if (run.pollTimer) clearSchedule(run.pollTimer)
     run.pollTimer = null
+    // 先读完已经到达的输出。closed 置位后 onLine 会丢掉标记行。
+    readStream(run, 'stdout')
+    readStream(run, 'stderr')
     flushPartial(run)
+    run.closed = true
     if (run.coalesceTimer) {
       clearSchedule(run.coalesceTimer)
       run.coalesceTimer = null
