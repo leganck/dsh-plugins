@@ -274,7 +274,8 @@ export function createWakeHost(deps) {
         run.pendingText = null
         await deliver(run, buildWakeText(run.label, pending), pending)
       }
-      if (run.exitCode === 0) {
+      const cleanExit = run.exitCode === 0 || (run.exitCode === null && !run.signal && !outcome?.error)
+      if (cleanExit) {
         if (!run.matched) {
           await deliver(run, buildWakeText(run.label, '脚本已结束，没有打出唤醒行。'))
         }

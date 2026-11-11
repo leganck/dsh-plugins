@@ -198,6 +198,17 @@ test('退出时还没轮询到的标记行也算命中', async () => {
   assert.doesNotMatch(prompts[0].content[0].text, /没有打出唤醒行/)
 })
 
+test('终端正常退出没有退出码时，匹配过就不再补发', async () => {
+  const { spawned, prompts, host } = harness()
+  const run = host.start({ sessionId: 'session-a', argv: ['node', 'watch.mjs'], label: '自检' })
+  spawned[0].proc.push('stdout', 'DSH_WAKE: 已合并\n')
+  spawned[0].proc.exit({ exitCode: null, signal: null })
+  await run.finished
+  assert.equal(prompts.length, 1)
+  assert.match(prompts[0].content[0].text, /已合并/)
+  assert.doesNotMatch(prompts[0].content[0].text, /信号/)
+})
+
 test('0 退出且没有标记行也唤醒一次', async () => {
   const { spawned, prompts, host } = harness()
   const run = host.start({ sessionId: 'session-a', argv: ['node', 'watch.mjs'] })
