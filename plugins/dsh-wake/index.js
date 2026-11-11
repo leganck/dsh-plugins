@@ -449,7 +449,14 @@ function registerTools(ctx, host) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const runs = host.status({ sessionId: sessionIdOf(exec), runId: args?.runId }).map(withoutFinished)
-      return { summary: runs.length ? `${runs.length} 个后台脚本` : '当前会话没有后台脚本', runs }
+      const summary = runs.length
+        ? runs.map((run) => {
+            const exit = run.exitCode === null ? '' : ` 退出码 ${run.exitCode}`
+            const error = run.lastError ? ` 错误：${run.lastError}` : ''
+            return `${run.id} ${run.status} 已唤醒 ${run.wakeCount} 次${exit}${error}`
+          }).join('\n')
+        : '当前会话没有后台脚本'
+      return { summary, runs }
     },
   })
 
