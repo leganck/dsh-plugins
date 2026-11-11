@@ -544,10 +544,11 @@ function registerTools(ctx, host) {
       const runs = host.status({ sessionId: sessionIdOf(exec), runId: args?.runId }).map(withoutFinished)
       const summary = runs.length
         ? runs.map((run) => {
-            const exit = run.exitCode === null ? '' : ` 退出码 ${run.exitCode}`
-            const match = run.lastMatch ? ` 最近匹配：${run.lastMatch}` : ''
+            const exit = run.exitCode === null ? ' 无退出码' : ` 退出码 ${run.exitCode}`
+            const signal = run.signal ? ` 信号 ${run.signal}` : ''
+            const match = run.lastMatch ? ` 最近匹配：${run.lastMatch}` : ' 无匹配'
             const error = run.lastError ? ` 错误：${run.lastError}` : ''
-            return `${run.id} ${run.status} 已唤醒 ${run.wakeCount} 次${exit}${match}${error}`
+            return `${run.id} ${run.status} 已唤醒 ${run.wakeCount} 次${exit}${signal}${match}${error}`
           }).join('\n')
         : '当前会话没有后台脚本'
       return { summary, runs }
