@@ -161,6 +161,7 @@ export function createWakeHost(deps) {
       stdoutOffset: 0,
       stderrOffset: 0,
       stdoutBuffer: '',
+      stdoutText: '',
       stderrText: '',
       wakeCount: 0,
       matched: false,
@@ -212,7 +213,9 @@ export function createWakeHost(deps) {
       run.stderrText = tailBytes(run.stderrText + text, STDERR_TAIL)
       return
     }
-    run.stdoutBuffer += stripTerminalControls(text)
+    const visible = stripTerminalControls(text)
+    run.stdoutText = tailBytes(run.stdoutText + visible, COLLECT_BYTES)
+    run.stdoutBuffer += visible
     const parts = run.stdoutBuffer.split(/\r?\n/)
     run.stdoutBuffer = parts.pop() ?? ''
     for (const line of parts) onLine(run, line)
@@ -353,6 +356,7 @@ export function createWakeHost(deps) {
   return {
     start,
     stop,
+    stopRun,
     status,
     dispose,
     /** 测试用：立刻读一次已经到点的输出，不等轮询。 */
