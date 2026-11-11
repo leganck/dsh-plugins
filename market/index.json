@@ -275,17 +275,17 @@
         "keywords": [],
         "labels": [],
         "sortKeys": {
-          "published": 1794392983
+          "published": 1794393548
         }
       },
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 1794392983,
+          "publishTimestamp": 1794393548,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "a4f88f6f4fdff9a0e5cd651ae038017f19c4fa85",
+            "commit": "304970cfd972951eafc76b29350897eb88d4b058",
             "path": "plugins/dsh-wake"
           }
         }
