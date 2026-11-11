@@ -27,6 +27,12 @@
           "en": "Retrieval",
           "zh": "检索"
         }
+      },
+      "workspace": {
+        "title": {
+          "en": "Workspace",
+          "zh": "工作空间"
+        }
       }
     },
     "labels": {
@@ -243,6 +249,44 @@
           },
           "engines": {
             "dsh": "^0.2.0-rc.2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dsh-wake",
+      "title": {
+        "zh": "会话唤醒",
+        "en": "Session wake"
+      },
+      "description": {
+        "zh": "后台跑脚本，stdout 打出一行标记后唤醒发起会话。",
+        "en": "Run a script in the background and wake the session when a stdout line matches."
+      },
+      "icon": "../plugins/dsh-wake/icon.svg",
+      "author": "leganck",
+      "homepage": "https://github.com/leganck/dsh-plugins/tree/main/plugins/dsh-wake",
+      "repository": {
+        "url": "https://github.com/leganck/dsh-plugins",
+        "directory": "plugins/dsh-wake"
+      },
+      "metadata": {
+        "category": "workspace",
+        "keywords": [],
+        "labels": [],
+        "sortKeys": {
+          "published": 1794392491
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1794392491,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/leganck/dsh-plugins.git",
+            "commit": "60ebbf3912b579fb9aa6e0136a66a945cbb73bea",
+            "path": "plugins/dsh-wake"
           }
         }
       ]
