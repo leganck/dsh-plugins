@@ -1,0 +1,19 @@
+# gitleaks 配置：默认规则 + 本项目允许的占位符与测试夹具。
+# 用法：gitleaks detect --source . --config .gitleaks.toml --redact
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "示例与占位符"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(?i)(^|/)plugins/[^/]+/(test|tests?)/''',
+  '''(?i)(^|/)plugins/[^/]+/test[^/]*\.(mjs|js|ts)$''',
+  '''(?i)(^|/)server/[^/]+/tests?/''',
+  '''(?i)(^|/)server/[^/]+/selftest\.py$''',
+]
+regexes = [
+  '''REPLACE_WITH_[A-Z_]+''',
+  '''(?i)change[-_]me[-\w]*''',
+  '''(?i)(your|example|placeholder|dummy|fake|test|mock)[-_]?(token|key|secret|password|pat)[-_]?[\w-]*''',
+]

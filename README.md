@@ -180,6 +180,22 @@ node test.mjs                              # 自动夹具
 node test.mjs --repo D:/Code/your-repo     # 指定真实仓库（显式优先，不会偷偷换夹具）
 ```
 
+## 密钥扫描
+
+两层，配置都在仓库里：
+
+```bash
+git config core.hooksPath .githooks     # 启用本地钩子（每个克隆做一次）
+```
+
+| 层 | 文件 | 行为 |
+|---|---|---|
+| 本地 pre-commit | `.githooks/pre-commit` | 只扫**本次新增行**；命中 `sk-` / `glpat-` / `ghp_` / `AKIA` / 私钥头 / 长 token 赋值即阻断 |
+| CI | `.github/workflows/secret-scan.yml` + `.gitleaks.toml` | push/PR 扫**全历史**；密钥删掉也拦，因为进过提交就算泄露 |
+
+误报处理：测试夹具放进 `tests/` 或 `test*.mjs`（白名单已覆盖），其它情况把模式加到
+`.gitleaks.toml` 的 `allowlists`；**不要**用 `--no-verify` 绕过真实凭据。
+
 ## 插件源（market）
 
 仓库自带一个 DSH「插件源」，用户在 **Plugins → Discover → 添加源** 填：

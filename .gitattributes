@@ -14,3 +14,4 @@ Dockerfile text eol=lf
 *.onnx binary
 *.tgz binary
 *.zip binary
+.githooks/* text eol=lf

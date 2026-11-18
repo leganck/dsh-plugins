@@ -1,0 +1,63 @@
+#!/bin/bash
+# 提交前密钥扫描：只看「本次新增的行」，高置信模式命中就阻断。
+# 启用：git config core.hooksPath .githooks
+# 跳过（确认无误时）：git commit --no-verify
+set -uo pipefail
+
+is_allowed() {
+  case "$1" in
+    *.env.example|*.env.sample|*.example) return 0 ;;
+    */tests/*|*/test/*|*/selftest.py) return 0 ;;
+    plugins/*/test*.mjs|plugins/*/test*.js|plugins/*/test*.ts) return 0 ;;
+  esac
+  return 1
+}
+
+PATTERNS=(
+  'sk-[A-Za-z0-9]{20,}'
+  'glpat-[A-Za-z0-9_-]{20,}'
+  'ghp_[A-Za-z0-9]{30,}'
+  'github_pat_[A-Za-z0-9_]{30,}'
+  'AKIA[0-9A-Z]{16}'
+  'xox[baprs]-[A-Za-z0-9-]{10,}'
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  '(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY)[A-Z_]*[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_./+-]{18,}'
+)
+ALLOW_VALUE='REPLACE_WITH|change[-_]me|your[-_]|example|placeholder|dummy|fake|test[-_]?(token|key|secret)|xxx'
+
+files=$(git diff --cached --name-only --diff-filter=ACM || true)
+[ -z "${files:-}" ] && exit 0
+
+mask() {
+  printf '%s' "$1" | sed -E 's|([A-Za-z0-9_-]{4})[A-Za-z0-9_./+-]{8,}|\1***|g'
+}
+
+found=0
+while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  is_allowed "$file" && continue
+  [ -f "$file" ] || continue
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    for pat in "${PATTERNS[@]}"; do
+      if [[ "$line" =~ $pat ]] && ! [[ "$line" =~ $ALLOW_VALUE ]]; then
+        found=1
+        echo "  ✗ $file: $(mask "$line")" >&2
+        break
+      fi
+    done
+  done < <(git diff --cached -U0 -- "$file" | sed -n 's/^+\([^+].*\)$/\1/p')
+done <<< "$files"
+
+if [ "$found" -ne 0 ]; then
+  cat >&2 <<'EOF'
+
+提交被阻止：检测到疑似真实凭据。
+  · 真实凭据 → 改成占位符（REPLACE_WITH_... / change-me），并立即轮换已泄露的值
+  · 测试夹具 → 放进 tests/ 或 test*.mjs，或把该模式加进 .gitleaks.toml 白名单
+  · 确需临时提交 → git commit --no-verify（不建议）
+EOF
+  exit 1
+fi
+exit 0
