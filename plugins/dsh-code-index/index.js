@@ -34,6 +34,8 @@ import { normalizeNamespace, validateScope, describeScope, ScopeError, SCOPE_CON
 import { renderParserHint } from './lib/parser-hints.js'
 import { RepoRegistry } from './lib/repo-registry.js'
 import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
+import { createAutoIndexQueue } from './lib/auto-index.js'
+import { extractPaths, reposFromPaths, resolveRepoRoot } from './lib/repo-touch.js'
 import { resolveAllowedRoots, isInsideRoots } from './lib/workspace-roots.js'
 import z from '@deepseek-ai/schemastery'
 
@@ -178,6 +180,13 @@ const USER_DEFAULTS = {
       reconcileMs: 300000,
       lockTtlMs: 900000,
     },
+    autoIndex: {
+      enabled: true,
+      delayMs: 8000,
+      maxFiles: 20000,
+      maxPerSession: 3,
+      maxWatched: 20,
+    },
     remoteTimeoutMs: 8000,
     remoteRateLimit: null,
   },
@@ -229,6 +238,13 @@ export const Config = z.object({
       maxDelayMs: z.number().default(30000),
       reconcileMs: z.number().default(300000),
       lockTtlMs: z.number().default(900000),
+    }).default({}),
+    autoIndex: z.object({
+      enabled: z.boolean().default(true),
+      delayMs: z.number().default(8000),
+      maxFiles: z.number().default(20000),
+      maxPerSession: z.number().default(3),
+      maxWatched: z.number().default(20),
     }).default({}),
     remoteTimeoutMs: z.number().default(8000),
     remoteRateLimit: nullableNumber(),
@@ -578,7 +594,7 @@ function normalizeConfig(userRaw = {}) {
   if (!Array.isArray(cfg.roots)) throw new ConfigError(`config.roots 必须是数组，收到 ${typeof cfg.roots}`)
   cfg.deprecations = []
   if (cfg.roots.length) {
-    cfg.deprecations.push('roots 已废弃：允许路径改为从 DSH workspace / 会话 cwd / .dshworkspace.json 自动推导')
+    cfg.deprecations.push('roots 已废弃：允许路径从 DSH workspace / 会话 cwd 推导，工作区外仓库显式传 path 即授权')
   }
 
   // ---- 远端推理（remote / rerankRemote）----
@@ -943,13 +959,35 @@ let reconcileTimer = null
     })
   }
 
-  function assertAllowed(repoRoot, exec) {
+  /**
+   * 允许索引的根：workspaceRoot + 会话 cwd。
+   * 工作区外的仓库靠“显式传 path”放行，但必须是 git 仓库（`.git` 目录或 worktree 文件），
+   * 不再依赖多根定义文件。
+   */
+  function isGitRepoRoot(dir) {
+    try {
+      return fs.existsSync(path.join(dir, '.git'))
+    } catch {
+      return false
+    }
+  }
+
+  function assertAllowed(repoRoot, exec, { explicit = false } = {}) {
     if (exec?.trusted) return
     const info = allowedRootsFor(exec)
     if (isInsideRoots(repoRoot, info.roots)) return
-    const where = info.definitionFile ? `；多根定义 ${info.definitionFile}` : ''
+    // 显式点名 + 确实是 git 仓库 = 授权（工作区外的业务仓库都走这条）。
+    if (explicit && isGitRepoRoot(repoRoot)) return
+    // 以前建过索引的仓库（注册表里存在）视为已授权，避免换 cwd 后又要重新点名。
+    try {
+      if (repoRegistry.get(repoRoot)) return
+    } catch {
+      /* 注册表不可用时不放行 */
+    }
     throw new Error(
-      `路径不在当前工作空间内：${repoRoot}\n允许路径：${info.roots.join(', ') || '（无）'}${where}`,
+      `路径不在当前工作空间内：${repoRoot}\n`
+      + `允许路径：${info.roots.join(', ') || '（无）'}\n`
+      + '要索引工作区外的仓库，请显式传 path 且该目录是 git 仓库根目录（一次点名即长期授权）。',
     )
   }
 
@@ -1081,7 +1119,7 @@ let reconcileTimer = null
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         if (!fs.existsSync(repoRoot)) return fail(`目录不存在：${repoRoot}`)
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: Boolean(args?.path) })
         const { store, dbPath } = storeFor(repoRoot)
 
         if (args.status_only) {
@@ -1098,6 +1136,7 @@ let reconcileTimer = null
             dirty: [...autoEntries.values()].filter((e) => e.dirty).length,
             entries: [...autoEntries.values()].map((e) => e.state()),
           }
+          const autoIndexState = autoIndex.stats()
           const workspace = allowedRootsFor(exec)
           const workspaceLine = `允许路径：${workspace.roots.join('、') || '（无）'}（${workspace.sources.join('+') || 'cwd'}）`
           const ignoredLine = scanStats && scanStats.ignored
@@ -1107,7 +1146,7 @@ let reconcileTimer = null
             ? `  跨血统复用：${config.remote.reuse}（同 remote 已按 lineage 自动共享）`
             : null
           return textResult(
-            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, workspace, scope: scopeInfo, reuse: config.remote.reuse },
+            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, autoIndex: autoIndexState, workspace, scope: scopeInfo, reuse: config.remote.reuse },
             [
               `索引状态 ${repoRoot}`,
               `  已入库：${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
@@ -1118,6 +1157,9 @@ let reconcileTimer = null
               autoSync.enabled
                 ? `  自动同步：开（监听 ${autoSync.watching} 个仓库；本仓库${autoEntries.has(repoRoot) ? '已监听' : '未监听'}）`
                 : '  自动同步：关（sync.watch=false）',
+              autoIndexState.enabled
+                ? `  自动建库：队列 ${autoIndexState.queued}${autoIndexState.running ? '（进行中）' : ''}；本仓库${autoEntries.has(repoRoot) ? '已监听' : '未监听'}`
+                : '  自动建库：关（autoIndex.enabled=false）',
               reuseLine,
               scopeLine ? '  ' + scopeLine : null,
               `  ${st.stale ? '索引已过期，运行 code_index 刷新' : '索引是最新的'}`,
@@ -1259,10 +1301,91 @@ let reconcileTimer = null
     }
   }
 
+  /** 触及式识别时关心的工具：这些工具的参数里可能带仓库内路径。 */
+  const TOUCH_TOOLS = new Set([
+    'read', 'edit', 'write', 'ops_read_files', 'ops_inspect_local_file', 'ops_grep', 'ops_glob',
+    'grep', 'glob', 'bash', 'ops_bash', 'pwsh', 'terminal_send', 'terminal_open',
+    'working_directory', 'code_search', 'code_map', 'code_index',
+  ])
+  /** 路径 → 仓库根的解析缓存（worktree 已归并到主仓）。 */
+  const touchCache = new Map()
+
+  const autoIndex = createAutoIndexQueue({
+    config: {
+      enabled: config.autoIndex?.enabled !== false,
+      delayMs: Number(config.autoIndex?.delayMs ?? 8000),
+      maxFiles: Number(config.autoIndex?.maxFiles ?? 20000),
+      maxPerSession: Number(config.autoIndex?.maxPerSession ?? 3),
+    },
+    logger: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
+    isIndexed: (root) => {
+      try {
+        return storeFor(root).store.stats().files > 0
+      } catch {
+        return false
+      }
+    },
+    // 建库动作放在队列里跑：先做一次大小预检，再走和自动同步完全相同的路径。
+    index: async (root) => {
+      try {
+        const st = scanStatus(storeFor(root).store, root, scanOptsOf(config))
+        const limit = Number(config.autoIndex?.maxFiles ?? 20000)
+        if (st.scanned > limit) {
+          throw new Error(`仓库过大（${st.scanned} 个候选文件 > ${limit}），跳过自动建库`)
+        }
+      } catch (error) {
+        if (String(error?.message ?? error).includes('仓库过大')) throw error
+        /* 预检失败就让建库自己报错 */
+      }
+      await runWatchSync(root)
+    },
+  })
+
+  /**
+   * 保证一个仓库「已建库 + 已监听」：
+   * - 建过库 → 只补监听；
+   * - 没建过 → 交给自动建库队列（异步，不阻塞调用方）。
+   */
+  function ensureWatchOrIndex(repoRoot, { reason = 'touch', sessionId = null, priority = 2 } = {}) {
+    let files = 0
+    try {
+      files = storeFor(repoRoot).store.stats().files
+    } catch {
+      files = 0
+    }
+    if (files > 0) {
+      ensureWatch(repoRoot)
+      return 'ready'
+    }
+    if (!config.autoIndex?.enabled) return 'disabled'
+    const result = autoIndex.enqueue(repoRoot, { reason, sessionId, priority })
+    return result.accepted ? 'queued' : result.why
+  }
+
   function ensureWatch(repoRoot) {
     if (!config.sync.watch) return
     const root = path.resolve(repoRoot)
     if (autoEntries.has(root)) return
+    // 监听数量上限：超出时淘汰最久没有活动的，避免跨仓会话把 watcher 越堆越多。
+    const maxWatched = Number(config.autoIndex?.maxWatched ?? 20)
+    while (autoEntries.size >= maxWatched) {
+      let oldestRoot = null
+      let oldestAt = Infinity
+      for (const [watchedRoot, watched] of autoEntries) {
+        const at = Number(watched.lastEventAt || watched.lastSyncAt || 0)
+        if (at < oldestAt) {
+          oldestAt = at
+          oldestRoot = watchedRoot
+        }
+      }
+      if (!oldestRoot) break
+      try {
+        autoEntries.get(oldestRoot)?.stop()
+      } catch {
+        /* 停止失败不影响继续 */
+      }
+      autoEntries.delete(oldestRoot)
+    }
     let stats
     try {
       stats = storeFor(root).store.stats()
@@ -1346,6 +1469,73 @@ let reconcileTimer = null
   hydrateWatchers()
   startReconcile()
 
+  // 自动索引：会话启动建 cwd 仓库；工具调用触及的仓库也入队（跨仓会话）。
+  ctx.effect(() => {
+    const disposers = []
+    const registerAgent = (agent) => {
+      try {
+        if (!agent?.ctx?.on) return
+        const cwd = agent.session?.cwd
+        if (cwd) {
+          const resolved = resolveRepoRoot(cwd, { cache: touchCache })
+          if (resolved) {
+            ensureWatchOrIndex(resolved.root, {
+              reason: 'session',
+              sessionId: agent.id,
+              priority: 2,
+            })
+          }
+        }
+        const onEvent = (_session, event) => {
+          try {
+            if (event?.type !== 'tool/call') return
+            const name = event.data?.name
+            if (!TOUCH_TOOLS.has(name)) return
+            let args = event.data?.arguments
+            if (typeof args === 'string') {
+              try {
+                args = JSON.parse(args)
+              } catch {
+                return
+              }
+            }
+            const paths = extractPaths(args)
+            if (!paths.length) return
+            for (const repo of reposFromPaths(paths, { cache: touchCache })) {
+              ensureWatchOrIndex(repo.root, {
+                reason: 'touch',
+                sessionId: agent.id,
+                priority: 1,
+              })
+            }
+          } catch {
+            /* 单个调用解析失败不影响会话 */
+          }
+        }
+        const dispose = agent.ctx.on('session/event', onEvent)
+        if (typeof dispose === 'function') disposers.push(dispose)
+      } catch (e) {
+        ctx.logger?.warn?.(`dsh-code-index: 挂载自动索引失败：${e?.message ?? e}`)
+      }
+    }
+    const offCreated = typeof ctx.on === 'function'
+      ? ctx.on('agent/created', (payload) => {
+        registerAgent(payload?.agent ?? payload)
+      })
+      : undefined
+    if (typeof offCreated === 'function') disposers.push(offCreated)
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          /* 卸载失败不影响其余 */
+        }
+      }
+      autoIndex.dispose()
+    }
+  }, 'dsh-code-index: auto index')
+
   // ---------------------------------------------------------------- code_search
   registerTool({
     name: 'code_search',
@@ -1382,11 +1572,18 @@ let reconcileTimer = null
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         // 白名单必须在打开/创建索引库之前校验，否则会在任意路径下建出 .dsh-index
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: Boolean(args?.path) })
+        // 没建过库就顺手排进后台队列：这次仍按现有索引回话，不阻塞检索。
+        const ensured = ensureWatchOrIndex(repoRoot, {
+          reason: 'search',
+          sessionId: exec?.agent?.id ?? null,
+          priority: 1,
+        })
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         if (s.chunks === 0) {
-          return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。索引位于 ${dbPath}`)
+          const hint = ensured === 'queued' ? '\n已在后台开始建库，稍后重试即可；建库期间可先用 grep。' : ''
+          return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。${hint}索引位于 ${dbPath}`)
         }
         const tier = RERANK_TIERS[config.rerank]
         const searchMode = args.mode ?? 'auto'
@@ -1596,7 +1793,7 @@ let reconcileTimer = null
     async execute(args, exec) {
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: Boolean(args?.path) })
         const { store, dbPath } = storeFor(repoRoot)
         const s = store.stats()
         const remoteMode = config.vectorStore === 'remote'
@@ -1714,11 +1911,17 @@ let reconcileTimer = null
     async execute(args, exec) {
       try {
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
-        assertAllowed(repoRoot, exec)
+        assertAllowed(repoRoot, exec, { explicit: Boolean(args?.path) })
+        const ensuredMap = ensureWatchOrIndex(repoRoot, {
+          reason: 'map',
+          sessionId: exec?.agent?.id ?? null,
+          priority: 1,
+        })
         const { store } = storeFor(repoRoot)
         const s = store.stats()
         if (s.files === 0) {
-          return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。`)
+          const hint = ensuredMap === 'queued' ? '\n已在后台开始建库。' : ''
+          return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）。${hint}`)
         }
         const depth = Math.max(1, Math.min(6, args.depth ?? 2))
         const dirs = store.dirMap({ depth, dirs: Math.max(1, Math.min(200, args.limit ?? 24)) })

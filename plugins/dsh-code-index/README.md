@@ -145,7 +145,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 5. **远端失败有冷却**。连接失败后 60 s 内不再重试（避免每次查询都等满超时），冷却后自动恢复。
 6. **本地零重依赖**。本地不需要 onnxruntime / transformers / 模型文件；`ignore` 是纯 JS 扫描依赖（无构建脚本），parser 组是可选增强（AST 切块，实测展开 60.7 MB）。
 7. **索引不落在代码仓库里**。`advanced.indexDirBase` 下按「仓库名-路径哈希」分目录；不配则退回 `<repo>/.dsh-index/`（记得加进 `.gitignore`）。
-8. **工作空间边界（0.13+）**。允许索引的路径从 DSH workspace / 当前会话 cwd / `.dshworkspace.json` 自动推导，**不再需要 roots 配置**；边界检查在创建索引库之前完成。没有 workspace 信息时只允许 cwd，不会退化为任意路径。
+8. **工作空间边界（0.13+）**。允许索引的路径从 DSH workspace / 当前会话 cwd 推导；工作区外的仓库显式传 `path`（须是 git 仓库根）即授权，一次点名后长期有效。边界检查在创建索引库之前完成，没有 workspace 信息时只允许 cwd。
 
 ## 配置
 
@@ -157,7 +157,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 - **高级设置**：向量模式 `vectors`、重排模式 `rerank`、本地索引目录 `advanced.indexDirBase`
 
 远端地址 + API Key 是接远端服务的全部必填项：`vectors` 默认 `auto`，有地址就自动走远端。
-允许索引的路径自动从 DSH workspace / 会话 cwd / `.dshworkspace.json` 推导；`exclude`、`chunking`、`sync` 等仍只通过下面的 YAML 配置；设置页保存时不会清空这些未展示字段。
+允许索引的路径自动从 DSH workspace / 会话 cwd 推导（工作区外靠显式 path）；`exclude`、`chunking`、`sync` 等仍只通过下面的 YAML 配置；设置页保存时不会清空这些未展示字段。
 
 索引目录不是远端检索的必填项：留空时每个仓库用自己的 `.dsh-index/index.db`；改它只影响
 本地 SQLite 的位置，远端向量/重排仍走 `remote.url`。**设置页保存后需要重启 DSH 才会应用新配置**；
@@ -168,7 +168,7 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
   name: "<package-name>"          # 包名，见 package.json 的 name
   config:
     # —— 用户只需要这几个 ——
-    # 允许路径自动从 DSH workspace / 会话 cwd / .dshworkspace.json 推导，不再配置 roots
+    # 允许路径自动从 DSH workspace / 会话 cwd 推导；工作区外仓库靠显式 path，不再配置 roots
     remote:
       url: "https://dsh-embed.example.com"   # 向量服务（/embed + /v1 索引 + /rerank）
       apiKey: null                        # 服务端设了 API_KEY 才需要
@@ -193,9 +193,29 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
       sync:
         watch: false                      # fs.watch 自动增量（默认关）
         debounceMs: 30000
+      autoIndex:                          # 0.16+：像 Cursor 一样自动建库
+        enabled: true                     # 关掉就退回「必须手动 code_index」
+        delayMs: 8000                     # 会话启动建库的延迟（触及式不受它限制）
+        maxFiles: 20000                   # 超过这个文件数不自动建（大仓走显式 code_index）
+        maxPerSession: 3                  # 一个会话最多自动建几个仓库
+        maxWatched: 20                    # 同时监听的仓库上限（LRU 淘汰）
       remoteTimeoutMs: 8000
       remoteRateLimit: null               # 服务端嵌入限速（块/秒）
 ```
+
+### 自动索引（0.16+）
+
+三条触发，互补：
+
+| 触发 | 时机 | 行为 |
+|---|---|---|
+| **会话启动** | `agent/created` 时取会话 cwd | 若是 git 仓库，延迟 `delayMs` 后入队 |
+| **触及式** | 工具调用参数里出现仓库内路径（read / edit / grep / glob / bash / code_* 等） | 立即可入队，`priority` 最高 |
+| **懒触发** | `code_search` / `code_map` 打到未建库的仓库 | 入队后台建，本次调用返回「已在后台建库」 |
+
+同一会话最多自动建 `maxPerSession` 个仓库；超过只提示，不自动建。
+worktree 会**归并到主仓**（读 `.git` 文件里的 `gitdir`），不会为 58 个 worktree 各建一份索引。
+`code_index_status` / `code_index` 的返回里带 `autoIndex` 统计（queued / running / recent）。
 
 > **0.10.0 remote-only**：本地嵌入/本地重排已移除，向量与重排都走 `remote.url`；
 > 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，不需要任何模型）。
@@ -206,30 +226,25 @@ code_search(query="订单状态机的实现在哪")               # 向量补齐
 > 让 main / 分支 / PR / worktree 各写各的快照（见下节）。**不配这些键时行为与 0.10.x 完全一致**，
 > 命名空间仍是 `<repoId>@<切块指纹>`，旧服务端/旧配置零迁移。
 
-### 多根工作空间（0.13+）
+### 工作区外的仓库：显式 path 授权（0.13+）
 
-不再配置 `roots`。允许路径按以下来源自动推导：
+允许路径按以下来源推导：
 
 1. DSH `sandboxPolicy.workspaceRoot`；
-2. 当前会话 cwd；
-3. 从 cwd 向上找到的 `.dshworkspace.json`。
+2. 当前会话 cwd。
 
-多根声明使用同一份 `.dshworkspace.json` 格式：
+工作区外的仓库**不需要任何额外定义文件**：只要调用时显式传 `path`，且该目录是 git 仓库根
+（含 worktree 的 `.git` 文件），就视为授权；建过索引的仓库会记进
+`~/.dsh/code-index/repos.json`，之后在任何会话里都直接可用。
 
-```json
-// D:/Projects/.dshworkspace.json
-{
-  "version": 1,
-  "roots": [
-    { "id": "projects", "path": "." },
-    { "id": "oss", "path": "D:/oss" }
-  ],
-  "primary": "projects"
-}
+```text
+第一次：code_search path=D:/Code/smartpos/erp/smartpos-erp-pos   → 放行并建库
+之后：  code_search path=D:/Code/smartpos/erp/smartpos-erp-pos   → 直接命中
+换会话：同一个仓库仍然可用（注册表已记住）
 ```
 
-这样 `D:/Projects` 和 `D:/oss` 都能索引，但不需要在 code-index 的 profile 配置里重复路径。
-没有 workspace/多根信息时只允许当前 cwd，不会退化为任意路径。
+> 多根工作区（`.dshworkspace.json`）随 DSH 该功能下线，插件不再读取它；
+> 目录里即使存在该文件也不会生效。
 
 ### 作用域（0.11.0）：main / 分支 / PR / worktree 各写各的快照
 
@@ -505,7 +520,7 @@ node test.mjs                                   # 125 项（Windows）/ 119 项�
 node test-ignore.mjs                            # 20 项：gitignore / cursorignore / docs / 禁用模块 / 二进制
 node test-auto-sync.mjs                         # 12 项：registry / 锁 / dirty 合并 / 退避
 node test-simhash.mjs                           # 10 项：确定性 / 相似距离 / 两种变体
-node test-workspace-roots.mjs                    # 17 项：workspace/cwd/.dshworkspace.json 自动推导
+node test-workspace-roots.mjs                    # 13 项：workspace/cwd 推导 + 多根已下线
 node test-plugin.mjs                            # 83 项：契约与接口、五个工具真实调用、Config schema
 node verify-install.mjs                         # 装后验证（对已安装的包跑）
 

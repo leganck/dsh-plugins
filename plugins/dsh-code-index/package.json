@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-index",
-  "version": "0.15.4",
+  "version": "0.16.0",
   "private": true,
   "type": "module",
   "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional remote vectors/index/rerank (no local models). 0.12.0: ignore-aware scanning (.gitignore/.cursorignore), auto sync freshness, cross-lineage simhash adoption, settings page + snapshot scopes.",
@@ -37,7 +37,9 @@
     "test-auto-sync.mjs",
     "test-simhash.mjs",
     "test-workspace-roots.mjs",
-    "test-repo-id.mjs"
+    "test-repo-id.mjs",
+    "test-auto-index.mjs",
+    "test-repo-touch.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -83,7 +85,7 @@
     }
   },
   "scripts": {
-    "test": "node test-remote.mjs && node test.mjs && node test-ignore.mjs && node test-auto-sync.mjs && node test-simhash.mjs && node test-workspace-roots.mjs && node test-repo-id.mjs && node test-plugin.mjs",
+    "test": "node test-remote.mjs && node test.mjs && node test-ignore.mjs && node test-auto-sync.mjs && node test-simhash.mjs && node test-workspace-roots.mjs && node test-repo-id.mjs && node test-auto-index.mjs && node test-repo-touch.mjs && node test-plugin.mjs",
     "test:remote": "node test-remote.mjs",
     "release": "node build-release.mjs"
   },
