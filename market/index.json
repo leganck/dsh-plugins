@@ -149,8 +149,8 @@
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "38d4ee30b10eecf6e40c5b67bab0063209dd0045",
-            "path": "plugins/dsh-code-index"
+            "path": "plugins/dsh-code-index",
+            "commit": "06ba0fea533facf49446ef07d403d2c03ac7e024"
           },
           "engines": {
             "dsh": "^0.2.0-rc.2"
