@@ -18,6 +18,11 @@ export const MESSAGE_LIMIT = 16 * 1024
 export const STDERR_TAIL = 4 * 1024
 export const GRACE_MS = 5000
 export const COLLECT_BYTES = 1024 * 1024
+/** 投递方式：auto = 空闲排队、忙碌插话；queue = 只排队；steer = 尽量插话。 */
+export const DEFAULT_MODE = 'auto'
+export const MODES = ['auto', 'queue', 'steer']
+/** 忙碌时同一 key 最多压这么久，之后把最新一条插进正在跑的回合。 */
+export const BUSY_HOLD_MS = 45_000
 
 const CONTINUE = '请按这段消息继续；不要在本轮里 sleep 等待。'
 
@@ -26,6 +31,8 @@ export function apply(ctx) {
     spawn: (spec) => spawnScript(ctx, spec),
     prompt: (request, signal) => ctx.sessionController.prompt(request, signal),
     resolveCwd: (requested, sessionId) => resolveCwd(ctx, requested, sessionId),
+    status: (sessionId) => sessionStatus(ctx, sessionId),
+    jobs: () => ctx.get?.('jobs'),
   })
   ctx.effect(() => {
     const disposeTools = registerTools(ctx, host)
@@ -99,6 +106,8 @@ export function tailBytes(text, max) {
  * @param {(spec: object) => object} deps.spawn
  * @param {(request: object, signal: AbortSignal) => Promise<unknown>} deps.prompt
  * @param {(requested: string | undefined, sessionId: string) => string} [deps.resolveCwd]
+ * @param {(sessionId: string) => 'idle' | 'running'} [deps.status]
+ * @param {() => { start: (spec: object) => unknown } | undefined} [deps.jobs]
  * @param {() => number} [deps.now]
  * @param {(fn: () => void | Promise<void>, ms: number) => unknown} [deps.schedule]
  * @param {(timer: unknown) => void} [deps.clearSchedule]
@@ -108,8 +117,12 @@ export function createWakeHost(deps) {
   const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const clearSchedule = deps.clearSchedule ?? ((timer) => clearTimeout(timer))
   const resolveDirectory = deps.resolveCwd ?? (() => process.cwd())
+  const resolveJobs = deps.jobs ?? (() => undefined)
+  const sessionState = deps.status ?? (() => 'idle')
   /** @type {Map<string, any>} */
   const runs = new Map()
+  /** 同一会话同一 key 只留最新一条，避免一轮长任务压住一堆积压消息。 */
+  const heldByKey = new Map()
 
   function runningCount(sessionId) {
     let count = 0
@@ -130,18 +143,9 @@ export function createWakeHost(deps) {
     const cwd = resolveDirectory(input?.cwd, sessionId)
     if (!path.isAbsolute(cwd)) throw new Error('cwd 必须是绝对路径')
     const label = String(input?.label ?? '').trim() || path.basename(argv[0])
+    const key = String(input?.key ?? '').trim() || label
+    const mode = normalizeMode(input?.mode)
     const abort = new AbortController()
-    const handle = deps.spawn({
-      argv,
-      cwd,
-      stdio: {
-        stdin: 'ignore',
-        stdout: { maxBytes: COLLECT_BYTES },
-        stderr: { maxBytes: COLLECT_BYTES },
-      },
-      graceMs: GRACE_MS,
-      signal: abort.signal,
-    })
     const id = `wake_${Math.floor(now()).toString(36)}_${crypto.randomBytes(3).toString('hex')}`
     let finish = () => {}
     const finished = new Promise((resolve) => {
@@ -153,8 +157,12 @@ export function createWakeHost(deps) {
       argv,
       cwd,
       label,
+      key,
+      mode,
       re,
-      handle,
+      job: null,
+      jobId: null,
+      handle: null,
       abort,
       status: 'running',
       startedAt: new Date(now()).toISOString(),
@@ -177,13 +185,67 @@ export function createWakeHost(deps) {
       finished,
       _finish: finish,
     }
+    const launch = () => {
+      if (run.handle) return
+      run.handle = deps.spawn({
+        argv,
+        cwd,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { maxBytes: COLLECT_BYTES },
+          stderr: { maxBytes: COLLECT_BYTES },
+        },
+        graceMs: GRACE_MS,
+        signal: abort.signal,
+      })
+      armPoll(run)
+      run.handle.done.then(
+        (outcome) => settle(run, outcome),
+        (error) => settle(run, { exitCode: null, signal: null, error }),
+      )
+    }
     runs.set(id, run)
-    armPoll(run)
-    handle.done.then(
-      (outcome) => settle(run, outcome),
-      (error) => settle(run, { exitCode: null, signal: null, error }),
-    )
+    // 注册成 DSH 后台任务：右侧「后台任务」面板可见、能看输出、能直接终止。
+    if (!registerJob(run, launch)) launch()
+    if (run.job) run.job.updateProgress('等待中')
     return publicRun(run)
+  }
+
+  /**
+   * 把这次监听登记进 ctx.jobs。拿不到 jobs 服务，或归属会话不满足注册条件时
+   * 返回 false，由调用方照常启动进程（行为与旧版一致）。
+   */
+  function registerJob(run, launch) {
+    const jobs = resolveJobs()
+    if (!jobs || typeof jobs.start !== 'function') return false
+    try {
+      let jobDone
+      const done = new Promise((resolve) => {
+        jobDone = resolve
+      })
+      run.jobDone = done
+      run._finishJob = jobDone
+      run.jobId = String(jobs.start({
+        kind: 'wake',
+        label: `唤醒监视：${run.label}`,
+        owner: run.sessionId,
+        run(job) {
+          run.job = job
+          launch()
+          return {
+            cancel: (reason) => {
+              run.stopReason = String(reason ?? '')
+              stopRun(run)
+            },
+            done,
+          }
+        },
+      }))
+      return true
+    } catch (error) {
+      run.lastError = error instanceof Error ? error.message : String(error)
+      return false
+    }
   }
 
   function armPoll(run) {
@@ -224,22 +286,67 @@ export function createWakeHost(deps) {
   function onLine(run, line) {
     const text = matchLine(run.re, line)
     if (text === null || run.stopped || run.closed) return
+    // 同步一份到后台任务面板：log 通道只给观察者看，不进模型的消费游标。
+    if (run.job) {
+      try {
+        run.job.append(`${text}\n`, { channel: 'log' })
+      } catch {
+        /* 面板输出只是观察面，失败不影响唤醒 */
+      }
+    }
     run.pendingText = text
     if (run.coalesceTimer) return
     run.coalesceTimer = schedule(() => {
       run.coalesceTimer = null
-      const pending = run.pendingText
+      const latest = run.pendingText
       run.pendingText = null
-      if (pending === null || run.stopped) return
-      deliver(run, buildWakeText(run.label, pending), pending)
+      if (latest === null || run.stopped) return
+      enqueue(run, buildWakeText(run.label, latest), latest)
     }, COALESCE_MS)
   }
 
-  async function deliver(run, text, match) {
+  /**
+   * 攒一条最新的：空闲立刻投递；忙碌时同一 key 只保留最后一条，
+   * 最多压 BUSY_HOLD_MS，超时后插入正在跑的回合。
+   */
+  function enqueue(run, text, match, key = run.key) {
+    const slot = `${run.sessionId}\u0000${key}`
+    const existing = heldByKey.get(slot)
+    if (existing) {
+      existing.text = text
+      existing.match = match
+      existing.run = run
+      return
+    }
+    const entry = { key: slot, run, text, match, timer: null }
+    heldByKey.set(slot, entry)
+    if (sessionState(run.sessionId) !== 'running') {
+      void flush(entry)
+      return
+    }
+    entry.timer = schedule(() => {
+      entry.timer = null
+      void flush(entry)
+    }, BUSY_HOLD_MS)
+  }
+
+  async function flush(entry) {
+    if (heldByKey.get(entry.key) !== entry) return
+    if (entry.timer) {
+      clearSchedule(entry.timer)
+      entry.timer = null
+    }
+    heldByKey.delete(entry.key)
+    const running = sessionState(entry.run.sessionId) === 'running'
+    const wanted = entry.run.mode === 'queue' ? 'queue' : 'steer'
+    await deliver(entry.run, entry.text, entry.match, running ? wanted : 'queue')
+  }
+
+  async function deliver(run, text, match, mode = 'queue') {
     const request = {
       requestId: `${run.id}-${run.wakeCount + 1}`,
       sessionId: run.sessionId,
-      mode: 'queue',
+      mode,
       content: [{ type: 'text', text }],
     }
     try {
@@ -250,6 +357,13 @@ export function createWakeHost(deps) {
         run.lastMatch = match
       }
       run.lastError = ''
+      if (run.job) {
+        try {
+          run.job.updateProgress(`已唤醒 ${run.wakeCount} 次`)
+        } catch {
+          /* 进度行只是观察面 */
+        }
+      }
     } catch (error) {
       run.lastError = error instanceof Error ? error.message : String(error)
     }
@@ -272,27 +386,53 @@ export function createWakeHost(deps) {
     run.signal = outcome?.signal ?? null
     if (outcome?.error) run.lastError = String(outcome.error?.message ?? outcome.error)
     if (!run.stopped) {
-      if (run.pendingText !== null) {
-        const pending = run.pendingText
+      const stderr = run.stderrText.trim()
+      const pendingMatch = run.pendingText !== null
+      if (pendingMatch) {
+        const latest = run.pendingText
         run.pendingText = null
-        await deliver(run, buildWakeText(run.label, pending), pending)
+        enqueue(run, buildWakeText(run.label, latest), latest)
       }
+      const reported = run.matched || pendingMatch
       const cleanExit = run.exitCode === 0 || (run.exitCode === null && !run.signal && !outcome?.error)
       if (cleanExit) {
-        if (!run.matched) {
-          await deliver(run, buildWakeText(run.label, '脚本已结束，没有打出唤醒行。'))
+        if (!reported) {
+          enqueue(run, buildWakeText(run.label, '脚本已结束，没有打出唤醒行。'), undefined, `${run.key}#status`)
         }
+      } else if (reported && !stderr) {
+        // 匹配行已经报过异常，退出码本身没有新信息：不再单独补一条。
       } else {
         const reason = run.exitCode === null
           ? `脚本已退出，信号 ${run.signal || '未知'}。`
           : `脚本已退出，退出码 ${run.exitCode}。`
-        const stderr = run.stderrText.trim()
         const body = stderr ? `${reason}\n${stderr}` : reason
-        await deliver(run, buildWakeText(run.label, body))
+        enqueue(run, buildWakeText(run.label, body), undefined, `${run.key}#status`)
       }
     }
     run.status = run.stopped ? 'stopped' : 'exited'
+    settleJob(run)
     run._finish(publicRun(run))
+  }
+
+  /** 把终态写给后台任务面板，并结算 job 的 done。 */
+  function settleJob(run) {
+    if (!run.job || typeof run._finishJob !== 'function') return
+    const cleanExit = run.exitCode === 0 || (run.exitCode === null && !run.signal && !run.lastError)
+    const status = run.stopped ? 'killed' : cleanExit ? 'completed' : 'failed'
+    const detail = run.stopped
+      ? run.stopReason || '已停止'
+      : run.exitCode === null
+        ? (run.lastError || `信号 ${run.signal || '未知'}`)
+        : `exit code: ${run.exitCode}`
+    try {
+      run.job.append(`${status}：${detail}\n`, { channel: 'log' })
+      run.job.updateProgress('')
+    } catch {
+      /* 结算写失败不影响唤醒结果 */
+    }
+    const finish = run._finishJob
+    run._finishJob = null
+    finish({ status, detail })
   }
 
   function flushPartial(run) {
@@ -322,6 +462,11 @@ export function createWakeHost(deps) {
     run.pendingText = null
     if (run.coalesceTimer) clearSchedule(run.coalesceTimer)
     run.coalesceTimer = null
+    for (const [slot, entry] of heldByKey) {
+      if (entry.run !== run) continue
+      if (entry.timer) clearSchedule(entry.timer)
+      heldByKey.delete(slot)
+    }
     try {
       run.abort.abort()
     } catch {
@@ -351,6 +496,10 @@ export function createWakeHost(deps) {
     for (const run of runs.values()) {
       if (run.status === 'running') stopRun(run)
     }
+    for (const entry of heldByKey.values()) {
+      if (entry.timer) clearSchedule(entry.timer)
+    }
+    heldByKey.clear()
   }
 
   return {
@@ -376,6 +525,9 @@ function publicRun(run) {
     argv: [...run.argv],
     cwd: run.cwd,
     label: run.label,
+    key: run.key,
+    mode: run.mode,
+    jobId: run.jobId,
     startedAt: run.startedAt,
     wakeCount: run.wakeCount,
     lastMatch: run.lastMatch,
@@ -384,6 +536,13 @@ function publicRun(run) {
     signal: run.signal,
     finished: run.finished,
   }
+}
+
+function normalizeMode(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return DEFAULT_MODE
+  const mode = String(value).trim()
+  if (!MODES.includes(mode)) throw new Error(`无效投递方式：${mode}（可用：${MODES.join(' / ')}）`)
+  return mode
 }
 
 function normalizeArgv(value) {
@@ -442,6 +601,12 @@ function spawnScript(ctx, spec) {
   }
 }
 
+function sessionStatus(ctx, sessionId) {
+  const agents = ctx.get?.('agents')
+  const agent = agents?.get?.(sessionId)
+  return agent?.status === 'running' ? 'running' : 'idle'
+}
+
 function resolveCwd(ctx, requested, sessionId) {
   if (requested !== undefined && requested !== null && String(requested).trim()) {
     const cwd = String(requested)
@@ -490,6 +655,15 @@ function registerTools(ctx, host) {
           description: '可选正则。默认 ^DSH_WAKE:[ \\t]*(.*)$。有捕获组时用第一个捕获作为消息',
         },
         label: { type: 'string', description: '唤醒消息里的任务名' },
+        key: {
+          type: 'string',
+          description: '可选。同一 key 只保留最新一条消息（默认用 label）。同一次监听的重复事件不会堆成多条',
+        },
+        mode: {
+          type: 'string',
+          enum: ['auto', 'queue', 'steer'],
+          description: '可选。auto（默认）=会话空闲时开新一轮、忙碌时插进当前回合；queue=只排队等这一轮结束；steer=尽量插进当前回合',
+        },
       },
       required: ['argv'],
       additionalProperties: false,
@@ -504,6 +678,8 @@ function registerTools(ctx, host) {
         cwd: input.cwd,
         pattern: input.pattern,
         label: input.label,
+        key: input.key,
+        mode: input.mode,
       })
       return { summary: `已后台启动 ${run.label} (${run.id})`, run: withoutFinished(run) }
     },
