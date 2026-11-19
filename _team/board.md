@@ -43,3 +43,33 @@ M1 4/5 达成（contradict 跑批 0 判定=数据覆盖问题，队列机制已�
 2. 服务端部署窗口（bodies + 吞吐 + memories 三合一）+ 模型精度实验（fp32/int8）
 3. 删 5 个空壳索引库
 4. 插件 profile 重装 + 重启 DSH（加载 expand/code_graph/闸门/降权）
+
+## M0 部署完成（2026-11-20 00:05）
+
+| 步骤 | 结果 |
+|---|---|
+| CI 构建（GitHub） | run 44557733052 success：base(cpu/gpu) 指纹命中跳过构建（`skipped`），app 两 flavor build→smoke→push 全绿 |
+| 112 拉镜像 | server-v0.16.0-cpu（digest f91c9502…） |
+| 部署 | 新容器 dsh-embed（97cf2166…）healthy after 20s；旧容器改名 dsh-embed-v0.15.5-backup 可回滚 |
+| memories 端点 | 线上可用：`{"items":[],"total":0}` |
+| bodies 端点 | 线上可用：HTTP 200 |
+| speed/etaSeconds | 上线（erp-pos pending=0 → speed 0.0/eta null，属正常空载） |
+
+## 数据完整性核验
+19 scopes 全部保留；erp-pos **coverage 100%**（9467/9467 vectors）——fp16 模型换容器未换 tag，无需重嵌。
+
+## 100% 覆盖下的语义检索实测（0.8 块/s 时代做不到的）
+- 「加料不能单独下单」→ top1 正中 OnlineDietOrderService.java:5331（抛 CustomException 处）
+- 「云打印 小票」→ top1 PosReceiptService 电子小票接口 + PrepackPrintRecordService
+- 「结账写销售 payStatus payWay」→ ReportMapper.xml 报表块（此查询关键词通道更强；语义补位）
+- 延迟：embed ~250ms + kNN 2-7ms，正常
+
+## 凭据安全插曲
+deploy 脚本首版硬编码 API_KEY/ADMIN_PASSWORD 被 pre-commit 拦截（钩子正确工作）→
+重写为 scripts/deploy-embed.sh（凭据走环境变量，旧容器改名备份可回滚），已提交 41817d3。
+
+## 后续（未做）
+1. 服务器模型精度实验（fp32/int8）——5-20x 吞吐杠杆，换 tag 需全量重嵌，需排期
+2. 线上灌种子：seed.py --url http://192.168.50.112:18000（223 条）
+3. review-service 经验注入批次（M2 剩余 3 项）
+4. 插件 profile 重装 + 重启 DSH（expand/code_graph/闸门/降权）
