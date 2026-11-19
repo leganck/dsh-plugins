@@ -1,0 +1,273 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1321"/>
+      <stop offset="1" stop-color="#1a2332"/>
+    </linearGradient>
+    <linearGradient id="hubGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#134e5e"/>
+      <stop offset="1" stop-color="#0f3d4d"/>
+    </linearGradient>
+    <linearGradient id="codeGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e3a8a"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="expGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c2d12"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="pipeGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4c1d95"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#064e3b"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="dshGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#312e81"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="arrowGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#64748b"/>
+      <stop offset="1" stop-color="#94a3b8"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f59e0b"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrowViolet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="1280" height="860" fill="url(#bgGrad)"/>
+
+  <!-- 标题 -->
+  <text x="640" y="42" text-anchor="middle" font-size="26" font-weight="700" fill="#f1f5f9">storage-hub 终极架构</text>
+  <text x="640" y="66" text-anchor="middle" font-size="13" fill="#94a3b8">code-index-server 进化为统一存储中心 · 代码资产 + 清洗后的经验资产 · 共享向量底座（bge-base-zh）</text>
+
+  <!-- ======================= 左列：生产端 ======================= -->
+  <!-- DSH 会话（原始素材） -->
+  <g>
+    <rect x="40" y="110" width="240" height="120" rx="12" fill="url(#dshGrad)" opacity="0.92"/>
+    <text x="160" y="138" text-anchor="middle" font-size="15" font-weight="700" fill="#e0e7ff">DSH 开发会话</text>
+    <text x="160" y="160" text-anchor="middle" font-size="11" fill="#c7d2fe">日常 bug 分析 / 修复 / 部署</text>
+    <text x="160" y="180" text-anchor="middle" font-size="11" fill="#c7d2fe">纠偏·踩坑·口径结论</text>
+    <text x="160" y="204" text-anchor="middle" font-size="10" fill="#a5b4fc" font-style="italic">dsh-memory-archive</text>
+    <text x="160" y="218" text-anchor="middle" font-size="10" fill="#a5b4fc" font-style="italic">compaction 落盘 segment_*.md</text>
+  </g>
+
+  <!-- 评审纠偏 -->
+  <g>
+    <rect x="40" y="270" width="240" height="86" rx="12" fill="url(#revGrad)" opacity="0.92"/>
+    <text x="160" y="298" text-anchor="middle" font-size="15" font-weight="700" fill="#d1fae5">review-service 纠偏</text>
+    <text x="160" y="320" text-anchor="middle" font-size="11" fill="#a7f3d0">人工纠正的评审结论</text>
+    <text x="160" y="338" text-anchor="middle" font-size="11" fill="#a7f3d0">回流为经验候选（P3）</text>
+  </g>
+
+  <!-- 手动沉淀 -->
+  <g>
+    <rect x="40" y="390" width="240" height="86" rx="12" fill="#334155" opacity="0.92"/>
+    <text x="160" y="418" text-anchor="middle" font-size="15" font-weight="700" fill="#e2e8f0">手动沉淀</text>
+    <text x="160" y="440" text-anchor="middle" font-size="11" fill="#cbd5e1">knowledge/experience/*.md</text>
+    <text x="160" y="458" text-anchor="middle" font-size="11" fill="#cbd5e1">sp-rules（硬规则走 git，不入库）</text>
+  </g>
+
+  <!-- ======================= 顶部：经验管道 ======================= -->
+  <!-- 管道大框 -->
+  <g>
+    <rect x="360" y="96" width="600" height="150" rx="16" fill="url(#pipeGrad)" opacity="0.28"/>
+    <rect x="360" y="96" width="600" height="150" rx="16" fill="none" stroke="#7c3aed" stroke-width="1.5" opacity="0.6"/>
+    <text x="660" y="120" text-anchor="middle" font-size="14" font-weight="700" fill="#ddd6fe">经验提纯管道 exp-pipeline（三层治理 · 腾讯方法论）</text>
+
+    <!-- Stage 1: 主题分组 -->
+    <rect x="384" y="136" width="118" height="80" rx="10" fill="#4c1d95" stroke="#8b5cf6" stroke-width="1.2"/>
+    <text x="443" y="160" text-anchor="middle" font-size="12" font-weight="600" fill="#ede9fe">① 主题分组</text>
+    <text x="443" y="178" text-anchor="middle" font-size="9.5" fill="#c4b5fd">按事件序列切题</text>
+    <text x="443" y="192" text-anchor="middle" font-size="9.5" fill="#c4b5fd">不附大纲防泛化</text>
+    <text x="443" y="208" text-anchor="middle" font-size="9.5" fill="#c4b5fd">噪声剥离</text>
+
+    <!-- Stage 2: 抽取 -->
+    <rect x="524" y="136" width="118" height="80" rx="10" fill="#5b21b6" stroke="#8b5cf6" stroke-width="1.2"/>
+    <text x="583" y="160" text-anchor="middle" font-size="12" font-weight="600" fill="#ede9fe">② 经验抽取</text>
+    <text x="583" y="178" text-anchor="middle" font-size="9.5" fill="#c4b5fd">三镜头分类</text>
+    <text x="583" y="192" text-anchor="middle" font-size="9.5" fill="#c4b5fd">九类垃圾特征</text>
+    <text x="583" y="206" text-anchor="middle" font-size="9.5" fill="#c4b5fd">证据轮次标注</text>
+
+    <!-- Stage 3: Review -->
+    <rect x="664" y="136" width="118" height="80" rx="10" fill="#6d28d9" stroke="#8b5cf6" stroke-width="1.2"/>
+    <text x="723" y="160" text-anchor="middle" font-size="12" font-weight="600" fill="#ede9fe">③ Review</text>
+    <text x="723" y="178" text-anchor="middle" font-size="9.5" fill="#c4b5fd">文本四步检查</text>
+    <text x="723" y="194" text-anchor="middle" font-size="9.5" fill="#c4b5fd">+ 源码探索事实校验</text>
+    <text x="723" y="208" text-anchor="middle" font-size="9" fill="#a78bfa">⇄ 调 /v1/code/search</text>
+
+    <!-- Stage 4: Dedup+Merge -->
+    <rect x="804" y="136" width="132" height="80" rx="10" fill="#7c3aed" stroke="#a78bfa" stroke-width="1.2"/>
+    <text x="870" y="160" text-anchor="middle" font-size="12" font-weight="600" fill="#f5f3ff">④ Dedup + Merge</text>
+    <text x="870" y="178" text-anchor="middle" font-size="9.5" fill="#ddd6fe">宁严勿宽·禁桥接</text>
+    <text x="870" y="194" text-anchor="middle" font-size="9.5" fill="#ddd6fe">create/update/skip</text>
+    <text x="870" y="208" text-anchor="middle" font-size="9.5" fill="#ddd6fe">contradict→人工</text>
+
+    <!-- 管道内部箭头 -->
+    <line x1="502" y1="176" x2="522" y2="176" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrowViolet)"/>
+    <line x1="642" y1="176" x2="662" y2="176" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrowViolet)"/>
+    <line x1="782" y1="176" x2="802" y2="176" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrowViolet)"/>
+  </g>
+
+  <!-- ======================= 中央：storage-hub ======================= -->
+  <g filter="url(#glow)">
+    <rect x="380" y="290" width="560" height="330" rx="18" fill="url(#hubGrad)" stroke="#22d3ee" stroke-width="2" opacity="0.95"/>
+  </g>
+  <text x="660" y="322" text-anchor="middle" font-size="18" font-weight="800" fill="#e0f2fe">storage-hub（NAS · code-index-server 进化）</text>
+  <text x="660" y="342" text-anchor="middle" font-size="10.5" fill="#a5f3fc">192.168.50.112:18000 · SQLite · 全内网 · 哈希为通用键 · 本地插件侧保留完整降级</text>
+
+  <!-- 代码资产面板 -->
+  <g>
+    <rect x="402" y="360" width="252" height="180" rx="10" fill="url(#codeGrad)" opacity="0.95"/>
+    <text x="528" y="386" text-anchor="middle" font-size="14" font-weight="700" fill="#dbeafe">📦 代码资产</text>
+    <text x="528" y="408" text-anchor="middle" font-size="10.5" fill="#bfdbfe">lineages · repos · chunks · blobs · vectors</text>
+    <text x="528" y="426" text-anchor="middle" font-size="10.5" fill="#93c5fd">symbols · edges（P2 哈希键）</text>
+    <line x1="422" y1="440" x2="634" y2="440" stroke="#3b82f6" stroke-width="0.8" opacity="0.5"/>
+    <text x="528" y="460" text-anchor="middle" font-size="10.5" fill="#dbeafe">/v1/code/*</text>
+    <text x="528" y="478" text-anchor="middle" font-size="10" fill="#93c5fd">sync · search · status</text>
+    <text x="528" y="494" text-anchor="middle" font-size="10" fill="#93c5fd">bodies 正文直读 · graph/expand</text>
+    <text x="528" y="516" text-anchor="middle" font-size="9.5" fill="#60a5fa" font-style="italic">scopes：main/branch/pr/worktree</text>
+    <text x="528" y="530" text-anchor="middle" font-size="9.5" fill="#60a5fa" font-style="italic">跨血统 simhash 复用 · gc</text>
+  </g>
+
+  <!-- 经验资产面板 -->
+  <g>
+    <rect x="672" y="360" width="252" height="180" rx="10" fill="url(#expGrad)" opacity="0.95"/>
+    <text x="798" y="386" text-anchor="middle" font-size="14" font-weight="700" fill="#ffedd5">💡 经验资产（清洗后入库）</text>
+    <text x="798" y="408" text-anchor="middle" font-size="10.5" fill="#fed7aa">memories（三镜头 · what/when/why）</text>
+    <text x="798" y="426" text-anchor="middle" font-size="10.5" fill="#fdba74">evidence → 会话段/工单 · status</text>
+    <line x1="692" y1="440" x2="904" y2="440" stroke="#f97316" stroke-width="0.8" opacity="0.5"/>
+    <text x="798" y="460" text-anchor="middle" font-size="10.5" fill="#ffedd5">/v1/memories/*</text>
+    <text x="798" y="478" text-anchor="middle" font-size="10" fill="#fdba74">CRUD · search · hit/adopt 打点</text>
+    <text x="798" y="494" text-anchor="middle" font-size="10" fill="#fdba74">conflicts 人工裁决队列</text>
+    <text x="798" y="516" text-anchor="middle" font-size="9.5" fill="#fb923c" font-style="italic">memory_edges（P3 entity/causal）</text>
+    <text x="798" y="530" text-anchor="middle" font-size="9.5" fill="#fb923c" font-style="italic">90 天未命中 → retired</text>
+  </g>
+
+  <!-- 共享底座 -->
+  <g>
+    <rect x="402" y="556" width="522" height="50" rx="10" fill="#0c4a6e" stroke="#0ea5e9" stroke-width="1.2"/>
+    <text x="663" y="577" text-anchor="middle" font-size="12" font-weight="700" fill="#e0f2fe">⚡ 共享向量底座 · bge-base-zh-v1.5</text>
+    <text x="663" y="595" text-anchor="middle" font-size="10" fill="#bae6fd">FTS5 关键词 + kNN 向量 + RRF 融合 · governor 排程（经验优先）· speed/etaSeconds · admin/stats</text>
+  </g>
+
+  <!-- Review 源码探索 ⇄ 代码资产 的互链（治理红利） -->
+  <path d="M 723 218 C 723 260, 700 300, 640 330 C 600 348, 580 352, 560 356"
+        fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#arrowAmber)"/>
+  <text x="640" y="262" text-anchor="middle" font-size="10" fill="#fbbf24" font-style="italic">治理红利：Review 源码探索</text>
+  <text x="640" y="276" text-anchor="middle" font-size="10" fill="#fbbf24" font-style="italic">直接调代码检索验证类/方法/表</text>
+
+  <!-- ======================= 右列：消费端 ======================= -->
+  <!-- review-service -->
+  <g>
+    <rect x="1020" y="110" width="220" height="130" rx="12" fill="url(#revGrad)" opacity="0.95"/>
+    <text x="1130" y="138" text-anchor="middle" font-size="15" font-weight="700" fill="#d1fae5">review-service</text>
+    <text x="1130" y="160" text-anchor="middle" font-size="11" fill="#a7f3d0">GitLab MR AI 评审</text>
+    <line x1="1038" y1="172" x2="1222" y2="172" stroke="#34d399" stroke-width="0.8" opacity="0.5"/>
+    <text x="1130" y="192" text-anchor="middle" font-size="10.5" fill="#6ee7b7">检索经验 top-k 注入 prompt</text>
+    <text x="1130" y="208" text-anchor="middle" font-size="10.5" fill="#6ee7b7">bodies 直读上下文</text>
+    <text x="1130" y="224" text-anchor="middle" font-size="10.5" fill="#6ee7b7">「依据经验 exp-xxx」标注</text>
+  </g>
+
+  <!-- DSH 会话检索 -->
+  <g>
+    <rect x="1020" y="272" width="220" height="130" rx="12" fill="url(#dshGrad)" opacity="0.95"/>
+    <text x="1130" y="300" text-anchor="middle" font-size="15" font-weight="700" fill="#e0e7ff">DSH 会话消费</text>
+    <text x="1130" y="322" text-anchor="middle" font-size="11" fill="#c7d2fe">dsh-code-index 插件</text>
+    <line x1="1038" y1="334" x2="1222" y2="334" stroke="#818cf8" stroke-width="0.8" opacity="0.5"/>
+    <text x="1130" y="354" text-anchor="middle" font-size="10.5" fill="#a5b4fc">code_search · expand 图</text>
+    <text x="1130" y="370" text-anchor="middle" font-size="10.5" fill="#a5b4fc">code_graph · exp_recall</text>
+    <text x="1130" y="388" text-anchor="middle" font-size="10.5" fill="#a5b4fc">本地 FTS+图 = 断网降级</text>
+  </g>
+
+  <!-- CLI / 脚本 -->
+  <g>
+    <rect x="1020" y="434" width="220" height="100" rx="12" fill="#334155" opacity="0.95"/>
+    <text x="1130" y="462" text-anchor="middle" font-size="15" font-weight="700" fill="#e2e8f0">CLI / 脚本</text>
+    <text x="1130" y="484" text-anchor="middle" font-size="11" fill="#cbd5e1">经验导出 · 台账核对</text>
+    <text x="1130" y="502" text-anchor="middle" font-size="11" fill="#cbd5e1">评测集构建</text>
+    <text x="1130" y="520" text-anchor="middle" font-size="11" fill="#cbd5e1">跨仓巡检</text>
+  </g>
+
+  <!-- ======================= 主数据流箭头 ======================= -->
+  <!-- 会话 → 管道 -->
+  <path d="M 280 170 C 320 170, 330 176, 378 176" fill="none" stroke="#818cf8" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <!-- 评审纠偏 → 管道（P3） -->
+  <path d="M 280 313 C 320 313, 330 250, 380 216" fill="none" stroke="#34d399" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowGreen)"/>
+  <!-- 手动沉淀 → 管道 -->
+  <path d="M 280 433 C 330 433, 340 300, 396 216" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+  <!-- 管道 → 经验资产 -->
+  <path d="M 870 220 C 870 260, 840 300, 810 354" fill="none" stroke="#f59e0b" stroke-width="3" marker-end="url(#arrowAmber)"/>
+  <!-- 插件 → 代码资产（sync 双向） -->
+  <path d="M 1130 402 C 1130 470, 1000 480, 940 470 C 900 464, 880 458, 660 452" fill="none" stroke="#3b82f6" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="985" y="475" text-anchor="middle" font-size="10.5" fill="#93c5fd">sync（块+图）↑ 检索 ↓</text>
+  <!-- 代码资产 ⇄ review -->
+  <path d="M 660 430 C 800 420, 900 300, 1016 210" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <!-- 经验资产 → review -->
+  <path d="M 928 420 C 960 410, 980 300, 1014 220" fill="none" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#arrowAmber)"/>
+  <!-- 经验资产 → DSH -->
+  <path d="M 928 450 C 960 450, 980 400, 1016 356" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)"/>
+  <!-- hub → CLI -->
+  <path d="M 940 500 C 965 505, 985 500, 1016 492" fill="none" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- ======================= 底部图例 ======================= -->
+  <g>
+    <rect x="380" y="650" width="560" height="58" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+    <text x="660" y="672" text-anchor="middle" font-size="11" font-weight="700" fill="#e2e8f0">数据流：紫=提纯 · 橙=经验 · 蓝=代码 · 绿=纠偏回流 · 青=评审取数</text>
+    <text x="660" y="692" text-anchor="middle" font-size="10" fill="#94a3b8">闭环：生产（会话/评审）→ 提纯（三层治理）→ 入库（memories）→ 消费（评审注入/会话召回）→ 打点（hit/adopt）→ 退役（90 天未命中）</text>
+  </g>
+
+  <!-- 里程碑条 -->
+  <g>
+    <rect x="120" y="740" width="1040" height="88" rx="12" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+    <text x="640" y="764" text-anchor="middle" font-size="12" font-weight="700" fill="#e2e8f0">里程碑</text>
+    <g font-size="10.5">
+      <rect x="140" y="778" width="186" height="38" rx="8" fill="#0e7490" opacity="0.85"/>
+      <text x="233" y="794" text-anchor="middle" fill="#cffafe" font-weight="600">M0 地基：部署+精度实验</text>
+      <text x="233" y="808" text-anchor="middle" fill="#a5f3fc">bodies/吞吐2×/speed-eta</text>
+
+      <rect x="340" y="778" width="186" height="38" rx="8" fill="#7c3aed" opacity="0.85"/>
+      <text x="433" y="794" text-anchor="middle" fill="#ede9fe" font-weight="600">M1-M2 经验闭环</text>
+      <text x="433" y="808" text-anchor="middle" fill="#ddd6fe">管道三层治理+种子灌入</text>
+
+      <rect x="540" y="778" width="186" height="38" rx="8" fill="#ea580c" opacity="0.85"/>
+      <text x="633" y="794" text-anchor="middle" fill="#ffedd5" font-weight="600">M3 消费接入</text>
+      <text x="633" y="808" text-anchor="middle" fill="#fed7aa">review 注入+exp_recall</text>
+
+      <rect x="740" y="778" width="186" height="38" rx="8" fill="#1d4ed8" opacity="0.85"/>
+      <text x="833" y="794" text-anchor="middle" fill="#dbeafe" font-weight="600">P2 代码图上远端</text>
+      <text x="833" y="808" text-anchor="middle" fill="#bfdbfe">symbols/edges 哈希键</text>
+
+      <rect x="940" y="778" width="200" height="38" rx="8" fill="#475569" opacity="0.85"/>
+      <text x="1040" y="794" text-anchor="middle" fill="#e2e8f0" font-weight="600">P3 经验图+生命周期</text>
+      <text x="1040" y="808" text-anchor="middle" fill="#cbd5e1">memory_edges/退役</text>
+    </g>
+    <!-- 里程碑箭头 -->
+    <line x1="326" y1="797" x2="338" y2="797" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="526" y1="797" x2="538" y2="797" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="726" y1="797" x2="738" y2="797" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="926" y1="797" x2="938" y2="797" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+</svg>

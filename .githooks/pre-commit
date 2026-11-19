@@ -13,16 +13,20 @@ is_allowed() {
   return 1
 }
 
-PATTERNS=(
-  'sk-[A-Za-z0-9]{20,}'
-  'glpat-[A-Za-z0-9_-]{20,}'
-  'ghp_[A-Za-z0-9]{30,}'
-  'github_pat_[A-Za-z0-9_]{30,}'
-  'AKIA[0-9A-Z]{16}'
-  'xox[baprs]-[A-Za-z0-9-]{10,}'
-  '-----BEGIN [A-Z ]*PRIVATE KEY-----'
-  '(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY)[A-Z_]*[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_./+-]{18,}'
-)
+# bash 5.3 实测坑：数组字面量里**单引号内**的 {N,} 仍会被 brace 展开
+# （'sk-[A-Za-z0-9]{20,}' 被拆成 'sk-[A-Za-z0-9]20' + 'sk-[A-Za-z0-9]' 两个元素，
+#   量词丢失后 "task-5" 里的 sk-5 全部误命中）。heredoc（带引号定界符）内容是纯
+# 数据、不参与任何展开，跨 bash 版本稳定 —— 量词型 pattern 一律走这里。
+mapfile -t PATTERNS <<'PATS'
+sk-[A-Za-z0-9]{20,}
+glpat-[A-Za-z0-9_-]{20,}
+ghp_[A-Za-z0-9]{30,}
+github_pat_[A-Za-z0-9_]{30,}
+AKIA[0-9A-Z]{16}
+xox[baprs]-[A-Za-z0-9-]{10,}
+-----BEGIN [A-Z ]*PRIVATE KEY-----
+(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY)[A-Z_]*[[:space:]]*[:=][[:space:]]*["']?[A-Za-z0-9_./+-]{18,}
+PATS
 ALLOW_VALUE='REPLACE_WITH|change[-_]me|your[-_]|example|placeholder|dummy|fake|test[-_]?(token|key|secret)|xxx'
 
 files=$(git diff --cached --name-only --diff-filter=ACM || true)
