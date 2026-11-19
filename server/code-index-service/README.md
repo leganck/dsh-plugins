@@ -86,6 +86,7 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 | `POST /v1/namespaces/{ns}/chunks` | 上传缺失正文（gzip、批量、幂等）→ `{accepted, deduped}` |
 | `POST /v1/namespaces/{ns}/embed` | 触发后台嵌入 |
 | `GET /v1/namespaces/{ns}/status` | `{revision, chunks, vectors, coverage, pending, rate, paused, totalBytes, scope{kind,ref,commit,createdAt}, limits}` |
+| `GET /v1/namespaces/{ns}/bodies?hashes=h1,h2&max_bytes=N` | **按内容哈希直读块正文**（有界）：`{namespace, lineage_id, requested, returned, missing[], truncated[], rejected[], bodies[{hash,body}], ms}`；≤200 hash、默认 200 KB（上限 2 MB），不返回半截正文。契约见 [docs/bodies.md](docs/bodies.md) |
 | `POST /v1/search` | `{namespace}` 或 `{namespaces:[{namespace,weight?}]}, query, k, tag?, rerank:{candidates}}` → `{hits[{hash,path,start,end,score,namespace,scope,rrf,rerankScore?}], ms{embed,knn,rerank}, coverage, byScope[]}` |
 | `GET /v1/scopes?limit=&offset=&q=&repoId=&kind=&sort=&order=` | 分页作用域清单：`{scopes:[{namespace,kind,ref,repoId,repoName,chunkFp,chunks,files,vectors,coverage,createdAt,updatedAt,variantCount,totalBytes}], total, offset, limit, hasMore, facets}` |
 | `POST /v1/scopes/resolve` | `{repoId, chunkFp, kind, ref, commit?}` → `{namespace, exists, revision?}`；非法 → `400 {error:'bad-scope', reason}` |
@@ -217,7 +218,8 @@ vectors (lineage_id, tag, hash, dim, v)              -- 向量，血统内按内
 带 `scope` 时**服务端返回的 `namespace` 为准**（客户端后续 chunks/embed/status 都用它）。
 
 > ⚠️ namespace 里的路径参数要做 percent-encode（canonical namespace 含 `#`、`@`、`:`）：
-> `DELETE /v1/scopes/{encodeURIComponent(ns)}`、`GET /v1/namespaces/{encodeURIComponent(ns)}/status`。
+> `DELETE /v1/scopes/{encodeURIComponent(ns)}`、`GET /v1/namespaces/{encodeURIComponent(ns)}/status`、
+> `GET /v1/namespaces/{encodeURIComponent(ns)}/bodies`。
 
 ## 档 3：快照作用域（scope）与多作用域检索
 
@@ -581,6 +583,6 @@ docker run --rm -e FAKE_EMBED=1 ghcr.io/leganck/dsh-embed:latest-cpu python /app
 ## 0.14.0 鉴权与数据范围
 
 - `GET /v1/status`、`GET /v1/scopes`、`/v1/spaces`、`/v1/lineages/*`、所有 `/v1/admin/*` 与 DELETE：**仅管理员**。
-- 索引/检索用 Bearer Key：`POST /v1/namespaces/sync|resolve`、`/v1/namespaces/{ns}/chunks|vectors|embed|status`、`POST /v1/search`、`POST /v1/embed|/rerank`。
+- 索引/检索用 Bearer Key：`POST /v1/namespaces/sync|resolve`、`/v1/namespaces/{ns}/chunks|vectors|embed|status|bodies`、`POST /v1/search`、`POST /v1/embed|/rerank`。
 - Key 可带 `repoIds`（创建时传数组或逗号分隔）；为空表示不限。越权访问按 404 处理，避免泄露 namespace 是否存在。
 - 旧路径 `/v1/repos/*` 已删除，返回 410；必须使用 `/v1/namespaces/*`。

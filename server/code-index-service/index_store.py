@@ -88,6 +88,38 @@ create table if not exists vectors (
   updated_at integer not null,
   primary key (lineage_id, tag, hash)
 );
+create table if not exists memories (
+  id text primary key,
+  repo text not null,
+  lens text not null,
+  what text not null,
+  when_expr text,
+  why text,
+  evidence text,
+  status text not null default 'active',
+  source text not null default 'pipeline',
+  stats_hits integer not null default 0,
+  stats_adopted integer not null default 0,
+  last_hit_at integer,
+  created_at integer not null,
+  updated_at integer not null
+);
+create index if not exists memories_repo_status on memories(repo, status);
+create index if not exists memories_lens_status on memories(lens, status);
+create index if not exists memories_status on memories(status);
+create index if not exists memories_created on memories(created_at desc);
+-- 全文索引：trigram 对 ASCII 子串与连续中文都按「原文子串」匹配，且 sqlite>=3.34 自带，
+-- 与代码检索用的 tokenizer 语义对齐（免装 fts5 trigram 之外的扩展）。
+create virtual table if not exists memories_fts using fts5(
+  what, when_expr, why,
+  tokenize='trigram'
+);
+create table if not exists memories_vec (
+  mid integer primary key,
+  dim integer not null,
+  v blob not null,
+  updated_at integer not null
+);
 """
 
 # ---------------------------------------------------------------- 作用域（档 3）
@@ -1508,3 +1540,337 @@ class IndexStore:
     def close(self):
         with self.lock:
             self.db.close()
+
+
+# ---------------------------------------------------------------- 经验资产（memories）
+# 契约见 docs/memories.md：经验（"在什么仓库/镜头下、何时、做什么、为什么"）是独立于
+# 代码块的资产，生命周期与作用域快照无关（scope 删除不应连带删经验），因此表挂在
+# IndexStore 同一个 SQLite 文件里（一套 WAL/备份/迁移机制），但由 MemoryStore 自己管理。
+
+MEMORY_STATUSES = ("active", "retired", "conflicting")
+_MEMORY_ID_RE = re.compile(r"^exp-\d{6}$")
+_MEMORY_MAX_TEXT = 8000          # 单字段字符上限（what/when_expr/why 与代码块正文同量级）
+MEMORY_LIST_MAX_LIMIT = 200      # 列表分页上限
+MEMORY_SEARCH_MAX_TOPK = 20      # search top_k 上限
+
+
+def _mem_clean_text(value, field):
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} required")
+    return text[:_MEMORY_MAX_TEXT]
+
+
+class MemoryStore:
+    """memories / memories_fts / memories_vec 的读写与混合检索。
+
+    - id：`exp-` + 6 位十进制自增（首个 exp-000001），达到 999999 后继续加位数
+      （exp-1000000），测试与服务都不会因此失败；
+    - FTS：memories_fts(what, when_expr, why)，trigram 分词 → 中文连续段/英文子串
+      都按「原文包含」匹配；查询侧由 `_fts_match_expr` 统一加引号防注入；
+    - 向量：memories_vec(mid, dim, v) 同步写（经验量小，不走 governor），
+      检索时全量读出暴力点积（L2 归一化后 = cosine），条目多后可换索引结构；
+    - 融合：与代码检索同法的 RRF（k=20，server.RRF_K），`rrf = 1/(20+rank)` 按名次相加。
+    """
+
+    def __init__(self, db):
+        self.db = db  # 与 IndexStore 共用连接（check_same_thread=False），由各方法加锁
+        self.lock = threading.RLock()
+
+    # ------------------------------------------------------------ id / 行工具
+    def _next_id(self):
+        # 单线程调用方已持 self.lock；max(len(id)) 取最大数字后缀（含跨位数）。
+        row = self.db.execute(
+            "select id from memories where length(id) = (select max(length(id)) from memories)"
+            " order by cast(substr(id, 5) as integer) desc limit 1"
+        ).fetchone()
+        seq = int(row["id"][4:]) + 1 if row else 1
+        return f"exp-{seq:06d}"
+
+    @staticmethod
+    def _row_to_memory(row, with_stats=True):
+        try:
+            evidence = json.loads(row["evidence"]) if row["evidence"] else []
+        except (TypeError, ValueError):
+            evidence = []
+        if not isinstance(evidence, list):
+            evidence = []
+        item = {
+            "id": row["id"],
+            "repo": row["repo"],
+            "lens": row["lens"],
+            "what": row["what"],
+            "when_expr": row["when_expr"] or "",
+            "why": row["why"] or "",
+            "evidence": evidence,
+            "status": row["status"],
+            "source": row["source"] or "pipeline",
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if with_stats:
+            item.update({
+                "stats_hits": int(row["stats_hits"] or 0),
+                "stats_adopted": int(row["stats_adopted"] or 0),
+                "last_hit_at": row["last_hit_at"],
+            })
+        return item
+
+    def get(self, memory_id, with_stats=True):
+        row = self.db.execute("select * from memories where id = ?", (memory_id,)).fetchone()
+        return self._row_to_memory(row, with_stats) if row else None
+
+    # ------------------------------------------------------------ upsert
+    def upsert(self, repo, lens, what, when_expr, why, evidence, source, status):
+        """创建或更新一条经验（幂等：重复提交同一条返回 action=updated，不产生新行）。
+
+        返回 (payload, action)。向量嵌入在 server 层做（需要 embedder 会话）。
+        """
+        repo = str(repo or "").strip()
+        lens = str(lens or "").strip()
+        if not repo or not lens:
+            raise ValueError("repo required" if not repo else "lens required")
+        what = _mem_clean_text(what, "what")
+        when_expr = str(when_expr or "").strip()[:_MEMORY_MAX_TEXT]
+        why = str(why or "").strip()[:_MEMORY_MAX_TEXT]
+        if not isinstance(evidence, list):
+            raise ValueError("evidence must be an array of {archive_ref|issue|mr}")
+        for ev in evidence:
+            if not isinstance(ev, dict) or not any(
+                str(ev.get(k) or "").strip() for k in ("archive_ref", "issue", "mr")
+            ):
+                raise ValueError("evidence item must carry archive_ref / issue / mr")
+        source = str(source or "").strip() or "pipeline"
+        if status not in MEMORY_STATUSES:
+            raise ValueError("status must be one of active / retired / conflicting")
+        now = int(time.time())
+        with self.lock:
+            existing = self.db.execute(
+                "select id from memories where repo = ? and lens = ? and what = ?",
+                (repo, lens, what),
+            ).fetchone()
+            if existing:
+                mid_id, is_new = existing["id"], False
+                self.db.execute(
+                    "update memories set when_expr = ?, why = ?, evidence = ?, source = ?,"
+                    " status = ?, updated_at = ? where id = ?",
+                    (when_expr, why, json.dumps(evidence, ensure_ascii=False), source, status, now, mid_id),
+                )
+            else:
+                mid_id, is_new = self._next_id(), True
+                self.db.execute(
+                    "insert into memories(id, repo, lens, what, when_expr, why, evidence, status,"
+                    " source, stats_hits, stats_adopted, last_hit_at, created_at, updated_at)"
+                    " values (?,?,?,?,?,?,?,?,?,0,0,null,?,?)",
+                    (mid_id, repo, lens, what, when_expr, why,
+                     json.dumps(evidence, ensure_ascii=False), status, source, now, now),
+                )
+                mid = self._rowid(mid_id)
+                self.db.execute(
+                    "insert into memories_fts(rowid, what, when_expr, why) values (?,?,?,?)",
+                    (mid, what, when_expr, why),
+                )
+            self.db.commit()
+        return {"id": mid_id}, ("created" if is_new else "updated")
+
+    def _rowid(self, memory_id):
+        return int(self.db.execute(
+            "select rowid from memories where id = ?", (memory_id,)
+        ).fetchone()[0])
+
+    def put_vector(self, memory_id, vec, dim):
+        """同步嵌入向量（float32 blob）。经验量小：每次 upsert 一条，直接写。"""
+        v = np.asarray(vec, dtype=np.float32).reshape(-1)
+        now = int(time.time())
+        with self.lock:
+            mid = self._rowid(memory_id)
+            self.db.execute(
+                "insert into memories_vec(mid, dim, v, updated_at) values (?,?,?,?)"
+                " on conflict(mid) do update set dim = excluded.dim, v = excluded.v,"
+                " updated_at = excluded.updated_at",
+                (mid, int(dim), v.tobytes(order="C"), now),
+            )
+            self.db.commit()
+
+    def set_status(self, memory_id, status):
+        """软删（retired）/ 恢复（active）/ 标记冲突（conflicting）的统一入口。"""
+        if status not in MEMORY_STATUSES:
+            raise ValueError("status must be one of active / retired / conflicting")
+        with self.lock:
+            cur = self.db.execute(
+                "update memories set status = ?, updated_at = ? where id = ?",
+                (status, int(time.time()), memory_id),
+            )
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def record_hit(self, memory_id, adopted=False):
+        with self.lock:
+            cur = self.db.execute(
+                "update memories set stats_hits = stats_hits + 1,"
+                " stats_adopted = stats_adopted + ?, last_hit_at = ? where id = ?",
+                (1 if adopted else 0, int(time.time()), memory_id),
+            )
+            self.db.commit()
+            if cur.rowcount == 0:
+                return None
+            row = self.db.execute(
+                "select stats_hits, stats_adopted from memories where id = ?", (memory_id,)
+            ).fetchone()
+            return {"stats_hits": int(row["stats_hits"]), "stats_adopted": int(row["stats_adopted"])}
+
+    # ------------------------------------------------------------ 查询
+    def list(self, repo=None, lens=None, status=None, q=None, limit=50, offset=0):
+        where, params = [], []
+        if repo:
+            where.append("repo = ?")
+            params.append(repo)
+        if lens:
+            where.append("lens = ?")
+            params.append(lens)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if q:
+            where.append("(what like ? or when_expr like ? or why like ?)")
+            params.extend([f"%{q}%"] * 3)
+        cond = (" where " + " and ".join(where)) if where else ""
+        total = self.db.execute(
+            "select count(*) from memories" + cond, params
+        ).fetchone()[0]
+        rows = self.db.execute(
+            "select * from memories" + cond + " order by created_at desc, id desc limit ? offset ?",
+            params + [int(limit), int(offset)],
+        ).fetchall()
+        return {"items": [self._row_to_memory(r) for r in rows], "total": int(total)}
+
+    def conflicting(self, limit=100, offset=0):
+        total = self.db.execute(
+            "select count(*) from memories where status = 'conflicting'"
+        ).fetchone()[0]
+        rows = self.db.execute(
+            "select * from memories where status = 'conflicting'"
+            " order by updated_at desc limit ? offset ?",
+            (int(limit), int(offset)),
+        ).fetchall()
+        return {"items": [self._row_to_memory(r) for r in rows], "total": int(total)}
+
+    # ------------------------------------------------------------ 混合检索
+    @staticmethod
+    def _fts_match_expr(q):
+        """把用户查询转成安全的 FTS MATCH 表达式（全部短语化，杜绝语法注入）。
+
+        trigram 分词下：ASCII 与连续中文都按「原文子串」匹配。空查询返回 None（跳过 FTS）。
+        """
+        tokens = [t for t in (x.strip() for x in re.split(r"\s+", str(q or ""))) if t]
+        return " ".join(f'"{t}"' for t in tokens) or None
+
+    def search_fts(self, match_expr, repo=None, lens=None, status="active", limit=None):
+        """FTS5 通道：按名次返回 [(id, bm25)]。短语化表达式保证安全。"""
+        sql = (
+            "select m.id, rank from memories m join memories_fts f on f.rowid = m.rowid"
+            " where memories_fts match ?"
+        )
+        params = [match_expr]
+        if status:
+            sql += " and m.status = ?"
+            params.append(status)
+        if repo:
+            sql += " and m.repo = ?"
+            params.append(repo)
+        if lens:
+            sql += " and m.lens = ?"
+            params.append(lens)
+        sql += " order by rank limit ?"
+        params.append(int(limit) if limit else 1000)
+        return [(r["id"], float(r["rank"])) for r in self.db.execute(sql, params)]
+
+    def _vec_matrix(self, repo=None, lens=None, status="active", dim=None):
+        """读出 (ids, matrix)：经验量小，直接全量载入暴力点积。
+
+        dim 给定时只取同维向量（模型热切换后库内可能混维，异维行直接跳过，
+        vstack 才不会崩；查询侧由 search 传当前 embedder 的维度）。
+        """
+        sql = (
+            "select m.id, mv.dim, mv.v from memories m join memories_vec mv on mv.mid = m.rowid"
+            " where mv.dim > 0"
+        )
+        params = []
+        if status:
+            sql += " and m.status = ?"
+            params.append(status)
+        if repo:
+            sql += " and m.repo = ?"
+            params.append(repo)
+        if lens:
+            sql += " and m.lens = ?"
+            params.append(lens)
+        ids, vecs = [], []
+        for r in self.db.execute(sql, params):
+            v = np.frombuffer(r["v"], dtype=np.float32)
+            if v.shape[0] != int(r["dim"]):
+                continue  # 维度异常（写入残留）：跳过，不拖垮检索
+            if dim is not None and v.shape[0] != int(dim):
+                continue
+            ids.append(r["id"])
+            vecs.append(v)
+        matrix = np.vstack(vecs).astype(np.float32) if vecs else np.zeros((0, 1), dtype=np.float32)
+        return ids, matrix
+
+    def search(self, q, qvec=None, repo=None, lens=None, top_k=5, rrf_k=20, status="active"):
+        """FTS5 + 向量 RRF 融合检索。
+
+        - qvec 为 None（embedder 不可用）→ 纯 FTS；FTS 无命中且向量可用 → 纯向量；
+        - RRF 与代码检索同法：`rrf += 1/(rrf_k + rank)`，rank 从 1 起；
+        - 排序键 (-rrf, source_rank)：FTS 与向量都命中的条目排前面（这正是 RRF 的目的），
+          同分时按原始向量相似度（有则 bm25，无则 -inf）稳定排序。
+        返回 (hits, channels)：channels 是各通道命中数（诊断/测试用）。
+        """
+        match_expr = self._fts_match_expr(q)
+        fts_hits = self.search_fts(match_expr, repo, lens, status, limit=1000) if match_expr else []
+        vec_hits, dim_note = [], None
+        if qvec is not None:
+            q = np.asarray(qvec, dtype=np.float32).reshape(-1)
+            ids, matrix = self._vec_matrix(repo, lens, status, dim=int(q.shape[0]))
+            if matrix.shape[0]:
+                scores = matrix @ q
+                order = np.argsort(-scores)[:1000]
+                vec_hits = [(ids[int(i)], float(scores[int(i)])) for i in order if scores[int(i)] > 0]
+        merged = {}
+        for rank, (mid_id, _score) in enumerate(fts_hits, 1):
+            merged[mid_id] = {"rrf": 1.0 / (rrf_k + rank), "vec": None}
+        for rank, (mid_id, score) in enumerate(vec_hits, 1):
+            cur = merged.get(mid_id)
+            contribution = 1.0 / (rrf_k + rank)
+            if cur is None:
+                merged[mid_id] = {"rrf": contribution, "vec": score}
+            else:
+                cur["rrf"] += contribution
+                cur["vec"] = score
+        if not merged:
+            return [], {"fts": len(fts_hits), "vector": len(vec_hits), "note": dim_note}
+        ranked_ids = [mid_id for mid_id, _ in sorted(
+            merged.items(), key=lambda kv: (-kv[1]["rrf"], -(kv[1]["vec"] if kv[1]["vec"] is not None else float("-inf")), kv[0])
+        )][: int(top_k)]
+        rows = self.db.execute(
+            "select * from memories where id in (%s)" % ",".join("?" * len(ranked_ids)), ranked_ids
+        ).fetchall()
+        by_id = {r["id"]: self._row_to_memory(r, with_stats=False) for r in rows}
+        hits = []
+        for mid_id in ranked_ids:
+            m = by_id.get(mid_id)
+            if m:
+                m["score"] = round(merged[mid_id]["rrf"], 6)
+                hits.append(m)
+        return hits, {"fts": len(fts_hits), "vector": len(vec_hits), "note": dim_note}
+
+    def stats(self):
+        row = self.db.execute(
+            "select count(*) as total, coalesce(sum(stats_hits), 0) as hits,"
+            " coalesce(sum(stats_adopted), 0) as adopted from memories"
+        ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "hits": int(row["hits"] or 0),
+            "adopted": int(row["adopted"] or 0),
+        }

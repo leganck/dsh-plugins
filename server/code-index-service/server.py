@@ -34,6 +34,7 @@
     POST /v1/namespaces/{ns}/chunks {bodies:[{hash, body}]} -> {accepted, deduped}
     POST /v1/namespaces/{ns}/embed  {order?, batch?} -> 入队后台嵌入
     GET  /v1/namespaces/{ns}/status -> {revision, chunks, vectors, coverage, pending, paused, rate, lineageBytes, scope{}}
+    GET  /v1/namespaces/{ns}/bodies?hashes=h1,h2&max_bytes=N -> 按内容哈希直读块正文（有界，见 docs/bodies.md）
     POST /v1/search                {namespace} 或 {namespaces:[{namespace,weight?}]}, query, k?, tag?,
                                     rerank?:{candidates} -> {hits[]（带 namespace/scope）, ms{}, coverage, byScope[]}
     POST /v1/admin/pause | /resume | /rate | /gc
@@ -78,6 +79,11 @@ THREADS = int(F.get("ORT_THREADS", "6"))
 PROVIDERS = F.get("ORT_PROVIDERS", "CUDAExecutionProvider,CPUExecutionProvider").split(",")
 EMBED_RATE = float(F.get("EMBED_RATE", "10"))          # 块/秒；0 = 不限速
 EMBED_BATCH = int(F.get("EMBED_BATCH", "8"))
+# 候选窗口 = EMBED_WINDOW × EMBED_BATCH：一次多取几批候选，按正文长度分桶送模型
+# （padding 到批内最长 → 长度相近的放一批，省 30%~50% 算力）。1 = 老行为。
+EMBED_WINDOW = int(F.get("EMBED_WINDOW", "3"))
+# 同一批内正文完全相同的块只送一次模型（代码块重复很常见）；0 = 关。
+EMBED_DEDUPE = F.get("EMBED_DEDUPE", "1") not in ("0", "false", "no")
 RERANK_BATCH = int(F.get("RERANK_BATCH", "8"))
 RERANK_MAX_TOKENS = int(F.get("RERANK_MAX_TOKENS", "256"))
 KNN_MAX_BYTES = int(float(F.get("KNN_MAX_BYTES", str(2 * 1024**3))))
@@ -96,6 +102,13 @@ MAX_TEXT_CHARS = 8000
 # 作用域永久保留，只能管理员显式删除；不再有 TTL / janitor / 配额。
 MAX_SEARCH_SCOPES = int(F.get("MAX_SEARCH_SCOPES", "4"))
 RRF_K = 20  # 与插件 lib/search.js 的 RRF_K 保持一致
+
+# 正文直读（GET /v1/namespaces/{ns}/bodies）：一次最多 200 个 hash、默认 200 KB、上限 2 MB。
+# 约定见 docs/bodies.md；这里只放死限制，不进 admin 配置（改限制要走代码评审）。
+MAX_BODIES_HASHES = 200
+BODIES_MAX_BYTES_DEFAULT = 200000
+BODIES_MAX_BYTES_LIMIT = 2000000
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 # 后台「模型下载」：白名单目录 + 后台线程；文件落在 /data/models 卷里
 MODEL_CATALOG = F.get("MODEL_CATALOG", "")
@@ -127,20 +140,26 @@ def _endpoint_group(path):
         return "sync"
     if path.startswith("/v1/namespaces/") and (path.endswith("/chunks") or path.endswith("/vectors")):
         return "vectors"
+    if path.startswith("/v1/namespaces/") and path.endswith("/bodies"):
+        return "bodies"
     if path.startswith("/v1/namespaces/") and path.endswith("/embed"):
         return "embed-queue"
     if path.startswith("/v1/admin/"):
         return "admin"
     if path.startswith("/v1/scopes") or path.startswith("/v1/spaces") or path.startswith("/v1/lineages/"):
         return "scopes"
+    if path.startswith("/v1/memories"):
+        return "memories"
     if path in ("/", "/health", "/v1/status", "/log"):
         return "status"
     return "other"
 
 
 # 统计页只展示"业务用量"：系统/轮询请求单独归类，不进入 KPI 与主图
+# memories 端点组（/v1/memories*）计入 retrieval 类（经验检索也是检索）；
+# 条目/命中盘点在 /v1/admin/stats 的 data["memories"] 单独给（见 stats 分支）。
 STATS_CATEGORY_GROUPS = {
-    "retrieval": ("search", "rerank"),
+    "retrieval": ("search", "rerank", "bodies", "memories"),
     "embedding": ("embed",),
     "indexing": ("sync", "vectors", "embed-queue"),
     "system": ("status", "scopes", "admin", "other"),
@@ -2809,6 +2828,7 @@ class FakeEmbedder:
 
 state = {"ready": False, "err": None, "info": {}, "rerank_ready": False, "rerank_err": None, "rerank_info": {}}
 store = None
+memories_store = None  # index_store.MemoryStore；与 store 同库，build() 里一起建
 knn = None
 governor = None
 embedder = None
@@ -2823,7 +2843,7 @@ def _load(name):
 
 
 def build():
-    global store, knn, governor, embedder, reranker
+    global store, memories_store, knn, governor, embedder, reranker
     if FAKE_EMBED:
         # 自测路径：完全不碰 onnxruntime / 模型文件
         embedder = FakeEmbedder()
@@ -2847,6 +2867,8 @@ def build():
         # 控制台展示用：优先环境变量 MODEL_NAME，否则按目录名映射内置 profile 的模型名
         ACTIVE["embed_name"] = MODEL_NAME or models_admin.name_for_dir(MODEL_DIR)
         log(f"embed ready: tag={info['tag']} providers={info['providers']}")
+        for _w in info.get("warnings") or []:
+            log(f"警告：{_w}")
 
         try:
             reranker = _load("reranker").Reranker(ort, RERANK_DIR, providers, THREADS, RERANK_MAX_TOKENS, RERANK_BATCH)
@@ -2857,10 +2879,15 @@ def build():
             log("rerank unavailable: " + state["rerank_err"])
 
     store = index_store.IndexStore(DB_PATH)
+    memories_store = index_store.MemoryStore(store.db)  # 经验资产：同库同连接（表见 index_store.SCHEMA）
     knn = _load("knn").KnnCache(store, KNN_MAX_BYTES)
-    governor = _load("governor").EmbedGovernor(store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log)
+    governor = _load("governor").EmbedGovernor(
+        store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log,
+        window=EMBED_WINDOW, dedupe=EMBED_DEDUPE,
+    )
     governor.start()
-    log(f"index store ready: db={DB_PATH} rate={EMBED_RATE}/s batch={EMBED_BATCH} knnMax={KNN_MAX_BYTES}B")
+    log(f"index store ready: db={DB_PATH} rate={EMBED_RATE}/s batch={EMBED_BATCH}"
+        f" window={EMBED_WINDOW} dedupe={EMBED_DEDUPE} knnMax={KNN_MAX_BYTES}B")
     if WARMUP:
         threading.Thread(target=_warmup, name="warmup", daemon=True).start()
 
@@ -3136,6 +3163,254 @@ def repo_status(namespace):
         "maxSearchScopes": MAX_SEARCH_SCOPES,
     }
     return out, 200
+
+
+def bodies_payload(namespace, hashes_param="", max_bytes_param=""):
+    """GET /v1/namespaces/{ns}/bodies 的实现：按内容哈希直读块正文，**全部有界**。
+
+    - hashes: 逗号分隔；去重后最多 `MAX_BODIES_HASHES` 个（超了直接 400，不静默截断）；
+      非 64 位 hex 的项进 `rejected`（不查库）；
+    - max_bytes: 默认 `BODIES_MAX_BYTES_DEFAULT`，非法值回落默认，clamp 到 [1, `BODIES_MAX_BYTES_LIMIT`]；
+    - 按请求顺序装正文，超出字节预算的块进 `truncated`（**不返回半截正文**）；
+    - 内容按血统共享：blobs 里没有的 hash 如实进 `missing`（跨血统同名 hash 不算命中）。
+
+    返回 (payload, http_code)。契约见 docs/bodies.md。
+    """
+    if not store:
+        return {"error": "not ready", "detail": state["err"]}, 503
+    repo = store.repo(namespace)
+    if not repo:
+        return {"error": "unknown-namespace"}, 404
+    t0 = time.time()
+    raw = hashes_param if isinstance(hashes_param, str) else ""
+    # 去重但保持请求顺序（返回顺序 = 请求顺序，调用方好对齐）
+    seen = set()
+    tokens = []
+    for token in raw.split(","):
+        token = token.strip()
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    if len(tokens) > MAX_BODIES_HASHES:
+        return {
+            "error": "too-many-hashes",
+            "count": len(tokens),
+            "limit": MAX_BODIES_HASHES,
+        }, 400
+    hashes, rejected = [], []
+    for token in tokens:
+        (hashes if _SHA256_HEX_RE.match(token) else rejected).append(token)
+    try:
+        max_bytes = int(max_bytes_param)
+    except (TypeError, ValueError):
+        max_bytes = BODIES_MAX_BYTES_DEFAULT
+    max_bytes = max(1, min(max_bytes, BODIES_MAX_BYTES_LIMIT))
+    found = store.bodies(repo["lineage_id"], hashes) if hashes else {}
+    bodies, missing, truncated = [], [], []
+    used = 0
+    for h in hashes:
+        body = found.get(h)
+        if body is None:
+            missing.append(h)
+            continue
+        text = body if isinstance(body, str) else str(body)
+        size = len(text.encode("utf-8"))
+        if used + size > max_bytes:
+            truncated.append(h)
+            continue
+        used += size
+        bodies.append({"hash": h, "body": text})
+    return {
+        "namespace": namespace,
+        "lineage_id": repo["lineage_id"],
+        "requested": len(hashes),
+        "returned": len(bodies),
+        "missing": missing,
+        "truncated": truncated,
+        "rejected": rejected,
+        "bodies": bodies,
+        "ms": round((time.time() - t0) * 1000, 1),
+    }, 200
+
+
+# ---------------------------------------------------------------- 经验资产（memories）
+# 契约见 docs/memories.md；实现风格与 bodies_payload 一致：纯函数返回 (payload, code)，
+# 路由层只负责解析路径/查询串。鉴权与其它 /v1 端点一致（Handler 层统一做）。
+
+MEMORY_MAX_TOPK = 20      # search top_k 上限（默认 5）
+MEMORY_LIST_DEFAULT = 50  # 列表默认分页
+
+
+def _memory_store():
+    if not memories_store:
+        return None, ({"error": "not ready", "detail": state["err"]}, 503)
+    return memories_store, None
+
+
+def _memory_embed(text):
+    """同步嵌入一条经验正文（非 query 侧：不加 QUERY_PREFIX）。
+
+    embedder 不可用（FAKE_EMBED 关闭且模型缺失/异常）时返回 (None, reason)：
+    向量缺省，检索退化为纯 FTS，由调用方在响应里注明。
+    """
+    if embedder is None:
+        return None, "embedder unavailable"
+    try:
+        with MODEL_LOCK:
+            vec = embedder.embed([text], is_query=False)[0]
+        return np.asarray(vec, dtype=np.float32).reshape(-1), None
+    except Exception as e:  # noqa: BLE001 —— 嵌入失败不能挡住经验入库
+        return None, f"{type(e).__name__}: {e}"
+
+
+def memory_upsert_payload(req):
+    """POST /v1/memories：创建/更新经验（幂等），同步嵌向量。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    try:
+        evidence = req.get("evidence")
+        if evidence is None:
+            evidence = []
+        result, action = ms.upsert(
+            req.get("repo"), req.get("lens"), req.get("what"), req.get("when_expr"),
+            req.get("why"), evidence, req.get("source"), req.get("status") or "active",
+        )
+    except ValueError as e:
+        return {"error": "bad-memory", "detail": str(e)}, 400
+    # 向量同步写：正文 = what + "\n" + when_expr（非 query 侧，不加前缀）；
+    # 失败不回滚：FTS 仍可用，search 响应会带 vectorNote 说明。
+    text = _memory_embed_target(req.get("what"), req.get("when_expr"))
+    vec, why_no_vec = _memory_embed(text)
+    if vec is not None:
+        try:
+            ms.put_vector(result["id"], vec, int(vec.shape[0]))
+        except Exception as e:  # noqa: BLE001
+            why_no_vec = f"{type(e).__name__}: {e}"
+    out = {"id": result["id"], "action": action}
+    if why_no_vec:
+        out["vectorNote"] = f"vector missing: {why_no_vec}"
+    return out, 200
+
+
+def _memory_embed_target(what, when_expr):
+    return f"{str(what or '').strip()}\n{str(when_expr or '').strip()}".strip()
+
+
+def memory_get_payload(memory_id):
+    """GET /v1/memories/{id}：单条，404 风格与 bodies 一致。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    item = ms.get(memory_id)
+    if not item:
+        return {"error": "unknown-memory"}, 404
+    return item, 200
+
+
+def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, offset=None):
+    """GET /v1/memories：过滤 + 分页（limit clamp [1,200]，offset >= 0）。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    try:
+        limit = MEMORY_LIST_DEFAULT if limit is None else int(limit)
+        offset = 0 if offset is None else int(offset)
+    except (TypeError, ValueError):
+        return {"error": "bad-pagination"}, 400
+    limit = max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT))
+    offset = max(0, offset)
+    return ms.list(repo, lens, status, q, limit, offset), 200
+
+
+def memory_search_payload(req):
+    """POST /v1/memories/search：FTS5 + 向量 RRF（k=20，与代码检索一致）。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    query = str(req.get("q") or "").strip()
+    if not query:
+        return {"error": "q required"}, 400
+    raw_top_k = req.get("top_k")
+    try:
+        top_k = 5 if raw_top_k is None else int(raw_top_k)
+    except (TypeError, ValueError):
+        return {"error": "bad-top-k"}, 400
+    if top_k < 1 or top_k > MEMORY_MAX_TOPK:
+        return {"error": "bad-top-k", "detail": f"top_k must be in [1, {MEMORY_MAX_TOPK}]"}, 400
+    t0 = time.time()
+    # 查询向量：query 侧，embedder 会加 QUERY_PREFIX（与代码检索同约定）
+    qvec, why_no_vec = _memory_embed_query(query)
+    hits, channels = ms.search(query, qvec, req.get("repo") or None, req.get("lens") or None, top_k)
+    out = {
+        "hits": [{k: h[k] for k in ("id", "what", "when_expr", "why", "lens", "repo", "score")}
+                 for h in hits],
+        "ms": round((time.time() - t0) * 1000, 1),
+    }
+    if why_no_vec:
+        # 向量缺省：检索仍走 FTS；如实注明原因（文档里约定的 vectorNote）
+        out["vectorNote"] = f"vector search unavailable: {why_no_vec}"
+    elif channels.get("note"):
+        out["vectorNote"] = channels["note"]
+    return out, 200
+
+
+def _memory_embed_query(query):
+    if embedder is None:
+        return None, "embedder unavailable"
+    try:
+        with MODEL_LOCK:
+            vec = embedder.embed([query], is_query=True)[0]
+        return np.asarray(vec, dtype=np.float32).reshape(-1), None
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+
+def memory_hit_payload(memory_id, req):
+    """POST /v1/memories/{id}/hit：命中计数；adopted=true 时采纳计数 +1。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    stats = ms.record_hit(memory_id, bool(req.get("adopted")))
+    if stats is None:
+        return {"error": "unknown-memory"}, 404
+    return stats, 200
+
+
+def memory_delete_payload(memory_id):
+    """DELETE /v1/memories/{id}：软删（status=retired，FTS/检索随即不可见）。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    if not ms.set_status(memory_id, "retired"):
+        return {"error": "unknown-memory"}, 404
+    return {"id": memory_id, "status": "retired"}, 200
+
+
+def memory_conflicts_payload(limit=None, offset=None):
+    """GET /v1/memories/conflicts：status=conflicting 的待裁决队列。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    try:
+        limit = 100 if limit is None else int(limit)
+        offset = 0 if offset is None else int(offset)
+    except (TypeError, ValueError):
+        return {"error": "bad-pagination"}, 400
+    return ms.conflicting(max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT)), max(0, offset)), 200
+
+
+def memory_resolve_payload(memory_id, req):
+    """POST /v1/memories/{id}/resolve：裁决 conflicting 条目（active 重新生效 / retired 退役）。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    status = str(req.get("status") or "").strip()
+    if status not in ("active", "retired"):
+        return {"error": "bad-status", "detail": "status must be active or retired"}, 400
+    if not ms.set_status(memory_id, status):
+        return {"error": "unknown-memory"}, 404
+    return {"id": memory_id, "status": status}, 200
 
 
 def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc", limit=50, offset=0):
@@ -3605,6 +3880,8 @@ class Handler(BaseHTTPRequestHandler):
                     "vectors": vectors,
                     "coverage": sc.get("coverage"),
                     "backlog": backlog,
+                    # 实测吞吐（滑动窗口，块/秒）：rate 是配置上限，speed 是实际值
+                    "speed": gov.get("speed"),
                     # 清空积压的预计秒数：这就是"终点"（速率 0/已暂停时为 None）
                     "etaSeconds": round(backlog / rate, 1) if (backlog and rate > 0) else None,
                     "totalBytes": sc.get("totalBytes"),
@@ -3623,6 +3900,12 @@ class Handler(BaseHTTPRequestHandler):
                 data = _enrich_stats(data)
             except Exception as e:  # noqa: BLE001 —— enrichment 失败不能拖垮统计接口
                 log(f"stats: enrich 失败（忽略）{type(e).__name__}: {e}")
+            # 经验资产盘点（验收 4）：条目总数 / 命中与采纳总数。失败不影响统计接口。
+            if memories_store:
+                try:
+                    data["memories"] = memories_store.stats()
+                except Exception as e:  # noqa: BLE001
+                    log(f"stats: memories 统计失败（忽略）{type(e).__name__}: {e}")
             return self._send(200, data)
         if path == "/v1/admin/models":
             return self._send(200, models_payload())
@@ -3692,6 +3975,36 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/":
             return self._send(200, self._status_payload())
+        if path == "/v1/memories/conflicts":
+            # 注意顺序：/conflicts 必须在 /v1/memories/{id} 之前判（否则 "conflicts" 被当 id）
+            if not store:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            q = parse_qs(u.query or "")
+            payload, code = memory_conflicts_payload(
+                (q.get("limit") or [None])[0], (q.get("offset") or [None])[0],
+            )
+            return self._send(code, payload)
+        if path == "/v1/memories":
+            if not store:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            q = parse_qs(u.query or "")
+
+            def _q1(name):
+                return (q.get(name) or [None])[0]
+
+            payload, code = memory_list_payload(
+                _q1("repo"), _q1("lens"), _q1("status"), _q1("q"), _q1("limit"), _q1("offset"),
+            )
+            return self._send(code, payload)
+        if path.startswith("/v1/memories/"):
+            if not store:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            memory_id = unquote(path[len("/v1/memories/") :])
+            if not memory_id or "/" in memory_id:
+                return self._send(400, {"error": "bad-memory-id",
+                                        "message": "id 必须是单个 URL segment，如 exp-000001"})
+            payload, code = memory_get_payload(memory_id)
+            return self._send(code, payload)
         if path.startswith("/v1/namespaces/") and path.endswith("/status"):
             encoded_ns = path[len("/v1/namespaces/") : -len("/status")]
             if "/" in encoded_ns or not encoded_ns:
@@ -3701,6 +4014,25 @@ class Handler(BaseHTTPRequestHandler):
             if not self._repo_allowed(ns):
                 return self._send(404, {"error": "not-found"})
             payload, code = repo_status(ns)
+            return self._send(code, payload)
+        if path.startswith("/v1/namespaces/") and path.endswith("/bodies"):
+            # 正文直读：{ns} 必须编码成单个 URL segment（含 "/"、"#" 时尤其），
+            # 解析口径与 POST /v1/namespaces/{ns}/chunks 一致：rpartition + unquote。
+            rest = path[len("/v1/namespaces/") :]
+            encoded_ns, sep, action = rest.rpartition("/")
+            if not sep or not encoded_ns or action != "bodies":
+                return self._send(400, {"error": "bad-namespace-path",
+                                        "message": "namespace 必须是单个 URL segment"})
+            ns = unquote(encoded_ns)
+            if not self._repo_allowed(ns):
+                return self._send(404, {"error": "not-found"})
+            self._scope_ns = ns  # 统计里按 namespace 归属（与 /v1/search 同口径）
+            q = parse_qs(u.query or "")
+            payload, code = bodies_payload(
+                ns,
+                ",".join(q.get("hashes") or []),
+                (q.get("max_bytes") or [""])[0],
+            )
             return self._send(code, payload)
         if path.startswith("/v1/repos/"):
             return self._send(410, {
@@ -3771,6 +4103,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
+        # /v1/memories/{id} 是业务端点（经验下线）：与索引/检索接口同鉴权（Bearer Key 或后台）。
+        if path.startswith("/v1/memories/"):
+            if not (self._api_ok() or self._admin_ok()):
+                return self._unauthorized()
+            if not state["ready"]:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            memory_id = unquote(path[len("/v1/memories/") :])
+            if not memory_id or "/" in memory_id:
+                return self._send(400, {"error": "bad-memory-id"})
+            payload, code = memory_delete_payload(memory_id)
+            return self._send(code, payload)
         # DELETE 目前只有管理操作（删 Key / 删 scope），index key 不允许。
         ok = self._admin_ok()
         if not ok:
@@ -3842,7 +4185,8 @@ class Handler(BaseHTTPRequestHandler):
                     "rerank_ready", "pid", "model_bytes", "available_providers")
             return {k: info[k] for k in keep if k in info}
         if governor:
-            info["governor"] = {"paused": governor.paused, "rate": governor.rate, "batch": governor.batch}
+            info["governor"] = {"paused": governor.paused, "rate": governor.rate,
+                                "batch": governor.batch, "window": governor.window}
         if knn:
             info["knn"] = knn.stats()
         if store:
@@ -4074,6 +4418,35 @@ class Handler(BaseHTTPRequestHandler):
                     req.get("embedText"),
                 )
                 return self._send(code, payload)
+            # ---------------- 经验资产（memories） ----------------
+            # 顺序：search 字面路径在 /v1/memories/{id} 通配之前判，避免 "search" 被当成 id；
+            # /hit 与 /resolve 用 endswith 精确匹配，不会吞掉其它子路径。
+            if path == "/v1/memories":
+                if not store:
+                    return self._send(503, {"error": "not ready", "detail": state["err"]})
+                payload, code = memory_upsert_payload(req)
+                return self._send(code, payload)
+            if path == "/v1/memories/search":
+                if not store:
+                    return self._send(503, {"error": "not ready", "detail": state["err"]})
+                payload, code = memory_search_payload(req)
+                return self._send(code, payload)
+            if path.startswith("/v1/memories/") and path.endswith("/hit"):
+                if not store:
+                    return self._send(503, {"error": "not ready", "detail": state["err"]})
+                memory_id = unquote(path[len("/v1/memories/") : -len("/hit")])
+                if not memory_id or "/" in memory_id:
+                    return self._send(400, {"error": "bad-memory-id"})
+                payload, code = memory_hit_payload(memory_id, req)
+                return self._send(code, payload)
+            if path.startswith("/v1/memories/") and path.endswith("/resolve"):
+                if not store:
+                    return self._send(503, {"error": "not ready", "detail": state["err"]})
+                memory_id = unquote(path[len("/v1/memories/") : -len("/resolve")])
+                if not memory_id or "/" in memory_id:
+                    return self._send(400, {"error": "bad-memory-id"})
+                payload, code = memory_resolve_payload(memory_id, req)
+                return self._send(code, payload)
             # ---------------- 作用域（快照）管理 ----------------
             if path == "/v1/scopes/resolve":
                 try:
@@ -4238,7 +4611,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "resume":
                     governor.resume()
                 elif action == "rate":
-                    governor.set_rate(float(req.get("rate", governor.rate)))
+                    # rate 语义不变（块/秒，0=不限速）；batch/window 可选，运行时可调批大小
+                    if "rate" in req:
+                        governor.set_rate(float(req["rate"]))
+                    if "batch" in req or "window" in req:
+                        governor.set_batch(req.get("batch", governor.batch), req.get("window"))
                 elif action == "gc":
                     lineage = req.get("lineage")
                     if not lineage:

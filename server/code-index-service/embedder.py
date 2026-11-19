@@ -117,8 +117,27 @@ class Embedder:
             "bge-base-zh-v1.5" if os.path.basename(model_dir) == "model" else os.path.basename(model_dir)
         )
         precision = "fp16" if "fp16" in self.model_file else "int8" if "int8" in self.model_file else "fp32"
+        self.precision = precision
         self.dim = None
         self.tag = f"{name}-{fingerprint(model_dir, self.model_file)}-{precision}"
+
+    def warnings(self):
+        """启动期诊断（**只提示，不改行为**）：fp16 图跑在 CPU EP 上吞吐会掉一个数量级。
+
+        依据（2026-11-18）：4 线程 CPU 容器 + bge-base fp16，后台嵌入实测 0.8 块/秒；
+        而同一批次的调度/DB 开销实测只有 0.9 ms（`tests/bench_embed_governor.py`），
+        慢的是模型调用本身。ORT 的 CPU EP 没有 fp16 MatMul 的原生 kernel，会在算子前后
+        插入 Cast，同规模比 fp32/int8 慢 5~20 倍。想提速只能换 model（fp32/int8 文件）或上
+        GPU 镜像 —— 注意**换精度会改 tag，等于全量重嵌**，要单独评审。
+        """
+        providers = [str(p) for p in (self.session.get_providers() or [])]
+        cpu_only = all(p == "CPUExecutionProvider" for p in providers) if providers else True
+        if cpu_only and self.precision == "fp16":
+            return [
+                f"模型 {self.model_file} 是 fp16，但执行提供者只有 CPU：ORT 的 CPU EP 没有 "
+                "fp16 kernel，实测吞吐比 fp32/int8 低 5~20 倍。"
+            ]
+        return []
 
     def info(self, ort_version):
         return {
@@ -127,6 +146,7 @@ class Embedder:
             "tag": self.tag,
             "providers": self.session.get_providers(),
             "ort": ort_version,
+            "warnings": self.warnings(),
         }
 
     def embed(self, texts, is_query=False):
