@@ -217,7 +217,7 @@ const readMarker = () => JSON.parse(fs.readFileSync(path.join(process.env.DSH_HO
   try {
     const fake = cordisLikeCtx(plugin)
     plugin.apply(fake.ctx, parsed)
-    check('volatile Config 传入 apply 时能解包并完成注册', fake.registry.size === 5, `${fake.registry.size} 个工具`)
+    check('volatile Config 传入 apply 时能解包并完成注册', fake.registry.size === 6, `${fake.registry.size} 个工具`)
   } catch (e) {
     schemaError = String(e.message)
   }
@@ -229,7 +229,7 @@ const readMarker = () => JSON.parse(fs.readFileSync(path.join(process.env.DSH_HO
   try {
     const fake = cordisLikeCtx(plugin)
     plugin.apply(fake.ctx, plugin.Config({ roots: [], vectors: 'off' }))
-    check('bundle 默认配置（无 advanced/remote）可加载', fake.registry.size === 5, `${fake.registry.size} 个工具`)
+    check('bundle 默认配置（无 advanced/remote）可加载', fake.registry.size === 6, `${fake.registry.size} 个工具`)
   } catch (e) {
     bundleError = String(e.message)
   }
@@ -255,8 +255,8 @@ check('未声明 inject 时 apply 会抛错（回归保护）', (() => {
     return /without inject/.test(e.message)
   }
 })())
-check('注册了 5 个工具', registry.size === 5, [...registry.keys()].join(','))
-for (const name of ['code_index', 'code_search', 'code_index_status', 'code_map', 'code_index_deps']) {
+check('注册了 6 个工具', registry.size === 6, [...registry.keys()].join(','))
+for (const name of ['code_index', 'code_search', 'code_index_status', 'code_map', 'code_index_deps', 'code_graph']) {
   check(`包含 ${name}`, registry.has(name))
 }
 const search = registry.get('code_search')

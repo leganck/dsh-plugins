@@ -37,6 +37,21 @@ import { AutoSyncEntry, acquireRepoLock } from './lib/auto-sync.js'
 import { createAutoIndexQueue } from './lib/auto-index.js'
 import { extractPaths, reposFromPaths, resolveRepoRoot } from './lib/repo-touch.js'
 import { resolveAllowedRoots, isInsideRoots } from './lib/workspace-roots.js'
+import {
+  EDGE_TYPES,
+  EXPAND_MODES,
+  EXPAND_MAX_CHARS,
+  expandHits,
+  renderExpandBlock,
+  chunkIdsForHits,
+  collectNeighbors,
+  findSymbols,
+  similarSymbolNames,
+  findChunksByHint,
+  graphStats,
+  firstLineOf,
+  sortNeighbors,
+} from './lib/graph.js'
 import z from '@deepseek-ai/schemastery'
 
 /** 0.10.0 remote-only：本地只保留 parser（切块）依赖组，embed 组不再安装 */
@@ -187,6 +202,18 @@ const USER_DEFAULTS = {
       maxPerSession: 3,
       maxWatched: 20,
     },
+    /**
+     * 文档降权（0~1）：`*.md` 这类文件在代码检索里常靠词频挤占 top，默认乘 0.35。
+     * 1 = 不降权；0 = 排到最后（不删除结果）。
+     */
+    docWeight: 0.35,
+    /**
+     * 符号图（symbols/edges）：建库完成后自动重建。
+     * 为什么默认开：图是检索端的第二种"索引"（谁调用我 / 改这里影响谁），
+     * 关了以后 code_search 的 expand 与 code_graph 都只能空转；而建图成本远低于切块。
+     * 失败只 warning（见 lib/indexer.js），不会把建库结果变成失败。
+     */
+    graph: { enabled: true },
     remoteTimeoutMs: 8000,
     remoteRateLimit: null,
   },
@@ -245,6 +272,11 @@ export const Config = z.object({
       maxFiles: z.number().default(20000),
       maxPerSession: z.number().default(3),
       maxWatched: z.number().default(20),
+    }).default({}),
+    /** 文档降权系数（0~1，默认 0.35；1 = 关闭） */
+    docWeight: z.number().min(0).max(1).default(0.35),
+    graph: z.object({
+      enabled: z.boolean().default(true),
     }).default({}),
     remoteTimeoutMs: z.number().default(8000),
     remoteRateLimit: nullableNumber(),
@@ -428,6 +460,7 @@ function userConfigToInternal(raw) {
     chunking: { ...USER_DEFAULTS.advanced.chunking, ...(advRaw.chunking ?? {}) },
     scan: { ...USER_DEFAULTS.advanced.scan, ...(advRaw.scan ?? {}) },
     sync: { ...USER_DEFAULTS.advanced.sync, ...(advRaw.sync ?? {}) },
+    graph: { ...USER_DEFAULTS.advanced.graph, ...(advRaw.graph ?? {}) },
   }
   const scan = adv.scan
   if (!scan || typeof scan !== 'object' || Array.isArray(scan)) {
@@ -437,6 +470,14 @@ function userConfigToInternal(raw) {
     if (typeof scan[key] !== 'boolean') {
       throw new ConfigError(`config.advanced.scan.${key} 必须是布尔值`)
     }
+  }
+  // 布尔就够，不做"未知值当 true"的宽容：graph.enabled 拼错必须报错，
+  // 否则用户以为关了图（或以为开着），而实际行为与预期相反。
+  if (!adv.graph || typeof adv.graph !== 'object' || Array.isArray(adv.graph)) {
+    throw new ConfigError('config.advanced.graph 必须是对象')
+  }
+  if (typeof adv.graph.enabled !== 'boolean') {
+    throw new ConfigError(`config.advanced.graph.enabled 必须是布尔值，收到 ${JSON.stringify(adv.graph.enabled)}`)
   }
   if (!Array.isArray(scan.ignoreFiles) || scan.ignoreFiles.some((f) => typeof f !== 'string' || !f.trim())) {
     throw new ConfigError('config.advanced.scan.ignoreFiles 必须是非空字符串数组')
@@ -490,6 +531,7 @@ function userConfigToInternal(raw) {
     chunking: adv.chunking,
     scan: adv.scan,
     sync: adv.sync,
+    graph: adv.graph,
     depsDir: adv.depsDir,
     vectorStore: vectors === 'remote' ? 'remote' : 'local',
     rerank,
@@ -769,6 +811,46 @@ function formatEpoch(value) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return null
   return new Date(n < 1e12 ? n * 1000 : n).toLocaleString()
+}
+
+/**
+ * 建库输出里的图规模行。
+ * 图失败**不许**说成建库失败：建库已经成功、检索照常可用，把两件事混在一起会让人白排查。
+ */
+function renderGraphBuiltLine(graph, graphError) {
+  if (graph) {
+    const at = graph.builtAt ? new Date(graph.builtAt).toLocaleString() : '未知'
+    const cost = graph.skipped ? '图已是最新' : `重建 ${graph.ms} ms`
+    return `  图：${graph.symbols} 符号 / ${graph.edges} 边（built_at ${at}；${cost}）`
+  }
+  if (graphError) return `  ⚠️ 图重建失败（建库已成功、检索不受影响）：${graphError}`
+  return '  图：未启用（advanced.graph.enabled=false）'
+}
+
+/** status 面的图规模行：没有图时给"跑一次 code_index 就有"的下一步，而不是留空 */
+function renderGraphStatusLine(store) {
+  const g = graphStats(store)
+  return g.builtAt
+    ? `  图：${g.symbols} 符号 / ${g.edges} 边（built_at ${new Date(g.builtAt).toLocaleString()}）`
+    : '  图：未建（跑一次 code_index 会顺带重建符号图）'
+}
+
+/** expand 的结构化摘要：不带正文（structuredContent 里塞全套 body 会把上下文吃光） */
+function summarizeExpansion(expansion) {
+  return {
+    mode: expansion.mode,
+    roots: expansion.roots,
+    total: expansion.total,
+    items: expansion.items.map((it) => ({
+      type: it.type,
+      direction: it.direction,
+      weight: it.weight,
+      hop: it.hop ?? 1,
+      path: it.other.path,
+      startLine: it.other.startLine,
+      endLine: it.other.endLine,
+    })),
+  }
 }
 
 export function apply(ctx, rawConfig = {}) {
@@ -1146,10 +1228,11 @@ let reconcileTimer = null
             ? `  跨血统复用：${config.remote.reuse}（同 remote 已按 lineage 自动共享）`
             : null
           return textResult(
-            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, autoIndex: autoIndexState, workspace, scope: scopeInfo, reuse: config.remote.reuse },
+            { repoRoot, dbPath, status: st, stats: s, scanStats, autoSync, autoIndex: autoIndexState, workspace, scope: scopeInfo, reuse: config.remote.reuse, graph: graphStats(store) },
             [
               `索引状态 ${repoRoot}`,
               `  已入库：${s.files} 文件 / ${s.chunks} 块 / ${s.vectors} 向量`,
+              renderGraphStatusLine(store),
               `  仓库当前：${st.scanned} 个候选文件`,
               `  待更新：${st.changed} 改 / ${st.removed} 删；未变 ${st.unchanged}`,
               workspaceLine,
@@ -1204,6 +1287,13 @@ let reconcileTimer = null
                 uploadBatch: config.remote.uploadBatch,
               }
             : null,
+          // 图是索引的派生物：建库成功后顺带重建符号图（advanced.graph.enabled，默认开）；
+          // 失败只 warning —— 图挂了不影响"建库成功"，检索照常。
+          graph: {
+            enabled: config.graph.enabled,
+            logger: (m) => ctx.logger?.info?.(`dsh-code-index: ${m}`),
+            warn: (m) => ctx.logger?.warn?.(`dsh-code-index: ${m}`),
+          },
         })
         // 建库后切块指纹已确定（store.meta），此时算出的作用域才是本轮真正写入的那个
         const scopeInfo = remoteMode ? scopeInfoFor(repoRoot, store) : null
@@ -1224,6 +1314,8 @@ let reconcileTimer = null
             ? `  已忽略 ${r.scanStats.ignored} 文件（gitignore ${r.scanStats.bySource.gitignore} / cursorignore ${r.scanStats.bySource.cursorignore} / exclude ${r.scanStats.bySource.exclude}）`
             : null,
           `  切块策略：${Object.entries(r.strategies ?? {}).map(([s, n]) => `${s} ${n} 文件`).join('；') || '（本轮无变更文件）'}`,
+          // 图规模：看得见才敢用 expand/code_graph；关掉或失败也要如实说，不留空
+          renderGraphBuiltLine(r.graph, r.graphError),
           ...(!r.parserMissing?.length
             ? []
             : renderParserHint(r.parserMissing, {
@@ -1536,6 +1628,35 @@ let reconcileTimer = null
     }
   }, 'dsh-code-index: auto index')
 
+  /**
+   * 覆盖率闸门（实测 2026-11-18 erp-pos）：远端只嵌了 3% 时，vec-only 命中**全是噪声**，
+   * 融合反而比纯关键词更差。低于阈值就按纯关键词检索，并说明原因与进度。
+   * mode=vector 是显式要求，不拦（用户明确要向量，就该看到它有多不完整）。
+   * 用 60s 缓存避免每次检索都多打一次 status。
+   */
+  const MIN_REMOTE_COVERAGE = 0.2
+  const remoteCoverageCache = new Map()
+  async function remoteCoverage(namespace) {
+    if (!namespace || !remoteGateOpen()) return null
+    const hit = remoteCoverageCache.get(namespace)
+    if (hit && Date.now() - hit.at < 60000) return hit
+    try {
+      const rs = await getRemoteIndex().status(namespace)
+      const entry = {
+        at: Date.now(),
+        coverage: Number(rs.coverage ?? 0),
+        pending: rs.pending ?? null,
+        vectors: rs.vectors ?? null,
+        chunks: rs.chunks ?? null,
+      }
+      remoteCoverageCache.set(namespace, entry)
+      return entry
+    } catch {
+      // 拿不到覆盖度时不拦：宁可多一次远端融合，也不因 status 抖动退化能力
+      return null
+    }
+  }
+
   // ---------------------------------------------------------------- code_search
   registerTool({
     name: 'code_search',
@@ -1563,6 +1684,17 @@ let reconcileTimer = null
             + '适合“在这个文件附近，还有哪儿是类似实现”。',
         },
         exclude_current: { type: 'boolean', description: '给了 current_file 时是否排除该文件自身，默认 true。' },
+        expand: {
+          type: 'string',
+          enum: Object.keys(EXPAND_MODES),
+          description:
+            '命中后额外展开一层**关联代码**（用建库时产出的符号图），不改变命中本身的排序：'
+            + 'callers=谁调用我 / callees=我调用谁 / mapper=mapper 与 DAO、表怎么连 / impact=改这里会波及谁（入向 2 跳）。',
+        },
+        expand_limit: {
+          type: 'integer',
+          description: 'expand 时展开前多少个命中块（1..10，默认 5）；每块每类边最多 5 条，总共最多 20 条、渲染 ≤1500 字符。',
+        },
       },
       required: ['query'],
       additionalProperties: false,
@@ -1570,6 +1702,12 @@ let reconcileTimer = null
     output: { schema: { type: 'object' }, render: (_a, v) => [{ type: 'text', text: v.content?.[0]?.text ?? '' }] },
     async execute(args, exec) {
       try {
+        // expand 的参数先校验：枚举拼错必须当场说清楚，不能悄悄按"没给"处理
+        // （静默忽略会让人以为图里根本没有关联，而实际是参数没生效）。
+        if (args.expand !== undefined && !EXPAND_MODES[args.expand]) {
+          return fail(`expand 只支持 ${Object.keys(EXPAND_MODES).join(' | ')}，收到 ${JSON.stringify(args.expand)}`)
+        }
+        const expandLimit = Math.max(1, Math.min(10, Number.isFinite(args.expand_limit) ? Math.trunc(args.expand_limit) : 5))
         const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
         // 白名单必须在打开/创建索引库之前校验，否则会在任意路径下建出 .dsh-index
         assertAllowed(repoRoot, exec, { explicit: Boolean(args?.path) })
@@ -1603,7 +1741,17 @@ let reconcileTimer = null
           // 仍发旧协议 `{namespace}`，旧服务端零回归。
           const namespaces = scopeInfo.namespaces
           // mode=fts 时明确不走向量：不请求远端、也不做远端重排。
-          const skipRemote = searchMode === 'fts'
+          let skipRemote = searchMode === 'fts'
+          let coverageGateNote = null
+          if (!skipRemote && searchMode !== 'vector') {
+            const cov = await remoteCoverage(scopeInfo.namespace)
+            if (cov && Number.isFinite(cov.coverage) && cov.coverage < MIN_REMOTE_COVERAGE) {
+              skipRemote = true
+              coverageGateNote =
+                `远端向量覆盖仅 ${(cov.coverage * 100).toFixed(1)}%（低于闸门 ${Math.round(MIN_REMOTE_COVERAGE * 100)}%），`
+                + `本次按纯关键词检索；服务端仍在嵌入（待嵌 ${cov.pending ?? '?'} 块）`
+            }
+          }
           const remoteRerank = !skipRemote && tier && config.rerankBackend === 'remote' ? tier.candidates : 0
           let remoteHits = []
           let remoteMeta = null
@@ -1670,8 +1818,12 @@ let reconcileTimer = null
             rerankCandidates: skipRemote ? 0 : (tier?.candidates ?? 0),
             excludePaths,
             boostPrefix,
+            docWeight: config.advanced?.docWeight,
           })
-          if (skipRemote) r.note = ['mode=fts：强制关键词，未调用远端向量通道', r.note].filter(Boolean).join('；')
+          if (skipRemote && searchMode === 'fts') {
+            r.note = ['mode=fts：强制关键词，未调用远端向量通道', r.note].filter(Boolean).join('；')
+          }
+          if (coverageGateNote) r.note = [coverageGateNote, r.note].filter(Boolean).join('；')
           if (remoteError) {
             r.note = [
               r.note,
@@ -1716,6 +1868,7 @@ let reconcileTimer = null
             embedText,
             excludePaths,
             boostPrefix,
+            docWeight: config.advanced?.docWeight,
           })
         }
         // 纯关键词模式下的 note 必然是「向量通道未启用」这类说明 —— 那是设计如此，不是故障。
@@ -1741,6 +1894,18 @@ let reconcileTimer = null
           )
         }
         const lines = [`命中 ${r.results.length} 条（通道 ${r.mode}；词项 ${r.terms.join(' / ')}）`]
+        // ---- expand：命中块 → 关联代码（可选）----
+        // 放在命中列表**之后**追加，且整段不执行时输出与旧版逐字节一致（没有 expand 就没有这一段）。
+        let expansion = null
+        let expandBlock = ''
+        if (args.expand) {
+          expansion = expandHits(store, chunkIdsForHits(store, r.results.slice(0, expandLimit)), {
+            mode: args.expand,
+            maxHits: expandLimit,
+            perTypeLimit: 5,
+          })
+          expandBlock = renderExpandBlock(expansion, { maxChars: EXPAND_MAX_CHARS })
+        }
         // 契约 §6：code_search 头部提示多作用域（只有配了 scope/readScopes 才出现）
         if (scopeLine) lines.push('  ' + scopeLine)
         if (cf) {
@@ -1768,7 +1933,16 @@ let reconcileTimer = null
           lines.push(`\n[${hit.rank}] ${hit.path}:${hit.startLine}-${hit.endLine}  (fts ${hit.ftsRank ?? '-'} / vec ${hit.vecRank ?? '-'}${rs})`)
           lines.push(hit.snippet.split('\n').map((l) => '    ' + l).join('\n'))
         }
-        return textResult({ repoRoot, mode: r.mode, terms: r.terms, results: r.results, rerank: r.rerank, scope: scopeInfo }, lines.join('\n'))
+        // 无关联时不出这个区块（空表头只会占预算、不提供信息）
+        if (expandBlock) lines.push('', expandBlock)
+        return textResult(
+          {
+            repoRoot, mode: r.mode, terms: r.terms, results: r.results, rerank: r.rerank, scope: scopeInfo,
+            // expand 只在显式请求时出现：旧调用方的 structuredContent 形状不变
+            ...(expansion ? { expand: summarizeExpansion(expansion) } : {}),
+          },
+          lines.join('\n'),
+        )
       } catch (e) {
         return fail(String(e.message))
       }
@@ -1806,6 +1980,8 @@ let reconcileTimer = null
           `索引：${repoRoot}`,
           `  库文件 ${dbPath}（${(s.dbBytes / 1048576).toFixed(1)} MB）`,
           `  覆盖 ${s.files} 文件 / ${s.chunks} 块`,
+          // 图规模：没有它，用户无法判断 expand/code_graph 为什么没用（旧库根本没建图）
+          renderGraphStatusLine(store),
           `  最后建库：${store.getMeta('last_build_at') ? new Date(Number(store.getMeta('last_build_at'))).toLocaleString() : '从未'}`,
           remoteMode
             ? s.chunks === 0
@@ -1879,6 +2055,8 @@ let reconcileTimer = null
             stats: s,
             scan: st,
             vectors: config.vectorStore,
+            // 图规模也进结构化结果：调用方不该为了拿一个数字去正则抠文本
+            graph: graphStats(store),
             // 档 3：写作用域 / 读取列表 / 来源（legacy|scope|namespace）
             scope: scopeInfo,
           },
@@ -1934,6 +2112,173 @@ let reconcileTimer = null
           }
         }
         return textResult({ repoRoot, depth, dirs, files: s.files, chunks: s.chunks }, lines.join('\n'))
+      } catch (e) {
+        return fail(String(e.message))
+      }
+    },
+  })
+
+  // ---------------------------------------------------------------- code_graph
+  /**
+   * 图查询：模型不需要知道边表长什么样，只需要回答「谁调用我 / 我调用谁 / 改这里会波及谁」。
+   * 定位有两种：符号名精确匹配（symbols 表，最准）与关键词 FTS（没有确切符号名时）。
+   * 输出刻意逐条短行（类型/方向/文件:行/置信度/首行摘要）：图负责**导航**，正文留给 code_search。
+   */
+  registerTool({
+    name: 'code_graph',
+    description:
+      '按符号/关键词查**代码关系图**：谁调用我（callers）、我调用谁、mapper 与 DAO/表怎么连、改这里会波及谁。'
+      + 'symbol 按名字精确匹配（接口/实现多处声明都会返回），没有确切符号名时用 chunk_hint 按内容找块。'
+      + '返回每个邻居的 边类型 / 方向 / 文件:行 / 置信度 / 首行摘要。需要先跑过 code_index（建库时会自动建图）。',
+    isConcurrencySafe: () => true,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '仓库根目录。省略则用当前会话工作目录。' },
+        symbol: { type: 'string', description: '符号名，精确匹配（如 insertPayBook / PayBookService）。' },
+        chunk_hint: { type: 'string', description: '没有确切符号名时的关键词（按内容 FTS 找块）。' },
+        direction: {
+          type: 'string',
+          enum: ['in', 'out', 'both'],
+          description: 'in=谁指向我（调用方）；out=我指向谁；默认 both。',
+        },
+        type: { type: 'string', enum: Object.values(EDGE_TYPES), description: '只看某一类边，默认全部。' },
+        hops: { type: 'integer', description: '跳数 1..2，默认 1。' },
+        limit: { type: 'integer', description: '最多返回多少个邻居，默认 10。' },
+      },
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => [{ type: 'text', text: v.content?.[0]?.text ?? '' }] },
+    async execute(args, exec) {
+      try {
+        const repoRoot = path.resolve(expandPath(args.path) ?? sessionCwd(exec))
+        assertAllowed(repoRoot, exec, { explicit: Boolean(args?.path) })
+        const { store } = storeFor(repoRoot)
+        const s = store.stats()
+        if (s.chunks === 0) {
+          return fail(`该目录还没有索引：${repoRoot}\n先运行 code_index（path=${repoRoot}）；建库会顺带建符号图，之后再来查图。`)
+        }
+        const g = graphStats(store)
+        if (!g.builtAt) {
+          return fail(
+            `该索引还没有符号图（多半是旧版本建的库）。\n跑一次 code_index（path=${repoRoot}）即可自动重建；`
+            + '若是主动关闭了图，请把 advanced.graph.enabled 设为 true。',
+          )
+        }
+        const symbol = typeof args.symbol === 'string' ? args.symbol.trim() : ''
+        const hint = typeof args.chunk_hint === 'string' ? args.chunk_hint.trim() : ''
+        if (!symbol && !hint) {
+          return fail('要给 symbol（符号名，精确匹配）或 chunk_hint（关键词）。例：code_graph({ symbol: "insertPayBook", direction: "in" })')
+        }
+        if (args.type !== undefined && !Object.values(EDGE_TYPES).includes(args.type)) {
+          return fail(`type 只支持 ${Object.values(EDGE_TYPES).join(' | ')}，收到 ${JSON.stringify(args.type)}`)
+        }
+        const direction = ['in', 'out', 'both'].includes(args.direction) ? args.direction : 'both'
+        const hops = Math.max(1, Math.min(2, Number.isFinite(args.hops) ? Math.trunc(args.hops) : 1))
+        const limit = Math.max(1, Math.min(50, Number.isFinite(args.limit) ? Math.trunc(args.limit) : 10))
+        const types = args.type ? [args.type] : null
+
+        // ---- 定位根块 ----
+        let roots = []
+        if (symbol) {
+          const decls = findSymbols(store, symbol)
+          if (!decls.length) {
+            const near = similarSymbolNames(store, symbol)
+            // 找不到时给「下一步」而不是只说失败：符号名多半是拼写/前缀/语言风格差异
+            return fail(
+              [
+                `没有找到符号「${symbol}」（symbol 是精确匹配；当前索引共 ${g.symbols} 个符号）。`,
+                '可直接执行的下一步：',
+                '  1) 用全名重试（大小写、get/set/is 前缀都要一致）；',
+                near.length
+                  ? `  2) 相近符号：${near.join('、')}（挑一个再查）`
+                  : '  2) 改用 chunk_hint=<关键词> 按内容找块；',
+                '  3) 先用 code_search / code_map 找到真实符号名，再回来查图。',
+              ].join('\n'),
+            )
+          }
+          const metas = new Map(
+            store.chunksByIds(decls.map((d) => d.chunkId).filter((x) => x != null)).map((c) => [c.id, c]),
+          )
+          roots = decls.map((d) => ({ decl: d, chunk: metas.get(d.chunkId) ?? null })).filter((r) => r.chunk)
+          if (!roots.length) {
+            return fail(`符号「${symbol}」有声明记录但找不到对应块（索引可能不一致）：先跑一次 code_index 再试。`)
+          }
+        } else {
+          const hits = findChunksByHint(store, hint, 5)
+          if (!hits.length) {
+            return fail(`关键词「${hint}」没有命中任何块。\n建议：换更具体的标识符（类名/方法名/错误码），或先用 code_search 找。`)
+          }
+          roots = hits.map((c) => ({ chunk: c }))
+        }
+
+        // ---- 收集邻居（有界：每块每类边 ≤ max(limit,10)，最终按 limit 截断）----
+        // 先去重再截断：同一个调用方常常同时连到多个根块，不去重会白占名额。
+        const perTypeLimit = Math.max(limit, 10)
+        const seen = new Set()
+        const items = []
+        for (const r of roots) {
+          for (const n of collectNeighbors(store, { chunkId: r.chunk.id, types, direction, hops, perTypeLimit })) {
+            const key = `${n.type}\u0000${n.other.path}\u0000${n.other.startLine}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            items.push(n)
+          }
+        }
+        items.sort(sortNeighbors)
+        const shown = items.slice(0, limit)
+
+        // ---- 渲染 ----
+        const lines = [`符号图：${repoRoot}（${g.symbols} 符号 / ${g.edges} 边）`]
+        if (symbol) {
+          lines.push(`  符号：${symbol}（命中 ${roots.length} 处声明）`)
+          for (const r of roots) {
+            lines.push(`    ${r.decl.path}:${r.chunk.startLine}-${r.chunk.endLine}（${r.decl.kind ?? 'symbol'}）`)
+          }
+        } else {
+          lines.push(`  关键词「${hint}」命中 ${roots.length} 块`)
+          for (const r of roots) lines.push(`    ${r.chunk.path}:${r.chunk.startLine}-${r.chunk.endLine}`)
+        }
+        const dirLabel = direction === 'in' ? '入向（谁指向我）' : direction === 'out' ? '出向（我指向谁）' : '双向'
+        lines.push(
+          `  命中 ${items.length} 条${items.length > shown.length ? `（已截断到 ${shown.length} 条）` : ''}；`
+          + `方向 ${dirLabel}；${hops} 跳${args.type ? `；只看 ${args.type}` : ''}`,
+        )
+        if (!items.length) {
+          lines.push('  没有邻居边。可试：direction=out（我引用了谁）/ hops=2（两跳）/ 不限定 type；也可能这就是叶子方法，本来没有边。')
+        }
+        for (const it of shown) {
+          const arrow = it.direction === 'in' ? '入向 ←' : '出向 →'
+          lines.push(
+            `  - ${it.type} ${arrow} ${it.other.path}:${it.other.startLine}-${it.other.endLine}`
+            + `（weight ${Number(it.weight ?? 0).toFixed(2)}，${it.hop ?? 1} 跳）`,
+          )
+          const summary = firstLineOf(it.other.body)
+          if (summary) lines.push(`      ${summary}`)
+        }
+        return textResult(
+          {
+            repoRoot,
+            symbol: symbol || null,
+            chunkHint: hint || null,
+            direction,
+            hops,
+            type: args.type ?? null,
+            graph: g,
+            roots: roots.map((r) => ({ path: r.chunk.path, startLine: r.chunk.startLine, endLine: r.chunk.endLine })),
+            total: items.length,
+            neighbors: shown.map((it) => ({
+              type: it.type,
+              direction: it.direction,
+              weight: it.weight,
+              hop: it.hop ?? 1,
+              path: it.other.path,
+              startLine: it.other.startLine,
+              endLine: it.other.endLine,
+            })),
+          },
+          lines.join('\n'),
+        )
       } catch (e) {
         return fail(String(e.message))
       }

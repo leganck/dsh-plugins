@@ -16,6 +16,12 @@ import { createRequire } from 'node:module'
 
 export const SCHEMA_VERSION = 1
 
+/** 边类型常量（与 lib/graph.js 的 EDGE_TYPES 保持一致；此处避免循环依赖） */
+const EDGE_TYPES_CALLS = 'calls'
+const EDGE_TYPES_OVERRIDES = 'overrides'
+const EDGE_TYPES_MAPPER = 'mapper_stmt'
+const EDGE_TYPES_TABLE = 'table_ref'
+
 /**
  * `node:sqlite` 必须**延迟加载**。
  *
@@ -97,7 +103,167 @@ export class Store {
       create table if not exists vectors (chunk_id integer primary key, dim integer, v blob);
       create virtual table if not exists chunks_fts using fts5(path unindexed, body, tokenize='unicode61');
     `)
+    this.migrateGraph()
     this.setMeta('schema_version', String(SCHEMA_VERSION))
+  }
+
+  /**
+   * 图扩展（0.17）：符号表 + 类型化边。
+   * - symbols：一个 chunk 声明的符号（方法/类/接口）。同一符号可在多文件声明（重载/同名），
+   *   所以主键是 (path, name)，chunk_id 取声明处。
+   * - edges：chunk → chunk 的有向边，type 见 lib/graph.js EDGE_TYPES；
+   *   weight 0~1 是置信度（语法级提取，同名匹配的 calls 给低权重），检索端只做加权排序。
+   * - 边用 (src, dst, type) 去重；两个方向都要能查，见 edgesOfChunk。
+   */
+  migrateGraph() {
+    this.db.exec(`
+      create table if not exists symbols (
+        path text, name text, chunk_id integer, kind text,
+        primary key (path, name)
+      );
+      create index if not exists symbols_name_idx on symbols(name);
+      create index if not exists symbols_chunk_idx on symbols(chunk_id);
+      create table if not exists edges (
+        src_chunk integer, dst_chunk integer, type text, weight real,
+        primary key (src_chunk, dst_chunk, type)
+      );
+      create index if not exists edges_src_idx on edges(src_chunk, type);
+      create index if not exists edges_dst_idx on edges(dst_chunk, type);
+    `)
+  }
+
+  // ---- 图：symbols / edges ----
+
+  clearGraph() {
+    this.db.exec('delete from symbols; delete from edges;')
+  }
+
+  /** chunksForPath：按文件取块（id, start/end, body），图提取的主入口 */
+  chunksForPath(relPath) {
+    return this.db
+      .prepare('select id, start_line as startLine, end_line as endLine, body from chunks where path = ? order by start_line')
+      .all(relPath)
+  }
+
+  /**
+   * 写入符号表。perFile: rel → { declared: string[], chunkIds: number[] }。
+   * 声明归属：贪心按顺序分配给该文件的块（声明序 ≈ 块序）；同名符号只记一次。
+   */
+  insertSymbols(perFile) {
+    const del = this.db.prepare('delete from symbols where path = ?')
+    const ins = this.db.prepare('insert or replace into symbols(path, name, chunk_id, kind) values (?,?,?,?)')
+    let n = 0
+    this.db.exec('begin')
+    try {
+      for (const [rel, info] of perFile) {
+        del.run(rel)
+        const seen = new Set()
+        const chunks = info.chunkIds ?? []
+        let ci = 0
+        for (const name of info.declared ?? []) {
+          if (!name || seen.has(name)) continue
+          seen.add(name)
+          const chunkId = chunks[Math.min(ci, chunks.length - 1)] ?? null
+          ci += 1
+          const kind = /^(get|set|is)[A-Z]/.test(name) ? 'method' : 'symbol'
+          ins.run(rel, name, chunkId, kind)
+          n += 1
+        }
+      }
+      this.db.exec('commit')
+    } catch (e) {
+      this.db.exec('rollback')
+      throw e
+    }
+    return n
+  }
+
+  /**
+   * 写入边。输入全部是「文件级」关系，这里翻译成 chunk 级（声明块优先）：
+   *  - calls：被调名在 declIndex 里的每个声明位置 → calls 边（weight 0.5，同名多址全连）
+   *  - mapper_stmt：XML statement id 与 DAO 接口方法同名 → mapper_stmt 边（weight 0.9）
+   *  - table_ref：引用表名的块 ↔ 声明/定义该表的块不存在，退化为「表名实体边」挂到 mapper 块（weight 0.8）
+   *  - imports：跨文件 import 目标按「同仓库相对路径猜测」太脆，不建边（未来 tree-sitter 精确化再说）
+   */
+  insertEdges({ perFile, declIndex, stmtIndex }) {
+    const ins = this.db.prepare('insert or replace into edges(src_chunk, dst_chunk, type, weight) values (?,?,?,?)')
+    let n = 0
+    const put = (src, dst, type, weight) => {
+      if (src == null || dst == null || src === dst) return
+      ins.run(src, dst, type, weight)
+      n += 1
+    }
+    const chunkOfDecl = (hits, excludeFile) => {
+      const hit = hits.find((h) => h.file !== excludeFile) ?? hits[0]
+      return hit?.chunkId ?? null
+    }
+    this.db.exec('begin')
+    try {
+      for (const [rel, info] of perFile) {
+        const chunks = info.chunkIds ?? []
+        const firstChunk = chunks[0] ?? null
+        // calls：本文件调用了名字 X → X 的声明块（其他文件优先）
+        for (const name of new Set(info.calls ?? [])) {
+          const hits = declIndex.get(name)
+          if (!hits) continue
+          const dst = chunkOfDecl(hits, rel)
+          put(firstChunk, dst, EDGE_TYPES_CALLS, 0.5)
+        }
+        // mapper_stmt：XML statement id ↔ DAO 接口同名方法声明
+        for (const st of info.mapperStatements ?? []) {
+          const daoHits = (declIndex.get(st) ?? []).filter((h) => !/\.xml$/i.test(h.file))
+          const xmlChunk = (stmtIndex.get(st) ?? []).find((h) => h.file === rel)?.chunkId
+            ?? chunks[0] ?? null
+          for (const h of daoHits.slice(0, 3)) put(xmlChunk, h.chunkId, EDGE_TYPES_MAPPER, 0.9)
+        }
+        // table_ref：表名作为实体，连到本仓引用它的其它 mapper 块（同表聚合，弱边）
+        for (const t of info.tableRefs ?? []) {
+          const stmtHits = stmtIndex.get(t)
+          if (!stmtHits) continue
+          for (const h of stmtHits.filter((h) => h.file !== rel).slice(0, 2)) {
+            put(firstChunk, h.chunkId, EDGE_TYPES_TABLE, 0.4)
+          }
+        }
+        // overrides：同仓同名方法且都有声明 → 弱边（接口/实现模式的近似）
+        for (const name of info.declared ?? []) {
+          const hits = (declIndex.get(name) ?? []).filter((h) => h.file !== rel)
+          if (hits.length) put(firstChunk, chunkOfDecl(hits, rel), EDGE_TYPES_OVERRIDES, 0.3)
+        }
+      }
+      this.db.exec('commit')
+    } catch (e) {
+      this.db.exec('rollback')
+      throw e
+    }
+    return n
+  }
+
+  /**
+   * 有界取一个 chunk 的边（查询热路径）。
+   * direction: 'out' = 我指向别人；'in' = 别人指向我。
+   * perTypeLimit：每类边最多返回多少条（防同名符号把结果淹没）。
+   */
+  edgesOfChunk(chunkId, { types = null, perTypeLimit = 5 } = {}) {
+    const out = []
+    // 类型参数必须先算出来再绑：SQL 里的 `type in (?,?,…)` 占位符和 chunkId 一起按顺序绑定，
+    // 少了这一步会留下未绑占位符（node:sqlite 报错或按 NULL 处理 → 静默返回空）。
+    const typeList = types?.size ? [...types] : []
+    const typeIn = typeList.length ? ` and type in (${typeList.map(() => '?').join(',')})` : ''
+    const args = [chunkId, ...typeList]
+    const q = (sql, direction) => {
+      const rows = this.db.prepare(sql).all(...args)
+      const byType = new Map()
+      for (const r of rows) {
+        const list = byType.get(r.type) ?? []
+        if (list.length >= perTypeLimit) continue
+        list.push({ ...r, direction })
+        byType.set(r.type, list)
+      }
+      for (const list of byType.values()) out.push(...list)
+    }
+    q(`select dst_chunk, type, weight from edges where src_chunk = ?${typeIn} order by weight desc`, 'out')
+    q(`select src_chunk, type, weight from edges where dst_chunk = ?${typeIn} order by weight desc`, 'in')
+    return out
   }
 
   // ---- meta ----
@@ -130,7 +296,10 @@ export class Store {
       this.db.prepare(`delete from chunks_fts where rowid in (${ph})`).run(...ids)
       this.db.prepare(`delete from vectors where chunk_id in (${ph})`).run(...ids)
       this.db.prepare(`delete from chunks where id in (${ph})`).run(...ids)
+      // 图边级联清理：边两端任一失效都必须删，否则 expand 会拿到死 chunk_id
+      this.db.prepare(`delete from edges where src_chunk in (${ph}) or dst_chunk in (${ph})`).run(...ids, ...ids)
     }
+    this.db.prepare('delete from symbols where path = ?').run(relPath)
     this.db.prepare('delete from files where path = ?').run(relPath)
     return ids.length
   }

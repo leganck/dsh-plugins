@@ -21,6 +21,8 @@ import { computeSimhash } from './simhash.js'
 import { resolveChunkConfig } from './strategies.js'
 import { getParser } from './chunk-ast.js'
 import { detectMissingGrammars } from './parser-hints.js'
+// 只用 graph.js 的「store → 图」这一侧（graph.js 不 import indexer.js），不构成循环依赖
+import { rebuildGraph, graphStats } from './graph.js'
 
 /**
  * 本仓库**实际会用到、且确实加载成功**的 AST 语法（用于切块指纹）。
@@ -106,6 +108,16 @@ export async function buildIndex({
    */
   remote = null,
   onProgress = null,
+  /**
+   * 图重建（advanced.graph.enabled，默认开）。
+   * 图是索引的**派生物**：成功的建库必须让 symbols/edges 与新块一致，否则查询端会拿着
+   * 指向旧块的边。但图也是补充而不是门槛 —— 这里失败只记 warning，绝不让一次成功的
+   * 建库变成失败（检索仍要能用）。
+   * - logger：重建进度（info 级）
+   * - warn：重建失败（warning 级）——两者分开，否则成功信息会被当成告警
+   * - { enabled: false } 时完全跳过
+   */
+  graph = null,
 }) {
   const t0 = Date.now()
   const requestedMode = budget.mode ?? 'incremental'
@@ -300,6 +312,30 @@ export async function buildIndex({
   store.setMeta('last_build_at', String(Date.now()))
   store.setMeta('last_build_ms', String(Date.now() - t0))
 
+  // ---- 图重建（symbols / edges）----
+  // 为什么整图重扫而不是增量：边是**文件级派生物**，块指纹已经决定了哪些文件变了；
+  // 没变就沿用上次结果（0 ms），变了才重扫 —— 成本是 O(块数)，远低于切块本身。
+  // 用 getMeta('graph_built_at') 判"建过没有"（而不是看符号数）：空仓合法地没有符号，
+  // 那也不该每轮都白扫一遍。
+  const tGraph = Date.now()
+  let graphInfo = null
+  let graphError = null
+  if (graph?.enabled !== false) {
+    const prev = graphStats(store)
+    if (!changed.length && !removed.length && prev.builtAt) {
+      graphInfo = { symbols: prev.symbols, edges: prev.edges, ms: 0, builtAt: prev.builtAt, skipped: true }
+    } else {
+      try {
+        const g = rebuildGraph(store, { logger: graph?.logger })
+        graphInfo = { symbols: g.symbols, edges: g.edges, files: g.files, ms: Date.now() - tGraph, builtAt: Date.now(), skipped: false }
+      } catch (e) {
+        graphError = String(e?.message ?? e).slice(0, 200)
+        const warn = graph?.warn ?? graph?.logger
+        warn?.(`图重建失败（建库已成功，检索不受影响）：${graphError}`)
+      }
+    }
+  }
+
   return {
     mode,
     repoRoot,
@@ -329,6 +365,10 @@ export async function buildIndex({
     embedChanged,
     embeddingTag: embeddingTag ?? prevEmbeddingTag ?? null,
     fileErrors: fileErrors.slice(0, 10),
+    /** 图重建结果：{symbols, edges, ms, builtAt, skipped}；advanced.graph.enabled=false 时为 null */
+    graph: graphInfo,
+    /** 图重建失败原因（不影响建库成功与检索） */
+    graphError,
     elapsedMs: Date.now() - t0,
     stats: s,
   }
@@ -337,6 +377,10 @@ export async function buildIndex({
 /** 清理索引目录（供 code_index action=drop 使用） */
 export function dropIndex(store) {
   store.db.exec('delete from chunks; delete from chunks_fts; delete from vectors; delete from files;')
+  // 图是块的派生物：清库不清 symbols/edges 会留下指向失效 chunk 的边，
+  // 之后 expand/code_graph 会拿到查不到正文的邻居（比"没有图"更难排查）。
+  store.clearGraph()
+  store.setMeta('graph_built_at', '')
 }
 
 // ---------------------------------------------------------------------------

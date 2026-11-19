@@ -67,6 +67,36 @@ function curate(entries, pathOf, { excludePaths = [], boostPrefix = null, boostW
  * 代价是每查询 +939 ms（快档 top-10 约 +474 ms）。重排失败时**退回原顺序**，不让搜索失败。
  * @returns {{mode: string, note: string, results: Array<object>, rerank?: object}}
  */
+/**
+ * 文档类扩展名：代码检索里它们常靠**词频**挤占 top（实测 erp-pos：CHANGELOG.md / .trae/skills/*.md
+ * 反复出现业务词，把真正的实现文件挤下去）。默认降权而不是排除 —— 有时确实要找文档。
+ * docWeight=1 关闭降权；0 等价于排到最后（top_k 没填满时仍可能出现，不假装删除）。
+ */
+export const DEFAULT_DOC_WEIGHT = 0.35
+const DOC_EXT_RE = /\.(md|markdown|rst|txt|adoc|org)$/i
+export function isDocPath(p) {
+  return typeof p === 'string' && DOC_EXT_RE.test(p)
+}
+
+/**
+ * 对候选头部按路径降权并重排。只动 score（排序键），不改正文/排名之外的字段。
+ * 取头部而不是全量：降权的意义只在"能不能进 top_k"，全量探测要多查几百个块。
+ */
+function applyDocWeight(ranked, topK, docWeight, pathOf) {
+  if (!(docWeight < 1) || !ranked.length) return ranked
+  const head = ranked.slice(0, Math.max(topK * 3, 40))
+  let touched = false
+  for (const e of head) {
+    if (isDocPath(pathOf(e))) {
+      e.score *= docWeight
+      touched = true
+    }
+  }
+  if (!touched) return ranked
+  head.sort((a, b) => b.score - a.score)
+  return [...head, ...ranked.slice(head.length)]
+}
+
 export async function search(
   store,
   embedder,
@@ -80,6 +110,7 @@ export async function search(
     excludePaths = [],
     boostPrefix = null,
     boostWeight = 0.004,
+    docWeight = DEFAULT_DOC_WEIGHT,
   } = {},
 ) {
   const terms = extractTerms(question)
@@ -214,6 +245,11 @@ export async function search(
       rerankInfo = { applied: false, candidates: poolEntries.length, reason: String(e?.message ?? e).slice(0, 140) }
     }
   }
+  // 文档降权（在最终切片前）：重排生效时以重排分优先，不再二次干预
+  if (!rerankScores) {
+    const pathById = new Map(store.chunksByIds(ranked.slice(0, Math.max(topK * 3, 40)).map((e) => e.id)).map((c) => [c.id, c.path]))
+    ranked = applyDocWeight(ranked, topK, docWeight, (e) => pathById.get(e.id))
+  }
   ranked = ranked.slice(0, topK)
   const scoreById = rerankScores ? new Map(poolEntries.map((e, i) => [e.id, rerankScores[i]])) : null
 
@@ -280,6 +316,7 @@ export async function searchFusedRemote(
     excludePaths = [],
     boostPrefix = null,
     boostWeight = 0.004,
+    docWeight = DEFAULT_DOC_WEIGHT,
   } = {},
 ) {
   const terms = extractTerms(question)
@@ -338,6 +375,10 @@ export async function searchFusedRemote(
     ranked = [...scored, ...ranked.filter((e) => e.rerankScore === undefined)]
   }
 
+  // 文档降权：远端重排未生效时才干预（重排分是更强的信号）
+  if (!scored.length) {
+    ranked = applyDocWeight(ranked, Math.max(topK, 40, rerankCandidates || 0), docWeight, (e) => byHash.get(e.hash)?.path)
+  }
   const pool = ranked.slice(0, Math.max(topK, 40, rerankCandidates || 0))
 
   // 可选：**本机**重排（rerankBackend: local）。远端做过重排时不会走到这里。
