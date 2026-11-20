@@ -149,7 +149,7 @@ pnpm 缓存旧包未重拉），所以 expand/code_graph/闸门/降权全都没�
 |---|---|---|---|---|
 | T-261120-gov | gov | **closed（Lead 抽验通过）** | pipeline_runs/conflicts配对(against+trigger_words)/timeline/stale_days/冲突召回(conflictWarning) | code-index-service + exp-pipeline(client/pipeline/stage_c) |
 | T-261120-dedup | dedup | **closed（Lead 抽验通过）** | vectors CAS化(v2)/lineages merge(事务+merged_into观察期)/duplicates检测/cleanup脚本 | code-index-service（与gov有同文件分工约定：MemoryStore归gov，IndexStore向量区归dedup） |
-| T-261120-ui2 | ui2 | **pending（blocked by 9+10）** | 驾驶舱概览/Review Inbox/治理流水/融合裁决/分组视图/receipt toast | server.py ADMIN_HTML |
+| T-261120-ui2 | ui2 | **closed（Lead 抽验通过 + 并发修复）** | 驾驶舱概览/Review Inbox/治理流水/融合裁决/分组视图/receipt toast | server.py ADMIN_HTML |
 
 设计依据：docs/research-mature-solutions-and-mnemon.md（LangSmith run观测/knowns Review Inbox/Memanto冲突双方保留/CAS/alias观察期/Mnemon receipt文化）+ docs/diagnosis-admin-ui-governance-duplicates.md。
 
@@ -178,3 +178,28 @@ merge 当场物理删重（merged_into 仅墓碑/重定向）、--migrate-cas �
   停写 → cleanup-lineages.py --db $DB --migrate-cas --vacuum → 起服务 → --dry-run 核对 → --apply
   （bug-analysis 组 same_chunk_fp=false 先人工确认，可 --only 清其余三组）
 预期净删：chunks≈461 行、vectors 成员≈2049 行、erp-pos 组 blobs 归并≈9467 正文行。
+
+## ui2 抽验 + Lead 修复 + 112 预演（2026-11-20 16:05）
+
+ui2 抽验（Lead 亲自跑）：回归 selftest 274 / bodies 31 / memories 90 / lineages 46 全绿；
+登录冒烟 15/15 锚点、tab 频率序正确（概览|经验|代码资产|统计|模型|Key|日志）；页面 188.6K 字符。
+ui2 需确认裁定：① 203.5K wire 字节接受（单文件管理台 LAN 秒开，gzip 列后续）；② 并发 500 = 真问题 →
+**Lead 修复**：MemoryStore 独立连接（不再与 IndexStore 共享）+ row_factory 对齐 + 7 个无锁读写方法补 RLock
+（审计：写方法原有锁，get/list/search/timeline/stats/conflicting/list_runs 无锁）+ 并发烟测 8 线程×24 请求 0 错误；
+③ resolve 只接 active|retired 属语义正确（conflicting 只能由 upsert 带入，管道正序 stage_c L247）。
+
+## 112 预演实录（预览容器 :18080，生产 18000 全程未动）
+1. git archive → 112 直建：**6 秒**（base 缓存命中）；模型 docker cp 一次性拷出 195MB
+2. **预演抓到 2 个部署阻塞点**（都修复提交）：
+   - 老库 SCHEMA executescript 先于补列 → "no such column: against_id"（eb9801b：索引移到补列后）
+   - Dockerfile.app 漏 COPY scripts/（53fe94e：迁移脚本必须随镜像）
+3. 生产库副本 222MB → 容器内 --migrate-cas --vacuum 完成（2049 冗余向量坍缩进 v2）
+4. duplicates 检测（血统口径）：实际跨血统重复 1 组（dsh-plugins 406e34→02fa1d），--apply 完成
+   droppedChunks=124 droppedVectors=185 droppedBlobs=185 freed=0.43MB
+   （erp-pos/crm-order 镜像 namespace 属同血统不同 repoId，CAS 已消向量冗余；namespace 级清理列后续）
+5. 预览数据就绪：223+2 条经验、1 对冲突演示（exp-000225 vs 224，trigger_words 带）、
+   1 条治理流水演示（demo-preview-1，四判计数+拦截明细）、检索 conflictWarning=True 实证
+6. 生产容器 healthy 6h 零影响
+
+## 预览地址（待用户浏览器验收）
+http://192.168.50.112:18080/admin  （admin / 预览密码见本地 _tmp；预览 KEY 独立，生产 18000 未动）
