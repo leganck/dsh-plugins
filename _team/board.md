@@ -73,3 +73,33 @@ deploy 脚本首版硬编码 API_KEY/ADMIN_PASSWORD 被 pre-commit 拦截（钩�
 2. 线上灌种子：seed.py --url http://192.168.50.112:18000（223 条）
 3. review-service 经验注入批次（M2 剩余 3 项）
 4. 插件 profile 重装 + 重启 DSH（expand/code_graph/闸门/降权）
+
+## 新批次：admin 控制台 v2（2026-11-20 07:50）
+
+| Thread | 队员 | 状态 | 目标 | 写范围 |
+|---|---|---|---|---|
+| T-261120-ui | ui | **closed（Lead 冒烟通过）** | 设计稿 A+B+C+D 全量（概览双资产卡/经验 tab 四区块/代码资产 tab 改造/统计细分） | server.py（唯一） |
+
+说明：单文件任务（133KB 内联 HTML 全在一个 r-string），拆不出并行单元，单队员全量做。
+规格=docs/admin-console-v2.md；E 步（批量退役）后端参数缺失，本轮不做。
+
+ui 抽验记录（Lead 亲自跑）：ast ok；server.py +494/-19 全在 ADMIN_HTML；
+test_memories 59 / test_bodies 31 / selftest 274 全绿（ui 未改任何测试，selftest「作用域（永久快照）」
+断言通过「代码资产 · 作用域（永久快照）」双标题保留）；
+真实登录冒烟（临时DB+FakeEmbedder+admin 登录，161,601B）：tab-memories/代码资产/mem-conflict-dot/
+data-asset seg/块均向量/冲突裁决 全 PASS，旧「>作用域</button>」已移除。
+说明：冲突卡「既有条目」对照列暂取同队列另一 conflicting 条目（后端无 conflict.against 字段，下版可加）。
+
+## admin v2 部署 + 线上灌种子（2026-11-20 09:24）
+
+| 步骤 | 结果 |
+|---|---|
+| CI 构建 | run 44652080825：app(cpu) 4 分钟完成（base 指纹命中跳过）→ server-v0.17.0-cpu |
+| 112 部署 | 新容器 39bedccd（healthy 10s），旧容器改名 dsh-embed-prev 可回滚 |
+| 线上 admin v2 验证 | 登录后 **7 个 tab**：overview/memories/scopes/models/keys/stats/logs；经验 tab 锚点全 PASS（页面 171,347B） |
+| 种子灌入 | **223 条 created / 0 失败**；幂等重放 **223 updated，total 仍 223** |
+| 经验检索实测 | 3 组查询全命中，延迟 206-244ms：分支清理→worktree/merge 相关；结账 payWay→hzf_pay_book 超时经验；云打印→云效附件/日志经验 |
+| admin stats | memories: {total: 223, hits: 0, adopted: 0} |
+
+**注意**：命中质量反映 digest 语料主题分布（偏 DSH/云效/工具链），业务主题（结账写销售/云打印旧快照）
+在种子里覆盖少——补种 biz-context.txt 可改善（待做）。

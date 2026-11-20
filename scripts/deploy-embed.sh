@@ -54,4 +54,6 @@ echo "== 5. 能力自检"
 curl -s "http://127.0.0.1:${HOST_PORT}/health" | head -c 300; echo
 echo "-- memories 端点:"
 curl -s -H "Authorization: Bearer $INDEX_API_KEY" "http://127.0.0.1:${HOST_PORT}/v1/memories?limit=1" | head -c 120; echo
+echo "-- admin 页面标签页（v0.17 应有 经验/代码资产）:"
+curl -s -b "dsh_admin=dummy" "http://127.0.0.1:${HOST_PORT}/admin" | grep -o 'data-tab="[a-z]*"' | sort -u | tr '\n' ' '; echo
 echo "== 完成"
