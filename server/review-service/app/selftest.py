@@ -598,7 +598,7 @@ def _make_worktree(files: dict[str, str]) -> str:
 
 
 class FakeIndexServer:
-    """最小 code-index-service 桩（档3 契约 §4）：scopes resolve/delete、repos sync、search。
+    """最小 storage-hub 桩（档3 契约 §4）：scopes resolve/delete、repos sync、search。
 
     与 tests/test_sync.py 的假服务端同风格：真起一个 ThreadingHTTPServer，记录全部请求。
     """

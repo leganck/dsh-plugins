@@ -4,13 +4,13 @@
 
 ## 0. 全程零线上写入的保证
 
-- 服务起法照抄 `server/code-index-service/tests/test_bodies.py`：**临时目录建 SQLite**（`SERVER_DB/SERVER_LOG/SERVER_ADMIN_DB` 全指向 `%TEMP%\e2e-seed-*`），`server.make_server(0)` 绑定 **127.0.0.1 随机端口**（本轮 58921），演示 URL 一律 `http://127.0.0.1:PORT`，从未出现线上地址（192.168.50.112:18000 读写均未触碰）。
+- 服务起法照抄 `server/storage-hub/tests/test_bodies.py`：**临时目录建 SQLite**（`SERVER_DB/SERVER_LOG/SERVER_ADMIN_DB` 全指向 `%TEMP%\e2e-seed-*`），`server.make_server(0)` 绑定 **127.0.0.1 随机端口**（本轮 58921），演示 URL 一律 `http://127.0.0.1:PORT`，从未出现线上地址（192.168.50.112:18000 读写均未触碰）。
 - `seed.py --dry-run` 默认**零网络请求**；正式灌库必须显式 `--url`，缺省直接报错退出（防误写线上默认值 `INDEX_URL`）。
 - 演示结束：`httpd.shutdown()` + `server_close()` 关闭 HTTP 服务，子进程（seed 两次调用）均 `exit=0` 自然退出，临时目录（含 index.db/-wal/-shm）`shutil.rmtree` 清理。本轮清理日志：`[e2e] server stopped, tmp cleaned: C:\Users\leganck\AppData\Local\Temp\e2e-seed-ze6upg9l`。
 
 ## 1. 本地起真实 server（含向量缺省说明）
 
-本机无嵌入模型（`tokenizers`/onnx 模型缺失），`server.build()` 的 embedder 装载失败——**向量缺省属预期**：按 `docs/memories.md` 约定的降级路径处理（不改 code-index-service 一行代码）：`embedder=None` + `state["ready"]=True`。效果：
+本机无嵌入模型（`tokenizers`/onnx 模型缺失），`server.build()` 的 embedder 装载失败——**向量缺省属预期**：按 `docs/memories.md` 约定的降级路径处理（不改 storage-hub 一行代码）：`embedder=None` + `state["ready"]=True`。效果：
 
 - 每条 upsert 响应带 `vectorNote: "vector missing: embedder unavailable"`（FTS 照常写入）；
 - 检索退化为 **纯 FTS trigram**，回包带 `vectorNote: "vector search unavailable: embedder unavailable"`（见 §3 各回包）。

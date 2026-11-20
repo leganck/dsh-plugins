@@ -773,7 +773,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/bench_knn_modes.py",
+      "path": "server/storage-hub/bench_knn_modes.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 9925,
@@ -807,7 +807,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/embedder.py",
+      "path": "server/storage-hub/embedder.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 4483,
@@ -831,7 +831,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/governor.py",
+      "path": "server/storage-hub/governor.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 5616,
@@ -860,7 +860,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/index_store.py",
+      "path": "server/storage-hub/index_store.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 24892,
@@ -904,7 +904,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/knn.py",
+      "path": "server/storage-hub/knn.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 3407,
@@ -923,7 +923,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/reranker.py",
+      "path": "server/storage-hub/reranker.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 2740,
@@ -942,7 +942,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/selftest.py",
+      "path": "server/storage-hub/selftest.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 11148,
@@ -986,7 +986,7 @@
       ]
     },
     {
-      "path": "server/code-index-service/server.py",
+      "path": "server/storage-hub/server.py",
       "repo": "dsh-plugins",
       "language": "python",
       "bytes": 25145,

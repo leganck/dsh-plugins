@@ -4,7 +4,7 @@
 # 档 3 实施契约：快照作用域 + 多作用域检索 + 生命周期
 
 > 本文件是 `feat/scope-snapshots` 分支的**实现契约**（Lead 与各子系统共同遵守）。
-> 所有 namespace 规则以 `server/code-index-service/scope_format.json` 夹具为准，JS/Python 两端都必须读它做断言。
+> 所有 namespace 规则以 `server/storage-hub/scope_format.json` 夹具为准，JS/Python 两端都必须读它做断言。
 
 ## 1. 目标（成功标准）
 
@@ -178,8 +178,8 @@ INDEX_PR_TTL_DAYS = 14                       （传给服务端 scope.ttlDays）
 
 | 负责人 | 文件 |
 |---|---|
-| Lead | `server/code-index-service/scope_format.json`、`server/code-index-service/docs/scope-tier3.md`、发布/E2E |
-| server-core | `server/code-index-service/{index_store.py,server.py,tests/selftest.py,README.md}` |
+| Lead | `server/storage-hub/scope_format.json`、`server/storage-hub/docs/scope-tier3.md`、发布/E2E |
+| server-core | `server/storage-hub/{index_store.py,server.py,tests/selftest.py,README.md}` |
 | plugin-client | `plugins/dsh-code-index/{lib/scope.js,index.js,lib/remote.js,lib/indexer.js,test-remote.mjs,test.mjs,package.json,README.md}` |
 | review-integration | `server/review-service/app/{config,sync,worker,clients,context,pipeline,server,index_state,selftest}.py`、`server/review-service/README.md` |
 
@@ -187,7 +187,7 @@ INDEX_PR_TTL_DAYS = 14                       （传给服务端 scope.ttlDays）
 
 ```bash
 # 服务端（本机已装 numpy）
-cd server/code-index-service && python tests/selftest.py            # 基线 43 → 目标 ~60+
+cd server/storage-hub && python tests/selftest.py            # 基线 43 → 目标 ~60+
 
 # 插件
 cd plugins/dsh-code-index && node test-remote.mjs && node test.mjs && node test-plugin.mjs

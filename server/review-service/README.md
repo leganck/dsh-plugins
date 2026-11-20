@@ -14,7 +14,7 @@ worker ─▶ MirrorManager（每项目一镜像，fetch MR ref + 目标分支�
    │        ├ head worktree（评审对象）
    │        └ base worktree（建图 / 索引 / grep）
    ├─▶ git diff base...head（覆盖 API 的 too_large 盲区）
-   ├─▶ IndexSync → code-index-service（/v1/namespaces/sync、/v1/namespaces/{ns}/chunks|embed）
+   ├─▶ IndexSync → storage-hub（/v1/namespaces/sync、/v1/namespaces/{ns}/chunks|embed）
    ├─▶ Graph（tree-sitter 语法图 + 置信度）→ callers/callees/tests
    ├─▶ Planner（1 次）→ 并行 Reviewer（block 级）→ 并行 Verifier（候选级，≤2 轮取证）
    ├─▶ Aggregator（去重/排序/阈值/截断；confidence<0.8 的图谱边不进 evidence）
@@ -48,7 +48,7 @@ clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地�
 | `WEBHOOK_SECRET` / `GITLAB_TOKEN` | — | 必填；webhook 鉴权与发评论 |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | DeepSeek | 任何 OpenAI 兼容网关 |
 | `GIT_STRATEGY` | `api` | `clone` 开启镜像仓 |
-| `INDEX_URL` / `INDEX_SYNC` | 空 / 0 | 接 code-index-service 后才有跨文件语义上下文 |
+| `INDEX_URL` / `INDEX_SYNC` | 空 / 0 | 接 storage-hub 后才有跨文件语义上下文 |
 | `INDEX_SCOPE_MODE` | `repo` | 档3 作用域：`repo`（旧行为）/`branch`（按目标分支）/`pr`（按 MR） |
 | `INDEX_PR_HEAD` | 0 | `pr` 模式下是否建 head 临时作用域 |
 | `GRAPH_ENABLED` | 0 | 语法图（ctags 级精度，带置信度） |
@@ -58,7 +58,7 @@ clone 需要评审服务能访问 GitLab 的 **git 地址**（不只是 API 地�
 
 ## 索引作用域快照（档3，可选）
 
-契约见 `server/code-index-service/docs/scope-tier3.md`。review-service 只在**已接索引服务**
+契约见 `server/storage-hub/docs/scope-tier3.md`。review-service 只在**已接索引服务**
 （`INDEX_URL` 非空且 `INDEX_SYNC=1`）且 `INDEX_SCOPE_MODE != repo` 时启用：
 
 | 模式 | base 工作树 | head 工作树（仅 clone 策略） | 说明 |

@@ -1,4 +1,4 @@
-"""索引同步客户端（Python 版）：把 worktree 切块后同步到 code-index-service。
+"""索引同步客户端（Python 版）：把 worktree 切块后同步到 storage-hub。
 
 协议（与服务端/插件完全一致）：
   POST /v1/namespaces/sync

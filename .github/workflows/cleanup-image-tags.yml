@@ -2,7 +2,7 @@ name: cleanup-image-tags
 
 # 手动清理 GHCR 旧标签（dry-run 默认开启）。
 #
-# 背景：镜像矩阵收敛后（见 server/code-index-service/docs/image-matrix.md），
+# 背景：镜像矩阵收敛后（见 server/storage-hub/docs/image-matrix.md），
 # 以下标签不再产生，需要从历史版本里清掉：
 #   - sha-*                    （每次构建 +2~4）
 #   - jina-cpu / jina-gpu      （简写别名，已停用）

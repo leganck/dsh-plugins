@@ -3,7 +3,7 @@
 刻意做成可注入的对象：
 - 单测/回放用 `DictReader` + 假 GitLab；
 - 生产用 `GitLabClient` 真发请求；
-- 索引服务（code-index-service）只读调用：/v1/search 拿"相关代码块"的位置，
+- 索引服务（storage-hub）只读调用：/v1/search 拿"相关代码块"的位置，
   正文交给 Reader 去仓库里按行取（这样不用给索引服务加新接口）。
 
 限流：GitLab 默认 8 请求/秒（可配），429/5xx 指数退避；索引服务另有限流。
@@ -268,7 +268,7 @@ def normalize_namespaces(namespaces) -> list[str]:
 
 
 class IndexClient:
-    """code-index-service 的只读客户端（/v1/search，以及档3 的 scope 解析/删除）。"""
+    """storage-hub 的只读客户端（/v1/search，以及档3 的 scope 解析/删除）。"""
 
     def __init__(self, base_url: str, api_key: str = "", *, timeout: float = 15.0, rps: float = 10.0):
         self.base_url = base_url.rstrip("/")

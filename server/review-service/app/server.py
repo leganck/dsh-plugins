@@ -1,4 +1,4 @@
-"""HTTP 入口（标准库 ThreadingHTTPServer，与 code-index-service 同风格）。
+"""HTTP 入口（标准库 ThreadingHTTPServer，与 storage-hub 同风格）。
 
 路由：
   GET  /healthz          存活 + 队列深度 + 最近任务

@@ -291,7 +291,7 @@ ADMIN_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>code-index-service · 控制台</title>
+<title>storage-hub · 控制台</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --faint:#98a2b3;
@@ -653,7 +653,7 @@ ADMIN_HTML = r"""<!doctype html>
 </head>
 <body>
 <header>
-  <div class="brand"><span class="logo">CI</span><h1>code-index-service</h1><span class="sub">控制台</span></div>
+  <div class="brand"><span class="logo">CI</span><h1>storage-hub</h1><span class="sub">控制台</span></div>
   <span id="ready" class="chip"><span class="dot"></span>加载中</span>
   <span id="model" class="chip mono" title="当前向量模型 tag">—</span>
   <span id="devicechip" class="chip mono" title="当前运行时设备">—</span>
@@ -3398,7 +3398,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && $('#auto') && 
 
 LOGIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>code-index-service · 登录</title>
+<title>storage-hub · 登录</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1b1f24; --muted:#667085; --blue:#175cd3; --bad:#b42318; --bad-bg:#fdecea; }
@@ -3418,7 +3418,7 @@ LOGIN_HTML = r"""<!doctype html>
 </style></head>
 <body>
 <div class="box">
-  <h1>code-index-service</h1>
+  <h1>storage-hub</h1>
   <p class="sub">管理控制台 · 请输入管理员账号</p>
   <form id="f">
     <label>用户名</label>

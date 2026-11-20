@@ -4,7 +4,7 @@
 
 | 服务 | 端口（宿主） | 镜像 | 职责 | 入口 |
 |---|---|---|---|---|
-| `code-index-service/` | `18000` | `ghcr.io/leganck/dsh-embed` | 远端索引层：`/v1/namespaces/*`（sync / search / status）、`/embed`、`/rerank`、控制台 | `server.py` |
+| `storage-hub/` | `18000` | `ghcr.io/leganck/dsh-embed` | 远端索引层：`/v1/namespaces/*`（sync / search / status）、`/embed`、`/rerank`、控制台 | `server.py` |
 | `review-service/` | `18001` | `ghcr.io/leganck/dsh-review` | GitLab MR AI 评审：webhook → 取 diff → 语法图/上下文 → 并行流水线 → 评审报告 | `app/server.py` |
 
 两个服务都是**单进程 Python + SQLite/文件卷**，不依赖 DSH runtime；部署方式是容器（`deploy/` 下的 compose）。
@@ -32,7 +32,7 @@
 
 ```bash
 # code-index（CPU 开箱即用；默认拉 GHCR latest-cpu，数据在 dsh-embed-data 卷）
-cd server/code-index-service
+cd server/storage-hub
 cp deploy/.env.example deploy/.env          # 填 API_KEY / ADMIN_PASSWORD
 docker compose -f deploy/compose.yaml up -d
 curl -s http://127.0.0.1:18000/health | head -c 400
@@ -43,13 +43,13 @@ cp deploy/.env.example deploy/.env          # 填 GitLab / LLM 凭据
 docker compose -f deploy/compose.yaml up -d
 ```
 
-GPU / 模型挂载 / Jina 变体等叠加方式见 `code-index-service/README.md` 的「部署」一节。
+GPU / 模型挂载 / Jina 变体等叠加方式见 `storage-hub/README.md` 的「部署」一节。
 
 ## 自测（不需要模型/外部服务）
 
 ```bash
 # code-index：256 项，FAKE_EMBED=1（不加载 ONNX）
-cd server/code-index-service && python tests/selftest.py
+cd server/storage-hub && python tests/selftest.py
 
 # review-service：pytest
 cd server/review-service && python -m pytest tests -q
@@ -65,4 +65,4 @@ CI（`.github/workflows/ci.yml`）跑的就是这两条。
 | `publish-review-image.yml` | tag `review-v*` / 手动 | `dsh-review` |
 
 通用流程：先构建 base（改动 Dockerfile 依赖层才会重建）→ app 只叠加代码与模型 → 容器内跑 `selftest.py` → 推 GHCR。
-细节见 `code-index-service/docs/image-matrix.md`。
+细节见 `storage-hub/docs/image-matrix.md`。

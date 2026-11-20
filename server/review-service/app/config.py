@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from .pipeline import DEFAULT_GUIDELINES_PATHS, DEFAULT_IGNORE_GLOBS, ReviewSettings
 from .util import env_bool, env_float, env_int, env_str, log
 
-# 档3：索引作用域模式（契约见 server/code-index-service/docs/scope-tier3.md §7）
+# 档3：索引作用域模式（契约见 server/storage-hub/docs/scope-tier3.md §7）
 SCOPE_MODES = ("repo", "branch", "pr")
 
 

@@ -32,7 +32,7 @@ if [ -n "$missing" ]; then
 fi
 
 if [ -z "${INDEX_URL:-}" ]; then
-  log "提示：没有配置 INDEX_URL（code-index-service）→ 评审只能看到 diff，没有跨文件上下文。"
+  log "提示：没有配置 INDEX_URL（storage-hub）→ 评审只能看到 diff，没有跨文件上下文。"
 fi
 if [ "${DRY_RUN:-0}" = "1" ]; then
   log "提示：DRY_RUN=1 —— 只生成评论内容，不向 GitLab 发送任何请求。"

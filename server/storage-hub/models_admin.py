@@ -6,7 +6,7 @@
 `selftest.py` 会设 `FAKE_EMBED=1` 走纯 Python 路径，那种环境里 numpy/tokenizers
 可能根本没装。所以本文件只用标准库，fingerprint 复制一份实现：
 
-    ⚠️ 改这里的 fingerprint() 必须同步 server/code-index-service/embedder.py 的同名函数，
+    ⚠️ 改这里的 fingerprint() 必须同步 server/storage-hub/embedder.py 的同名函数，
        反之亦然。两者必须**逐字节一致**（同样的文件、同样的顺序、同样的分块读取），
        否则同一份模型在发现页与运行时算出不同 tag —— 客户端会全量重嵌。
 

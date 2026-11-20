@@ -17,7 +17,7 @@
  *   对外 API / 配置 / DB 的 scope_kind 仍是 `worktree`，只有命名空间这一段缩写）。
  *
  * ## 硬约束
- * 1. **规则必须与服务端逐条一致**（`server/code-index-service/scope_format.json` 夹具两端都跑）：
+ * 1. **规则必须与服务端逐条一致**（`server/storage-hub/scope_format.json` 夹具两端都跑）：
  *    JS 与 Python 任何一边漂移，同一个分支就会在两个作用域里各存一份向量。
  * 2. **legacy 命名空间（不含 `#`）原样保留**，不做规范化 —— 旧库升级后 `scope_kind='legacy'`，
  *    客户端继续用原来的 `repo@fp` 就能找到它，零迁移步骤。

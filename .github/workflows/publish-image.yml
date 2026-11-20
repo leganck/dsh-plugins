@@ -58,7 +58,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           DISPATCH_PUSH: ${{ inputs.push }}
-          BASE_HASH: ${{ hashFiles('server/code-index-service/Dockerfile') }}
+          BASE_HASH: ${{ hashFiles('server/storage-hub/Dockerfile') }}
         run: |
           if [ "$REF_TYPE" = "tag" ]; then
             echo "version=${REF_NAME#server-v}" >> "$GITHUB_OUTPUT"
@@ -102,7 +102,7 @@ jobs:
         if: steps.base.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
-          context: server/code-index-service
+          context: server/storage-hub
           target: base
           platforms: ${{ env.PLATFORM }}
           build-args: |
@@ -135,11 +135,11 @@ jobs:
       # 模型缓存：键跟着 fetch 脚本的模型清单变；命中时省掉 ~750 MB 下载
       - uses: actions/cache@v4
         with:
-          path: server/code-index-service/models
-          key: dsh-embed-models-v1-${{ hashFiles('server/code-index-service/scripts/fetch-models.mjs') }}
+          path: server/storage-hub/models
+          key: dsh-embed-models-v1-${{ hashFiles('server/storage-hub/scripts/fetch-models.mjs') }}
 
       - name: fetch models (embed)
-        working-directory: server/code-index-service
+        working-directory: server/storage-hub
         run: |
           node scripts/fetch-models.mjs --only embed
           node scripts/fetch-models.mjs --check --only embed
@@ -147,14 +147,14 @@ jobs:
       - name: build app (${{ matrix.flavor }})
         uses: docker/build-push-action@v6
         with:
-          context: server/code-index-service
-          file: server/code-index-service/Dockerfile.app
+          context: server/storage-hub
+          file: server/storage-hub/Dockerfile.app
           platforms: ${{ env.PLATFORM }}
           build-args: |
             BASE_IMAGE=${{ env.IMAGE }}:base-${{ needs.meta.outputs.base_hash }}-${{ matrix.flavor }}
             VERSION=${{ needs.meta.outputs.version }}
           build-contexts: |
-            models=server/code-index-service/models
+            models=server/storage-hub/models
           load: true
           tags: dsh-embed:smoke
           cache-from: type=gha,scope=app-${{ matrix.flavor }}-embed

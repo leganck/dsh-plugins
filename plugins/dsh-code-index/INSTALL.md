@@ -231,7 +231,7 @@ node test-plugin.mjs --repo D:\Code\your-repo   # 契约与接口：45 项
 实测（103 题中文自然语言题库、bge-small 候选池 top-20）：**hit@3 42.7% → 59.2%**（quality）/ 57.3%（fast）。
 **它不需要重建索引**（在现有向量之上重排）。
 
-0.10.0 起重排**只有远端实现**（本机重排模型已移除），服务端见 `server/code-index-service/`：
+0.10.0 起重排**只有远端实现**（本机重排模型已移除），服务端见 `server/storage-hub/`：
 
 ```yml
 vectors: remote
@@ -259,7 +259,7 @@ rerank: quality   # off（默认）| fast（top-10）| quality（top-20）
 
 ```sh
 # 目录结构、CUDA 12 + ORT 1.19.2 的原因、compose 示例都在：
-server/code-index-service/README.md
+server/storage-hub/README.md
 ```
 
 起好服务端后直接配置远端（0.10.0 起只有这一种远端写法）：

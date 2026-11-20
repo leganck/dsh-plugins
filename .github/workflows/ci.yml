@@ -85,11 +85,11 @@ jobs:
             }
           '
 
-  code-index-service:
+  storage-hub:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: server/code-index-service
+        working-directory: server/storage-hub
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

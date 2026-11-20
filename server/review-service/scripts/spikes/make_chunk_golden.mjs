@@ -57,7 +57,7 @@ const add = (repoName, repoRoot, candidates) => {
 add('dsh-plugins', root, list(path.join(root, 'plugins/dsh-code-index/lib'), ['.js', '.mjs']).slice(0, perLang))
 add('dsh-plugins', root, list(path.join(root, 'plugins/dsh-multiroot'), ['.js', '.mjs']).slice(0, perLang))
 add('dsh-plugins', root, list(path.join(root, 'server/review-service/app'), ['.py']).slice(0, perLang))
-add('dsh-plugins', root, list(path.join(root, 'server/code-index-service'), ['.py']).slice(0, perLang))
+add('dsh-plugins', root, list(path.join(root, 'server/storage-hub'), ['.py']).slice(0, perLang))
 if (goDir) add('energy', path.resolve(goDir), list(goDir, ['.go']).slice(0, perLang))
 
 const files = []

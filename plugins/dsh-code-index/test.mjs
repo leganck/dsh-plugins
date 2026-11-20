@@ -94,11 +94,11 @@ console.log(`临时索引: ${dbPath}`)
 const store = Store.open(dbPath)
 
 // ---------- 0. 作用域规范（档 3 夹具）+ 配置校验 ----------
-// 夹具是 JS 与 Python 两端共同的唯一真相（server/code-index-service/scope_format.json）。
+// 夹具是 JS 与 Python 两端共同的唯一真相（server/storage-hub/scope_format.json）。
 console.log('[0] 作用域规范')
 {
   const { normalizeNamespace, safeRef, refToken, validateScope, canonicalNamespace, normalizeRoot, rootToken } = await import('./lib/scope.js')
-  const fixture = JSON.parse(fs.readFileSync(new URL('../../server/code-index-service/scope_format.json', import.meta.url), 'utf8'))
+  const fixture = JSON.parse(fs.readFileSync(new URL('../../server/storage-hub/scope_format.json', import.meta.url), 'utf8'))
   for (const c of fixture.legacy_cases) {
     check('legacy 命名空间原样保留（不重新规范化）', normalizeNamespace(c.namespace) === c.expect)
   }

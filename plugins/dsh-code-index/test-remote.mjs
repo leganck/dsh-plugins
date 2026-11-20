@@ -1,7 +1,7 @@
 /**
  * 远端服务的行为测试：不发真网络，用本地 HTTP 桩验证地址解析、重排、配置校验，
  * 以及 0.11.0 新增的**作用域**（档 3）：
- *   - namespace 规范：逐条跑 server/code-index-service/scope_format.json 夹具（JS/Python 防漂移）；
+ *   - namespace 规范：逐条跑 server/storage-hub/scope_format.json 夹具（JS/Python 防漂移）；
  *   - 多作用域检索请求体：{namespaces:[{namespace},...]}，单作用域仍发旧协议 {namespace}；
  *   - 旧服务端兼容：400/404 时 code_search 回退单作用域重试一次（回退事实写进输出）；
  *   - 插件级：scope 推导 → sync payload.scope → 服务端命名空间；命中项来源 scope。
@@ -176,7 +176,7 @@ console.log('\n[1] 地址解析')
 // 夹具是 JS 与 Python 两端共同的**唯一真相**：这里逐条跑，防止两边规则漂移。
 console.log('\n[2] 作用域命名规范（scope_format.json 夹具）')
 {
-  const fixturePath = fileURLToPath(new URL('../../server/code-index-service/scope_format.json', import.meta.url))
+  const fixturePath = fileURLToPath(new URL('../../server/storage-hub/scope_format.json', import.meta.url))
   let fixture = null
   try {
     fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'))

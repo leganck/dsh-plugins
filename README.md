@@ -11,7 +11,7 @@
 | [`plugins/dsh-wake`](plugins/dsh-wake/) | **会话唤醒**：后台跑脚本，stdout 打出一行标记后唤醒发起会话 | 无 |
 
 > 0.10.0 起 code-index 为 **remote-only**：本地不再有嵌入模型与重排模型，
-> 向量与重排都交给 [`server/code-index-service`](server/code-index-service/)；
+> 向量与重排都交给 [`server/storage-hub`](server/storage-hub/)；
 > 不连服务端时用 `vectors: off` 做纯关键词检索（本地 FTS5，零模型）。
 > 远端不可用会自动退化 + 60 秒冷却后重试，不需要重启。
 
@@ -143,7 +143,7 @@ server/
     deploy/                     compose.yaml + .env.example
     Dockerfile                  镜像含 git + tree-sitter（231 MB）
     docs/                       P0 验证报告、图谱说明
-  code-index-service/           远端索引服务（Python）：/v1 索引层 + /embed + /rerank
+  storage-hub/           远端索引服务（Python）：/v1 索引层 + /embed + /rerank
     *.py                        运行期模块（server / index_store / knn / governor / embedder …）
     tests/                      selftest.py（256 项，FAKE_EMBED 不需要模型）+ bench_knn_modes.py
     deploy/                     compose*.yaml（5 份）+ .env.example + legacy/
@@ -224,7 +224,7 @@ node scripts/validate-market.mjs
 
 ## 服务端镜像（GHCR）
 
-服务端 [`server/code-index-service`](server/code-index-service/) 已容器化，**模型内置、开箱即用**：
+服务端 [`server/storage-hub`](server/storage-hub/) 已容器化，**模型内置、开箱即用**：
 
 ```bash
 docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
@@ -237,7 +237,7 @@ docker run -d --name dsh-embed -p 127.0.0.1:18000:8000 \
 | `latest-gpu` | ≈1.7 GB | 3.06 GB | gpu 底座（CUDA 12 + ORT 1.19.2，Pascal 可用）+ 嵌入模型 |
 | `latest-cpu-rerank` / `latest-gpu-rerank` | ≈759 MB / ≈2.0 GB | 1.06 / 3.63 GB | 再加重排模型（默认不需要：服务端 `rerank` 默认 off） |
 | `base-cpu` / `base-gpu` | ≈0.09 / 1.5 GB | 281 MB / 2.86 GB | 只有运行时，模型自己挂载 |
-| ~~`jina-cpu` / `jina-gpu`~~ | 已停止发布 | — | 代码检索改为**挂载模型**：`fetch-jina-model.mjs` + `compose.jina.yaml`（不再占镜像矩阵）。见 [jina-v2.md](server/code-index-service/docs/jina-v2.md) / [image-matrix.md](server/code-index-service/docs/image-matrix.md) |
+| ~~`jina-cpu` / `jina-gpu`~~ | 已停止发布 | — | 代码检索改为**挂载模型**：`fetch-jina-model.mjs` + `compose.jina.yaml`（不再占镜像矩阵）。见 [jina-v2.md](server/storage-hub/docs/jina-v2.md) / [image-matrix.md](server/storage-hub/docs/image-matrix.md) |
 
 ### 镜像体积怎么控制的
 
@@ -263,7 +263,7 @@ cd server/review-service && docker compose up -d
 ```
 
 - 取数：镜像仓 + worktree + 本地 `git diff`（可回退 API 模式）；
-- 上下文：语义检索（code-index-service）+ 语法图（tree-sitter，带置信度）+ `git grep`；
+- 上下文：语义检索（storage-hub）+ 语法图（tree-sitter，带置信度）+ `git grep`；
 - 评审：Planner → 并行 Reviewer → 并行 Verifier → 降噪/去重 → 行内评论 + 汇总；
 - 影子模式：`DRY_RUN=1` 只记录不发布，`python -m app.report` 导出噪声/成本/待标注清单；
 - 测试：`app.selftest` 85 项 + 6 套验收（详见 `server/review-service/README.md`）。

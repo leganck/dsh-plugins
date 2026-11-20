@@ -35,7 +35,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
-          pip install -r server/code-index-service/scripts/requirements-export.txt
+          pip install -r server/storage-hub/scripts/requirements-export.txt
 
       - name: 下载已发布资产（作为对比基线）
         env:
@@ -50,7 +50,7 @@ jobs:
           ls -l /tmp/official
 
       - name: 重新导出（锁定依赖）
-        working-directory: server/code-index-service
+        working-directory: server/storage-hub
         run: |
           python scripts/export-jina-onnx.py \
             --src jinaai/jina-embeddings-v2-base-code \

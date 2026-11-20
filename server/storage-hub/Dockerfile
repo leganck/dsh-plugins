@@ -100,7 +100,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"
 
-LABEL org.opencontainers.image.title="dsh-embed (code-index service)" \
+LABEL org.opencontainers.image.title="dsh-embed (storage hub)" \
       org.opencontainers.image.description="Remote index layer + /embed + /rerank for the DSH code-index plugin" \
       org.opencontainers.image.source="https://github.com/leganck/dsh-plugins" \
       org.opencontainers.image.licenses="MIT" \

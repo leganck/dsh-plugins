@@ -28,7 +28,7 @@ agent 改完代码 → rsync 到 112 → `docker build -f Dockerfile.app`（FROM
 ```bash
 # 在 112 上执行（脚本化到 scripts/preview-deploy.sh）
 mkdir -p /srv/dsh-preview && cd /srv/dsh-preview
-# rsync 代码（本机执行）：rsync -az --delete server/code-index-service/ root@112:/srv/dsh-preview/src/
+# rsync 代码（本机执行）：rsync -az --delete server/storage-hub/ root@112:/srv/dsh-preview/src/
 docker build -f src/Dockerfile.app \
   --build-arg BASE_IMAGE=ghcr.io/leganck/dsh-embed:server-v0.17.0-cpu \
   --build-arg VERSION=preview \

@@ -1,6 +1,6 @@
 """通用小工具：环境变量、日志、JSON、HTTP、哈希。
 
-刻意不用第三方库：评审服务要和 code-index-service 一样"一个 python:3.11-slim 就能跑"。
+刻意不用第三方库：评审服务要和 storage-hub 一样"一个 python:3.11-slim 就能跑"。
 """
 
 from __future__ import annotations

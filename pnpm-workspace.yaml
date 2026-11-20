@@ -1,6 +1,6 @@
 # 多插件仓库的工作区声明。
 #
-# 只收 plugins/*：`server/code-index-service` 是 Python 部署单元（requirements + compose.yaml），
+# 只收 plugins/*：`server/storage-hub` 是 Python 部署单元（requirements + compose.yaml），
 # 不属于 pnpm workspace —— 它有独立的 selftest.py 与 start.sh，别混进来。
 packages:
   - 'plugins/*'

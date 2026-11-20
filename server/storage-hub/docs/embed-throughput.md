@@ -1,6 +1,6 @@
 # 后台嵌入吞吐：0.8 块/秒 的定位与改动（T-261118-perf）
 
-> 范围：只改 `server/code-index-service/` 内代码（`governor.py` / `embedder.py` / `server.py`），
+> 范围：只改 `server/storage-hub/` 内代码（`governor.py` / `embedder.py` / `server.py`），
 > 未改 `plugins/`，未 `git add/commit`，**未重启、未部署容器**（线上 192.168.50.112 仍是旧进程）。
 > 本文所有「本机实测」都用**合成库 + stub embedder**（不需要 onnxruntime / 真实模型），
 > 复现命令：`python tests/bench_embed_governor.py`。
@@ -100,7 +100,7 @@ MatMul 只在特定指令集上有原生 kernel，通用 CPU 上大量算子退�
 `embedder.warnings()` → 日志 `警告：模型 model_fp16.onnx 是 fp16，但执行提供者只有 CPU…`
 以及 `/health.model...warnings`。
 
-## 3. 改动点（全部在 `server/code-index-service/`）
+## 3. 改动点（全部在 `server/storage-hub/`）
 
 ### 3.1 候选窗口 + 长度分桶（`governor.py`）
 

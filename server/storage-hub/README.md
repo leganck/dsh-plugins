@@ -1,4 +1,4 @@
-# code-index-service —— 远端索引服务（/v1 索引层 + /embed + /rerank）
+# storage-hub —— 远端索引服务（/v1 索引层 + /embed + /rerank）
 
 `dsh-code-index` 插件默认**全在本机**。这个服务是可选的一台"算力/存储都放外面"的机器：
 
@@ -26,7 +26,7 @@
 ## 目录
 
 ```
-code-index-service/
+storage-hub/
 ├── server.py        # HTTP 路由（单次 write + 关 Nagle；小响应少 40 ms）
 ├── index_store.py   # 血统 / 命名空间 / blobs / chunks / vectors；sync、GC、adopt
 ├── knn.py           # 内存矩阵 + revision 失效 + 总字节 LRU

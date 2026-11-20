@@ -630,10 +630,10 @@ def main():
     st, html, ctype = req_raw("/admin")
     check("/admin → 200 text/html", st == 200 and "text/html" in ctype, (st, ctype))
     check("页面包含标题与关键区块",
-          "code-index-service · 控制台" in html and "作用域（永久快照）" in html and "/v1/scopes" in html
+          "storage-hub · 控制台" in html and "作用域（永久快照）" in html and "/v1/scopes" in html
           and "API Key" in html and "概览" in html)
     st, html_slash, _ = req_raw("/admin/")
-    check("/admin/ 同样可用", st == 200 and "code-index-service" in html_slash)
+    check("/admin/ 同样可用", st == 200 and "storage-hub" in html_slash)
     check("页面不再内嵌 API-Key 输入逻辑（改走 HTTP Basic）",
           "dshAdminKey" not in html and "localStorage" not in html)
     st, fav, fav_ctype = req_raw("/favicon.svg")
@@ -689,7 +689,7 @@ def main():
         st, _, page = req_auth("/admin", auth=bad)
         check("错误 Basic 凭据 → 仍是登录页", st == 200 and "请输入管理员账号" in page, st)
         st, _, page = req_auth("/admin", auth=good)
-        check("正确 Basic → /admin 控制台 html", st == 200 and "code-index-service · 控制台" in page, st)
+        check("正确 Basic → /admin 控制台 html", st == 200 and "storage-hub · 控制台" in page, st)
         st, _, body = req_auth("/v1/scopes", auth=good)
         check("正确 Basic → 后台数据接口放行", st == 200 and "scopes" in body, st)
         st, _, body = req_auth("/health", auth=good)
@@ -866,7 +866,7 @@ def main():
               st == 200 and cookie.startswith("dsh_admin=") and "httponly" in (h.get("set-cookie") or "").lower(),
               (st, h.get("set-cookie")))
         st, _, page = req_auth("/admin", headers={"cookie": cookie})
-        check("带会话 Cookie → 控制台", st == 200 and "code-index-service · 控制台" in page, st)
+        check("带会话 Cookie → 控制台", st == 200 and "storage-hub · 控制台" in page, st)
         st, _, body = req_auth("/v1/admin/session", headers={"cookie": cookie})
         check("会话可读 /v1/admin/session", st == 200 and json.loads(body).get("authed") is True, st)
         st, _, _ = req_auth("/admin/logout", method="POST", body={})

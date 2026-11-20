@@ -1,6 +1,6 @@
 # storage-hub v2 — M1/M2 验收核对表
 
-对照 `docs/plan-storage-hub.md` §5 里程碑表逐条核对。实测日期 2026-11-19；证据：`server/exp-pipeline/e2e_demo.md`（端到端演示）、`seed.py`（种子脚本）、`pipeline.py`（task-6 管道，本任务只读复用）、`server/code-index-service/docs/memories.md`（task-5 契约）。
+对照 `docs/plan-storage-hub.md` §5 里程碑表逐条核对。实测日期 2026-11-19；证据：`server/exp-pipeline/e2e_demo.md`（端到端演示）、`seed.py`（种子脚本）、`pipeline.py`（task-6 管道，本任务只读复用）、`server/storage-hub/docs/memories.md`（task-5 契约）。
 
 ## M1 经验闭环（验收标准：3 个历史会话跑批——垃圾率 <30%，contradict 进队列）
 
@@ -19,7 +19,7 @@
 | # | 验收标准 | 实测结果（数字） | 达成 | 说明 / 未达成原因 |
 |---|---|---|---|---|
 | 1 | review-service 注入经验（/v1/memories/search） | 检索端点实测 6 组查询：4 组 top-3 命中（含任务指定「分支 清理 main」），2 组空命中（主题不在 223 条种子里：orderCompletePost/云打印旧快照仅存在于 biz-context.txt 素材）；平均响应 1.1 ms（0.2–2.4 ms）。但 **review-service 侧未接入**（本任务范围仅 exp-pipeline + 验收，review-service 注入属后续 review 批次，见 plan §4 客户端改动表） | **未达成** | 缺的是消费方代码接入，不是 memories 检索能力。检索服务本身已按 review-service 所需契约（top-k hits + ms + vectorNote）就绪 |
-| 2 | bodies 直读（/v1/code/.../bodies） | `server/code-index-service/tests/test_bodies.py` **31 通过 / 0 失败**（纯逻辑层 + 真实 HTTP 层：命中/缺失/有界/去重/200 上限/未知 ns 404/URL 解码） | **达成** | 只读复跑服务端自带测试作证据，零改动 |
+| 2 | bodies 直读（/v1/code/.../bodies） | `server/storage-hub/tests/test_bodies.py` **31 通过 / 0 失败**（纯逻辑层 + 真实 HTTP 层：命中/缺失/有界/去重/200 上限/未知 ns 404/URL 解码） | **达成** | 只读复跑服务端自带测试作证据，零改动 |
 | 3 | MR 报告出现「依据经验 exp-xxx」 | **0 份** MR 报告带经验引用 | **未达成** | 依赖标准 1（review-service 注入）先行；本任务授权范围不含 review-service 改动 |
 | 4 | 影子对比 | 未执行（0 组对比） | **未达成** | 同上：影子对比需要注入链路在线，属 review 批次工作 |
 
