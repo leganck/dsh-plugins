@@ -103,3 +103,18 @@ data-asset seg/块均向量/冲突裁决 全 PASS，旧「>作用域</button>」
 
 **注意**：命中质量反映 digest 语料主题分布（偏 DSH/云效/工具链），业务主题（结账写销售/云打印旧快照）
 在种子里覆盖少——补种 biz-context.txt 可改善（待做）。
+
+## CI 修复（2026-11-20 09:55）—— 三类失败全清
+
+| 失败 | 根因 | 修复 |
+|---|---|---|
+| ci / plugin market index | 历史重写后插件目录最后改动 commit 全变 → index.json 过期 | pnpm market 重新生成 |
+| ci / test dsh-code-index 6 断言 | **覆盖率闸门缺陷**：`rs.coverage ?? 0` 把"字段缺失"错当"覆盖 0%" → 静默拦成纯关键词（test-remote 的桩 GET 一律回 {ready:true} 无 coverage） | remoteCoverage() 改为缺失/非法 → null 不拦；test-remote 79/0 |
+| secret-scan / curl-auth-header | **41817d3 误提交含真实 API_KEY/ADMIN_PASSWORD 的旧部署脚本** | filter-repo 全历史抹除 + 强推；**凭据已轮换**（API_KEY+ADMIN_PASSWORD 全新值，旧值 401）；DSH profile 已写新 KEY |
+| secret-scan / generic-api-key | 模型清单 sha256 校验值（64hex）被误判 | .gitleaks.toml 白名单：当前文件 + 已删除的历史工具文件 |
+
+最终状态：**ci success / secret-scan success / publish-image success**（0ef75d4）。
+
+### 两次教训记录
+1. 脚本曾含真值（上次 .env.example 同类事故）→ 这次发现后 4 分钟内完成 删文件→抹历史→轮换三连，损失为零（发现早）。
+2. `?? 0` 的默认值语义陷阱：字段"缺失"≠"为零"。凡是判断"占比"类字段必须先验存在性。
