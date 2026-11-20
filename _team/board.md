@@ -203,3 +203,52 @@ ui2 需确认裁定：① 203.5K wire 字节接受（单文件管理台 LAN 秒�
 
 ## 预览地址（待用户浏览器验收）
 http://192.168.50.112:18080/admin  （admin / 预览密码见本地 _tmp；预览 KEY 独立，生产 18000 未动）
+
+## 新批次：schema v2 + 经验抽取核心（2026-11-20 17:35）
+
+用户已全部拍板（按推荐来）：
+- **不写兼容代码**、重置重建（旧库启动即拒绝）、向量清空重算
+- 证据片段落容器（excerpt 模式，≤2KB 已脱敏，180 天降级为 quote-only）
+- 向量精度：重置前先做 20 条 A/B（fp16 vs fp32/int8），质量不降就换 fp32（3.8h → ~40min）
+- 显示层中文名（jargon/index/logic → 黑话/索引/逻辑镜头）；卡片视图为默认
+- 旧 223 条经验随库清空，问题消解
+
+| Thread | 队员 | 状态 | 目标 | 写范围 |
+|---|---|---|---|---|
+| T-261120-schema | store2 | **closed（Lead 抽验通过）** | index_store/knn/governor/server-payload 全量改 v2 + tests | index_store.py, knn.py, governor.py, server.py(非 HTML), tests/ |
+| T-261120-expcore | expcore | **closed（Lead 抽验通过 + 默认值调优）** | exp_prompt/exp_llm/exp_pipeline + admin_store settings + test_exp_core | 4 个新文件 + admin_store.py + test_exp_core.py |
+
+协作边界：store2 不碰 ADMIN_HTML 段与 expcore 的 4 个新文件；expcore 只写授权文件。
+两者都完成后，再由单一 owner 做 server.py 的路由/设置页/卡片视图（避免同文件并发）。
+
+## 待办（后续阶段）
+- P0 剩余：设置页 ADMIN_HTML + `POST /v1/admin/settings/llm-test`（必须服务端代理发起）
+- P1 剩余：`/v1/exp/extract|import|jobs`、`/v1/memories/stats`、`/v1/admin/exp/replay`
+- P2 插件接线（memory-archive 压缩后触发，失败不阻塞）
+- P3 评测（gold set 18 正 + 8 负，三指标）
+- P4 重置部署（含精度 A/B）
+
+store2 抽验（Lead 亲自跑，2026-11-20 18:05）：
+  test_schema **77/77** · test_scopes 128/128 · test_memories **119/119** · test_bodies 31/31 · selftest **278/278**
+  实测旧库（无 meta）→ RuntimeError 且消息含「重置重建」+ docs/schema-v2.md §5 ✅
+  实测 24 表/视图（14 表 + FTS 影子表），memories/conflicts/excerpts/vectors/chunks 关键列齐全，schema_version=2，foreign_keys=1 ✅
+  ADMIN_HTML 区间（行 289~3396）git diff hunks = 0 处被改 ✅（store2 守住了冻结段）
+  残留引用清理（Lead 做）：删掉已破损的 scripts/cleanup-lineages.py（引用了已删的 cas_migrate_db/lineage_hard_clean/vectors_v2）；
+  docs/lineages.md 重写为 v2 语义（无墓碑、merged 不搬运、hard-clean=清空血统、duplicates 判定）；
+  ADMIN_HTML 里"观察期 7 天"过时文案改为 v2 实际语义，改后 selftest 仍 278 绿。
+
+## 第三批（2026-11-20 21:25）
+
+| Thread | 队员 | 状态 | 交付 |
+|---|---|---|---|
+| T-261120-expcore | expcore | **closed** | 176/176；when_min 10、8000 tokens/240s/400 字分段、truncated 不静默、黄金样本 17 条修正 |
+| T-261120-srv | srv2 | **closed** | 88/88 + selftest 279；设置页/llm-test(服务端发起)/exp 路由/stats/卡片流/中文标签 |
+| T-261120-plugin | plugin | **closed（Lead 抽验）** | 109+78=187；压缩后 fire-and-forget 触发，四类失败下落盘逐字节一致 |
+| T-261120-eval | evalr | dispatched | Recall/Precision/Garbage/Category Acc + 与规则版对照 |
+
+提交：72fc29f(schema v2) → 15183ca(exp 核心) → 01e4ea7(HTTP+卡片) → 442da68(插件 1.3.0)
+
+待办：
+- 发版：memory-archive release/*.tgz 重打包 + market 已重建（版本 1.3.0）
+- P4 重置部署（含 fp16 vs fp32 A/B 精度实验，唯一免费窗口）
+- 线上启用：装新 tgz + profile 配 exp.enabled/url/key
