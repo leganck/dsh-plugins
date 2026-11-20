@@ -1,9 +1,9 @@
 {
   "name": "dsh-memory-archive",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "DSH bundle: for every compaction, write a greppable segment_NNN.md holding the checkpoint summary plus the verbatim shadowed turns, maintain INDEX.md, and inject a pointer so the model can recover early tool output. Same-session only.",
+  "description": "DSH bundle: for every compaction, write a greppable segment_NNN.md holding the checkpoint summary plus the verbatim shadowed turns, maintain INDEX.md, and inject a pointer so the model can recover early tool output. Optionally hands each finished segment to an experience-extraction endpoint (fire-and-forget: a dead endpoint never affects the archive). Same-session only.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -28,7 +28,9 @@
     "node": "^22.19 || >=24"
   },
   "scripts": {
-    "test": "node test.mjs",
+    "test": "node test.mjs && node test-exp-hook.mjs",
+    "test:archive": "node test.mjs",
+    "test:exp": "node test-exp-hook.mjs",
     "release": "pwsh -NoProfile -File build-plugin-dist.ps1"
   },
   "exports": {
@@ -38,6 +40,7 @@
   },
   "files": [
     "index.js",
+    "exp-hook.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "README.md",
@@ -45,6 +48,7 @@
     "CHANGELOG.md",
     "LICENSE",
     "test.mjs",
+    "test-exp-hook.mjs",
     "tools/*.mjs",
     "icon.svg"
   ],

@@ -13,3 +13,24 @@
         announce: true
         maxEventsPerSession: 20000
         maxSegmentBytes: 1500000
+        # 经验抽取（exp v2，**默认关闭**）。每次压缩落盘后，把该段的 summary + 被 shadow
+        # 的原文 POST 给经验容器，由它抽成可复用团队经验。抽取是可选增强：
+        # 端点超时 / 500 / 连不上都只 warn，落盘内容与返回值不受影响，**不影响归档**。
+        # 键的完整说明见 README「经验抽取接线」与 exp-hook.mjs 的 EXP_DEFAULTS。
+        exp:
+          enabled: false
+          # server = 服务端抽（推荐）；client = 插件自己调本机 LLM，只交候选
+          mode: "server"
+          # 经验容器根地址，如 "http://192.168.1.10:8000"（已带 /v1 也接受）
+          url: ""
+          # 服务端 API_KEY -> Authorization: Bearer；本地网关可留空
+          key: ""
+          # false = 只跑漏斗、不写库（先看质量再开）；true = 真落库
+          apply: false
+          timeoutMs: 15000
+          # 被 shadow 原文小于这个字节数就不抽
+          minSegmentBytes: 2000
+          # mode=client 才需要：本机 OpenAI 兼容 LLM
+          llmUrl: ""
+          llmKey: ""
+          llmModel: ""

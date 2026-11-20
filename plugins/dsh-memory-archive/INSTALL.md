@@ -78,7 +78,7 @@ pwsh -File install.ps1 -Profile desktop -Force       # 覆盖已有托管块（�
 2. **备份** profile 的 `cordis.patch.yml`；
 3. 在 managed begin/end 标记之间插入一个 `memory-archive` 行，`name` 写
    `file:///<bundle 绝对路径>/index.js`，config 写 `archiveDir` / `includeToolResults` /
-   `redact` / `announce`；
+   `redact` / `announce`（经验抽取的 `exp.*` 默认关闭，需要时手工加，见 README「经验抽取接线」）；
 4. 打印重启与回滚说明。
 
 它**不会**改 profile 的 `package.json`，也**不会**在 profile 目录跑 pnpm。`-Profile` 默认取
@@ -180,7 +180,9 @@ pwsh -File install.ps1 -Profile desktop -Uninstall
 
 ```bash
 cd plugins/dsh-memory-archive
-node test.mjs     # ALL 109 CHECKS PASSED；全部在临时目录里跑，不触碰安装目录
+node test.mjs           # 归档本体：ALL 109 CHECKS PASSED；全部在临时目录里跑，不触碰安装目录
+node test-exp-hook.mjs  # 经验抽取接线：ALL 78 CHECKS PASSED（含超时/500/拒绝连接三种失败）
+npm test                # 两套一起跑
 ```
 
 仓库根也能一次跑全部插件：`pnpm test`。

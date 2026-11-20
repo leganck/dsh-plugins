@@ -64,6 +64,19 @@ if (-not $SkipTests) {
 } else {
   Write-Host '--- 1/6 self-test SKIPPED (-SkipTests) ---'
 }
+
+# --- 1b. self-test: 经验抽取接线（exp-hook） ---------------------------------
+# 与 1/6 分开跑：归档本体与"压缩后自动触发经验抽取"是两套断言，任意一套红了都要拦住发版。
+if (-not $SkipTests) {
+  Write-Host '--- 1b/6 self-test (exp hook) ---'
+  $expTest = & $NodeExe (Join-Path $root 'test-exp-hook.mjs') 2>&1
+  $expVerdict = ($expTest | Where-Object { $_ -match 'CHECKS (PASSED|FAILED)' })
+  $expTest | Where-Object { $_ -match '^FAIL' } | ForEach-Object { Write-Host "  $_" }
+  if ($LASTEXITCODE -ne 0 -or $expVerdict -notmatch 'ALL .* CHECKS PASSED') {
+    throw "exp self-test failed: $expVerdict"
+  }
+  Write-Host "  $expVerdict"
+}
 Write-Host ''
 
 # --- 2. validate the bundle patch under the loader dialect -------------------

@@ -1,3 +1,36 @@
+## 1.3.0 — 2026-11-20
+
+### 为什么改：归档在写，经验没被抽
+归档把每次压缩的逐字轮次写成了可 grep 的段落，但**经验管道只能靠人手动重放归档**才拿得到素材
+（`server/storage-hub` 的 `POST /v1/admin/exp/replay`）。真实工作记录是经验抽取的唯一原料，
+它就在磁盘上，却要另一个人记得去跑一次——这是接线问题，不是能力问题。
+
+### 改动
+1. **压缩落盘后自动触发一次经验抽取**：`writeSegment()` 写完 `segment_NNN.md` / `index.jsonl` /
+   `INDEX.md` 之后，把该段的 `summary` + 被 shadow 的原文 `POST {exp.url}/v1/exp/extract`
+   （body 契约：`session_id / segment_no / workflow / summary / verbatim / apply`）。
+2. **fire-and-forget，绝不阻塞压缩**：`fire()` 同步返回，`writeSegment()` 不 await、
+   不依赖返回结果。端点**超时 / 500 / 连接被拒绝**时，落盘内容与没开 exp 时**逐字节一致**
+   （`test-exp-hook.mjs` 用同一个 compaction id 逐字节比对钉死），指针照发；
+   失败只 `logger.warn`。
+3. **同会话连续失败 3 次退避**：避免容器不可达时每段都白等一次 `exp.timeoutMs`（默认 15s）；
+   成功一次清零。服务端 `200 + skipped`（未配置 LLM）不算失败。
+4. **`mode=client` 本机降级**：容器不可达时插件自己调本机 OpenAI 兼容 LLM，抽完只把候选
+   `POST /v1/exp/import`。JS 侧 prompt 自维护（三镜头 / 九类垃圾 / 五类 category 含 process 拒收齐全）。
+5. **`workflow` slug**：会话标题优先、否则 cwd basename；`ERP Bug：订单/退款` → `erp-bug-订单-退款`。
+6. **200KB 上限**：`verbatim` 超过 `exp.maxVerbatimBytes`（默认 204800）按 UTF-8 边界截断并 warn。
+7. 新增配置块 `exp.*`（默认**关闭**）：`cordis.patch.yml` 与 `DEFAULTS` 同步；
+   激活标记 `_loaded.json` 记录 `exp.enabled/mode`，可判定运行中的是这份代码。
+8. 新增 `exp-hook.mjs`（触发器、payload、prompt、client 模式、退避）与 `test-exp-hook.mjs`；
+   `package.json` 的 `files` 带上 `exp-hook.mjs`（`index.js` 依赖它，漏了会装不起来）。
+
+### 测试
+`node test.mjs` → **109 项全过**（既有行为未变）
+`node test-exp-hook.mjs` → **78 项全过**（新增：触发一次且字段齐全、三种失败下落盘一致、
+`enabled=false`/`minSegmentBytes` 不触发、连续 3 次失败退避、workflow slug、200KB 截断、
+prompt 三镜头/九类垃圾/五类 category、client 模式 import 路径）
+
+
 ## 1.2.0 — 2026-10-17
 
 ### 为什么改：写得多、读得少

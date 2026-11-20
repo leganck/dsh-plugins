@@ -33,6 +33,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
+import { EXP_DEFAULTS, createExperienceTrigger, normalizeExpConfig } from './exp-hook.mjs'
 
 /** Directory holding this module, so activation can be observed from disk. */
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
@@ -40,8 +41,11 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 /**
  * Bump when the behaviour changes. It is written into `_loaded.json` so the
  * running app can be shown to hold *this* code, not a stale module cache.
+ *
+ * 2026-11-20.1: compaction 落盘后接了一次**可选**的经验抽取（`exp.*`），
+ * 抽取端点不可用只 warn，归档结果不变。
  */
-export const BUILD = '2026-10-17.1'
+export const BUILD = '2026-11-20.1'
 
 /**
  * Bumped whenever the keyword extractor changes shape.
@@ -97,6 +101,17 @@ const DEFAULTS = {
    * against this module's own directory, never the session cwd.
    */
   markerFile: null,
+  /**
+   * Experience extraction (exp v2) — **optional**, and off by default.
+   *
+   * After a segment is written to disk, the plugin may hand that segment's
+   * summary + verbatim turns to the experience pipeline, which turns it into
+   * reusable team memories. It is a fire-and-forget side channel: the whole
+   * trigger lives in `exp-hook.mjs`, and a dead / timing-out / 500-ing endpoint
+   * never changes the archive or this plugin's return values. See
+   * `EXP_DEFAULTS` in `exp-hook.mjs` for every key and its default.
+   */
+  exp: { ...EXP_DEFAULTS },
 }
 
 /** Event types buffered for the verbatim section, in the order they appear. */
@@ -286,7 +301,17 @@ function findSessionLog(root, sessionId) {
   return null
 }
 
-const pluginConfig = (raw) => ({ ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) })
+const pluginConfig = (raw) => {
+  const source = raw !== null && typeof raw === 'object' ? raw : {}
+  const merged = { ...DEFAULTS, ...source }
+  // `exp` is the only nested block, so the shallow spread above would drop its
+  // defaults as soon as a user writes `exp: { enabled: true }`.
+  merged.exp = {
+    ...DEFAULTS.exp,
+    ...(source.exp !== null && typeof source.exp === 'object' ? source.exp : {}),
+  }
+  return merged
+}
 
 /**
  * Expand `~`, `$DSH_HOME`, `$HOME` and `%VAR%` in a configured path.
@@ -430,6 +455,21 @@ function toolCallsOf(shadowed) {
 
 /** A filesystem-safe single path segment. */
 const safeSegment = (value) => String(value ?? 'session').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)
+
+/**
+ * The session's display title, if it has one.
+ *
+ * `session.title` is the documented shape; `session.header.title` is kept as a
+ * fallback because the header is where the session file records its metadata.
+ * Used only to derive the `workflow` label sent to the experience pipeline, so a
+ * missing title is not a problem: the caller falls back to the cwd basename.
+ */
+function sessionTitle(session) {
+  for (const candidate of [session?.title, session?.header?.title]) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') return candidate.trim()
+  }
+  return ''
+}
 
 /**
  * Token shapes worth keeping, most specific first.
@@ -924,6 +964,11 @@ function buildSegment({ sessionId, index, summaryEvent, shadowed, config, now, k
     unanswered,
     targetFiles,
     keywords: keywordsOf(keywordSource, undefined, keywordNoise),
+    // Already computed for the metadata table; returned because the experience
+    // hook needs exactly these two strings (and must not re-render or re-mask).
+    summaryText,
+    verbatimText,
+    verbatimBytes,
   }
 }
 
@@ -1063,8 +1108,36 @@ function resolveMarkerFile(config) {
   return isAbsolute(expanded) ? resolve(expanded) : resolve(SELF_DIR, expanded)
 }
 
+/**
+ * Build the experience trigger, and never let it break activation.
+ *
+ * `fire()` already contains itself; this wrapper covers the remaining risk of
+ * *constructing* the trigger (a pathological config object, an unexpected runtime
+ * without `fetch`). The fallback keeps the call site unconditional.
+ */
+function safeExperienceTrigger(ctx, expConfig) {
+  try {
+    return createExperienceTrigger({ exp: expConfig, logger: ctx?.logger })
+  } catch (error) {
+    try {
+      ctx?.logger?.warn?.(`dsh-memory-archive: exp 触发器初始化失败（本次运行不抽经验）：${error?.message ?? error}`)
+    } catch { /* a read-only or missing logger must not break activation either */ }
+    return { fire: () => ({ started: false, skipped: 'init-failed' }) }
+  }
+}
+
 export function apply(ctx, rawConfig) {
   const config = pluginConfig(rawConfig)
+  const expConfig = normalizeExpConfig(config.exp)
+  /**
+   * Experience extraction trigger (see `exp-hook.mjs`).
+   *
+   * Created once per activation and **fire-and-forget**: `fire()` only validates
+   * and schedules, so a slow or dead endpoint can never delay a compaction, and
+   * `writeSegment` never awaits it. When `exp.enabled` is false every call is a
+   * no-op (that is the default).
+   */
+  const expTrigger = safeExperienceTrigger(ctx, config.exp)
 
   // Activation marker: the plugin has no other side effect until a compaction
   // happens, so without this there is no way to tell "loaded" from "not loaded".
@@ -1093,6 +1166,10 @@ export function apply(ctx, rawConfig) {
         // deprecated in-memory reader.
         capabilities: { zstd: typeof zlib.zstdDecompressSync === 'function' },
         announce: config.announce,
+        // Whether the experience hand-off is wired and in which direction, so the
+        // running app can be shown to hold *this* code (and not a patch row that
+        // predates the `exp` block).
+        exp: { enabled: expConfig.enabled, mode: expConfig.mode, url: expConfig.url, apply: expConfig.apply },
         // Where this file was written, so a redirected marker is self-describing.
         markerFile,
       }, null, 2)}\n`,
@@ -1365,7 +1442,7 @@ export function apply(ctx, rawConfig) {
     writeFileSync(indexFile, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
     const evictedRows = readJsonlRows(join(dir, 'evicted.jsonl'))
     writeFileSync(join(dir, 'INDEX.md'), renderIndex(rows, evictedRows), 'utf8')
-    return {
+    const result = {
       dir,
       file,
       compactionId: String(summaryEvent.data?.compactionId ?? ''),
@@ -1379,6 +1456,23 @@ export function apply(ctx, rawConfig) {
       totalToolCalls: rows.reduce((n, row) => n + (Number(row.toolCount) || 0), 0),
       indexKeywords: rows.map((row) => ({ file: row.file, keywords: row.keywords ?? [] })),
     }
+
+    // 经验抽取接线：**所有落盘动作都已经完成**，这里只是把刚写完的段交给经验管道。
+    // `fire()` 同步返回、从不 await、从不 throw（触发器内部再兜一层），所以端点超时 /
+    // 500 / 拒绝连接都不会改变上面的文件内容与这个返回值——这是接线的安全底线。
+    try {
+      expTrigger.fire({
+        sessionId,
+        segmentNo: index,
+        title: sessionTitle(session),
+        cwd: session?.header?.cwd,
+        summary: built.summaryText,
+        verbatim: built.verbatimText,
+        compactionId: result.compactionId,
+      })
+    } catch { /* 可选增强：任何异常都不得影响归档 */ }
+
+    return result
   }
 
   function enqueue(work) {
