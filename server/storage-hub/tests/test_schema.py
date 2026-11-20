@@ -12,7 +12,7 @@
   · FTS 触发器：insert / update / delete 后 memories_fts 与实际行一致
   · 幂等 upsert：memories_fp 命中即更新，不产生新行
   ·  Conflicts 一等公民：open 查询、单行一对、裁决留痕
-  · exp_jobs / api_calls 写入与聚合
+  · exp_jobs 写入与聚合
   · GC：删掉最后一个引用者后孤儿 blob/vector 被回收
 
 跑法（服务根目录或仓库根目录都行）：python tests/test_schema.py
@@ -128,7 +128,7 @@ def test_startup_gate():
         "select name from sqlite_master where type = 'table'").fetchall()}
     expected = {"meta", "lineages", "scopes", "chunks", "blobs", "vectors", "memories",
                 "memory_vectors", "excerpts", "memory_excerpts", "memory_conflicts",
-                "memory_events", "exp_jobs", "api_calls"}
+                "memory_events", "exp_jobs"}
     check("14 张 v2 表齐备", expected <= tables, sorted(expected - tables))
     check("2 个 FTS 虚拟表（memories_fts / chunks_fts）",
           {"memories_fts", "chunks_fts"} <= tables, sorted(tables))
@@ -137,7 +137,7 @@ def test_startup_gate():
     check("关键索引齐备（scopes_namespace / scopes_ident / memories_fp / memory_conflicts_open）",
           {"scopes_namespace", "scopes_ident", "chunks_hash", "memories_fp",
            "memories_cat", "memories_wf", "memories_lens", "memories_hit_at",
-           "memory_conflicts_open", "exp_jobs_created", "api_calls_group"} <= idx,
+           "memory_conflicts_open", "exp_jobs_created"} <= idx,
           sorted(idx))
     check("本连接 foreign_keys=ON", int(st.db.execute("pragma foreign_keys").fetchone()[0]) == 1)
     st.close()
@@ -407,7 +407,7 @@ def test_conflicts():
 
 # ---------------------------------------------------------------- ⑦ 任务与统计
 def test_jobs():
-    print("\n[7] exp_jobs / api_calls")
+    print("\n[7] exp_jobs")
     st = istore.IndexStore(fresh("jobs.db"))
     js = istore.JobsStore(st.db)
     job = js.record({"session_id": "sess-1", "segment_no": 1, "workflow": "erp-bug",
@@ -426,13 +426,6 @@ def test_jobs():
     check("job_stats 漏斗（byStatus/totals）",
           stats["byStatus"]["done"] == 1 and stats["byStatus"]["skipped"] == 1
           and stats["totals"]["candidates"] == 6, stats)
-    js.api_call("search", "key-1", 12, 200)
-    js.api_call("sync", "key-1", 30, 500, "boom")
-    agg = js.api_stats()
-    check("api_calls 按 group 聚合 + 错误计数",
-          agg["total"] == 2 and {g["group"] for g in agg["groups"]} == {"search", "sync"}
-          and sum(g["errors"] for g in agg["groups"]) == 1, agg)
-    check("api_calls.group_ 白名单校验", _raises(ValueError, js.api_call, "not-a-group"))
     check("memories.exp_job_id 外键指向 exp_jobs",
           _memories_job_fk(st, js))
     js.close()

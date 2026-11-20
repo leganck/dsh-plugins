@@ -614,7 +614,7 @@ def main():
     check("空库按 v2 DDL 建表（代码资产 5 + 经验 6 + 任务 3 + meta + 2 FTS）",
           {"meta", "lineages", "scopes", "chunks", "blobs", "vectors", "memories",
            "memory_vectors", "excerpts", "memory_excerpts", "memory_conflicts",
-           "memory_events", "exp_jobs", "api_calls"} <= tables
+           "memory_events", "exp_jobs"} <= tables
           and {"memories_fts", "chunks_fts"} <= tables, sorted(tables))
     check("meta 三键齐备（schema_version / chunk_schema / embed_tag）",
           f1.meta_get("schema_version") == "2" and f1.meta_get("chunk_schema") == "v2"

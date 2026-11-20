@@ -1,6 +1,6 @@
 """storage-hub 存储层 v2：代码资产（lineages/scopes/chunks/blobs/vectors）+ 经验资产
 （memories/memory_vectors/excerpts/memory_excerpts/memory_conflicts/memory_events）+
-任务与统计（exp_jobs/api_calls/meta）。
+任务（exp_jobs）与元数据（meta）。
 
 ## 本文件是 v2 schema 的唯一实现，**不含任何兼容/迁移代码**
 
@@ -249,18 +249,6 @@ create table if not exists exp_jobs (
 ) strict;
 create index if not exists exp_jobs_created on exp_jobs(created_at desc);
 create index if not exists exp_jobs_seg     on exp_jobs(session_id, segment_no);
-
-create table if not exists api_calls (
-  id       integer primary key,
-  at       integer not null,
-  group_   text not null,
-  key_id   text,
-  ms       integer,
-  status   integer,
-  err      text
-) strict;
-create index if not exists api_calls_at    on api_calls(at desc);
-create index if not exists api_calls_group on api_calls(group_, at desc);
 
 -- ---------------------------------------------------------------- FTS
 -- 经验全文：外部内容表 + 触发器同步（不再手工维护两份文本）
@@ -2947,14 +2935,12 @@ class MemoryStore:
         }
 
 
-# ---------------------------------------------------------------- 任务与统计（exp_jobs / api_calls）
+# ---------------------------------------------------------------- 任务（exp_jobs）
 JOB_STATUSES = ("queued", "running", "done", "failed", "skipped")
 JOB_MODES = ("server", "client")
-API_GROUPS = ("search", "sync", "bodies", "memories", "admin", "exp")
-
 
 class JobsStore:
-    """exp_jobs（每次抽取一段一条）+ api_calls（调用统计，重启不掉）。
+    """exp_jobs（每次抽取一段一条）。
 
     与 MemoryStore 同一套连接策略（路径 → 自持连接；连接对象 → 共享）。
     """
@@ -3181,42 +3167,3 @@ class JobsStore:
             "last": self._row_to_job(last) if last else None,
         }
 
-    # ------------------------------------------------------------ 调用统计
-    def api_call(self, group_, key_id=None, ms=None, status=None, err=None, at=None):
-        """记一条 API 调用（group ∈ search|sync|bodies|memories|admin|exp）。"""
-        group_ = str(group_ or "").strip()
-        if group_ not in API_GROUPS:
-            raise ValueError(f"group must be one of {' / '.join(API_GROUPS)}")
-        with self.lock:
-            self.db.execute(
-                "insert into api_calls(at, group_, key_id, ms, status, err) values (?,?,?,?,?,?)",
-                (int(at if at is not None else time.time()), group_,
-                 None if key_id in (None, "") else str(key_id)[:64],
-                 None if ms is None else int(ms),
-                 None if status is None else int(status),
-                 None if err in (None, "") else str(err)[:500]),
-            )
-            self.db.commit()
-
-    def api_stats(self, days=7):
-        """按 group 聚合调用统计（admin 趋势图数据源）。"""
-        since = int(time.time()) - int(days or 7) * 86400
-        with self.lock:
-            rows = self.db.execute(
-                "select group_, count(*) as n, coalesce(avg(ms),0) as avg_ms,"
-                " sum(case when status >= 400 then 1 else 0 end) as errors"
-                " from api_calls where at >= ? group by group_ order by n desc",
-                (since,),
-            ).fetchall()
-            total = int(self.db.execute(
-                "select count(*) from api_calls where at >= ?", (since,)
-            ).fetchone()[0])
-        return {
-            "days": int(days or 7),
-            "total": total,
-            "groups": [
-                {"group": r["group_"], "count": int(r["n"]),
-                 "avgMs": round(float(r["avg_ms"] or 0), 2), "errors": int(r["errors"] or 0)}
-                for r in rows
-            ],
-        }

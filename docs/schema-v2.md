@@ -38,9 +38,8 @@
   memory_conflicts  冲突（一等公民，含人工裁决理由）
   memory_events     事件流（created/hit/adopted/conflicted/resolved/retired）
 
-任务与统计（3 张）
+任务（1 张）
   exp_jobs    抽取任务（每次会话段落一条）
-  api_calls   调用统计（替代现在按端点散落的计数）
   meta        库元数据（schema_version / 当前 embedding tag）
 
 FTS（2 个虚拟表）

@@ -3995,7 +3995,7 @@ class FakeEmbedder:
 state = {"ready": False, "err": None, "info": {}, "rerank_ready": False, "rerank_err": None, "rerank_info": {}}
 store = None
 memories_store = None  # index_store.MemoryStore；与 store 同库，build() 里一起建
-jobs_store = None      # index_store.JobsStore（exp_jobs / api_calls），build() 里一起建
+jobs_store = None      # index_store.JobsStore（exp_jobs），build() 里一起建
 knn = None
 governor = None
 embedder = None
@@ -4047,7 +4047,7 @@ def build():
 
     store = index_store.IndexStore(DB_PATH)
     memories_store = index_store.MemoryStore(DB_PATH)  # 经验资产：独立连接（避免与 IndexStore 事务交错；表同库）
-    jobs_store = index_store.JobsStore(DB_PATH)  # exp_jobs / api_calls：独立连接
+    jobs_store = index_store.JobsStore(DB_PATH)  # exp_jobs：独立连接
     store.set_embed_tag(info["tag"])  # meta.embed_tag：当前模型 tag（诊断/迁移核对用）
     knn = _load("knn").KnnCache(store, KNN_MAX_BYTES)
     governor = _load("governor").EmbedGovernor(
