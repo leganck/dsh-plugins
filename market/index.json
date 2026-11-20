@@ -139,18 +139,18 @@
           "ast"
         ],
         "sortKeys": {
-          "published": 1794972781
+          "published": 1795101882
         }
       },
       "versions": [
         {
           "version": "0.16.0",
-          "publishTimestamp": 1794972781,
+          "publishTimestamp": 1795101882,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "path": "plugins/dsh-code-index",
-            "commit": "06ba0fea533facf49446ef07d403d2c03ac7e024"
+            "commit": "702da47cb94935b48d11ed5cd6ab10106ca740ec",
+            "path": "plugins/dsh-code-index"
           },
           "engines": {
             "dsh": "^0.2.0-rc.2"
@@ -192,17 +192,17 @@
           "archive"
         ],
         "sortKeys": {
-          "published": 1794037928
+          "published": 1794973834
         }
       },
       "versions": [
         {
           "version": "1.2.2",
-          "publishTimestamp": 1794037928,
+          "publishTimestamp": 1794973834,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "023e0a8d059679094d92005ed6504a1ef0cdc1a5",
+            "commit": "f50fff8fe4f7b1ebddebfcb5333345350b235ff7",
             "path": "plugins/dsh-memory-archive"
           }
         }
@@ -244,7 +244,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "6c627abd03d07091476c2ef568117305fe6d8400",
+            "commit": "478b60acca51be2bb2a86b18526fb026ca5164fd",
             "path": "plugins/dsh-report"
           },
           "engines": {
@@ -275,17 +275,17 @@
         "keywords": [],
         "labels": [],
         "sortKeys": {
-          "published": 1794394933
+          "published": 1794972736
         }
       },
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 1794394933,
+          "publishTimestamp": 1794972736,
           "source": {
             "type": "git",
             "url": "https://github.com/leganck/dsh-plugins.git",
-            "commit": "acdc16f233cdf20f3d6b9dd9376575960b92dba1",
+            "commit": "7191c9b4748f999998196544c3b4aa3e8f7927e9",
             "path": "plugins/dsh-wake"
           }
         }

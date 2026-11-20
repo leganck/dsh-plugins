@@ -1642,12 +1642,17 @@ let reconcileTimer = null
     if (hit && Date.now() - hit.at < 60000) return hit
     try {
       const rs = await getRemoteIndex().status(namespace)
+      // coverage 字段缺失/非法时视为「未知」，不参与闸门判定：
+      // 旧服务端或测试桩的 status 可能没有这个字段，`?? 0` 会把"未知"错当成"完全没嵌"，
+      // 把本应走向量的检索静默拦成纯关键词（test-remote 的桩就踩中过：GET 一律回 {ready:true}）。
+      const raw = rs?.coverage
+      const coverage = typeof raw === 'number' && Number.isFinite(raw) ? raw : null
       const entry = {
         at: Date.now(),
-        coverage: Number(rs.coverage ?? 0),
-        pending: rs.pending ?? null,
-        vectors: rs.vectors ?? null,
-        chunks: rs.chunks ?? null,
+        coverage, // null = 未知（不拦）
+        pending: rs?.pending ?? null,
+        vectors: rs?.vectors ?? null,
+        chunks: rs?.chunks ?? null,
       }
       remoteCoverageCache.set(namespace, entry)
       return entry
