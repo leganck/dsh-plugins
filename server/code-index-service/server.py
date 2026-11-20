@@ -527,6 +527,44 @@ ADMIN_HTML = r"""<!doctype html>
     #tab-overview { grid-template-columns:1fr; }
     #tab-overview .runtime-card .kv { grid-template-columns:86px minmax(0,1fr); }
   }
+  .asset-card { position:relative; cursor:pointer; }
+  .asset-card:hover { border-color:var(--muted); }
+  .asset-card .asset-line { display:flex; justify-content:space-between; gap:12px; padding:3px 0; font-size:12.5px; }
+  .asset-card .asset-line .l { color:var(--muted); white-space:nowrap; }
+  .asset-card .asset-line .r { text-align:right; font-variant-numeric:tabular-nums; min-width:0; overflow-wrap:anywhere; }
+  .red-dot { position:absolute; top:-7px; right:-7px; min-width:20px; height:20px; padding:0 6px; border-radius:999px;
+    background:var(--bad); color:#fff; font-size:11px; font-weight:600; line-height:20px; text-align:center;
+    box-shadow:0 2px 8px rgba(0,0,0,.25); }
+  #tab-memories { display:none; }
+  #tab-memories.active { display:block; }
+  .mem-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .mem-toolbar input[type=search] { flex:1; min-width:180px; max-width:300px; }
+  .mem-toolbar select { max-width:150px; }
+  .lens-chip { display:inline-flex; align-items:center; padding:1px 8px; border-radius:999px; font-size:11.5px;
+    white-space:nowrap; border:1px solid transparent; }
+  .lens-chip.index { color:var(--blue); background:var(--blue-bg); }
+  .lens-chip.jargon { color:var(--purple); background:var(--purple-bg); }
+  .lens-chip.logic { color:var(--warn); background:var(--warn-bg); }
+  .lens-chip.other { color:var(--muted); background:var(--bg); border-color:var(--line); }
+  .mem-drawer { position:fixed; top:0; right:0; height:100vh; width:min(520px,94vw); background:var(--card);
+    border-left:1px solid var(--line); box-shadow:-12px 0 40px rgba(0,0,0,.22); z-index:60; padding:18px 20px;
+    overflow:auto; transform:translateX(103%); transition:transform .2s ease; }
+  .mem-drawer.open { transform:translateX(0); }
+  .mem-drawer .close-x { position:absolute; top:10px; right:12px; border:0; background:transparent;
+    color:var(--muted); font-size:16px; padding:4px 8px; }
+  .mem-drawer .close-x:hover { color:var(--text); }
+  .drawer-scrim { position:fixed; inset:0; background:rgba(0,0,0,.32); z-index:55; display:none; }
+  .drawer-scrim.open { display:block; }
+  .drawer-kv { display:grid; grid-template-columns:88px minmax(0,1fr); gap:8px 12px; font-size:12.5px; align-items:baseline; }
+  .drawer-kv .k { color:var(--muted); }
+  .drawer-kv .v { min-width:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+  .conflict-card { border:1px solid var(--warn); background:color-mix(in srgb, var(--warn-bg) 45%, var(--card)); }
+  .conflict-card h2 { color:var(--warn); }
+  .conflict-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); margin:10px 0; }
+  .conflict-col { border:1px solid var(--line); border-radius:10px; padding:10px 12px; min-width:0; }
+  .conflict-col b.cap { display:block; font-size:11.5px; color:var(--muted); margin-bottom:6px; }
+  .conflict-col .what { font-weight:600; overflow-wrap:anywhere; }
+  .conflict-col .w2 { color:var(--muted); font-size:12px; margin-top:3px; overflow-wrap:anywhere; }
   main { max-width:1600px; margin:0 auto; }
   #banner { max-width:1600px; margin:12px auto 0; }
   @media (prefers-color-scheme: dark) {
@@ -534,6 +572,7 @@ ADMIN_HTML = r"""<!doctype html>
     button.primary:disabled, button.danger:disabled { color:var(--faint); }
   }
   /* ---------------- 作用域列表（永久 + 分页） ---------------- */
+  .scope-table tr.cov-warn-row td { background:color-mix(in srgb, var(--warn-bg) 55%, transparent); }
   .scope-toolbar { gap:8px; }
   .scope-toolbar input[type=search] { flex:1; }
   .scope-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
@@ -580,7 +619,8 @@ ADMIN_HTML = r"""<!doctype html>
   <button data-tab="models">模型</button>
   <button data-tab="keys">API Key</button>
   <button data-tab="stats">统计</button>
-  <button data-tab="scopes">作用域</button>
+  <button data-tab="scopes">代码资产</button>
+  <button data-tab="memories">经验</button>
   <button data-tab="logs">日志</button>
 </nav>
 <div id="banner"></div>
@@ -590,6 +630,15 @@ ADMIN_HTML = r"""<!doctype html>
     <section class="card wide runtime-card">
       <h2>运行时</h2>
       <div class="kv" id="runtime"><div class="k">加载中…</div><div class="v"></div></div>
+    </section>
+    <section class="card asset-card" id="asset-code-card" title="点击进入代码资产页">
+      <h2>📦 代码资产 <span class="tail"><span id="asset-code-go" class="faint">管理 →</span></span></h2>
+      <div id="asset-code"><div class="faint">加载中…</div></div>
+    </section>
+    <section class="card asset-card" id="asset-mem-card" title="点击进入经验页">
+      <h2>💡 经验资产 <span class="tail"><span id="asset-mem-go" class="faint">管理 →</span></span></h2>
+      <div id="asset-mem"><div class="faint">加载中…</div></div>
+      <div class="red-dot" id="mem-conflict-dot" style="display:none"></div>
     </section>
     <section class="card wide">
       <h2>系统负载 <span class="tail faint" id="sys-at"></span></h2>
@@ -756,7 +805,7 @@ ADMIN_HTML = r"""<!doctype html>
         <div class="stats" id="stat-runtime"></div>
         <div class="toolbar" style="margin:12px 0 0">
           <button data-goto="models">模型页</button>
-          <button data-goto="scopes">作用域页</button>
+          <button data-goto="scopes">代码资产页</button>
           <span class="faint" id="stat-system-note" style="font-size:11.5px"></span>
         </div>
       </section>
@@ -770,9 +819,9 @@ ADMIN_HTML = r"""<!doctype html>
         <div class="chart" id="err-trend" style="height:auto"></div>
       </section>
       <section class="card wide">
-        <h2>按端点 <span class="tail faint">点行 → 带筛选跳日志</span></h2>
+        <h2>按端点 <span class="tail faint">点行 → 带筛选跳日志 · bodies/memories 已单列</span></h2>
         <div class="table-controls">
-          <input id="ep-q" type="search" placeholder="筛端点（如 sync / search）">
+          <input id="ep-q" type="search" placeholder="筛端点（如 sync / search / bodies / memories）">
           <select id="ep-sort">
             <option value="errors|desc">错误数 ↓</option>
             <option value="errorRate|desc">错误率 ↓</option>
@@ -837,17 +886,24 @@ ADMIN_HTML = r"""<!doctype html>
   <!-- ============================ 作用域 ============================ -->
   <section id="tab-scopes" class="panel">
     <section class="card wide">
-      <h2>检索测试</h2>
+      <h2>检索测试 <span class="tail faint">双资产对照：同一查询分别试代码块与经验</span></h2>
+      <div class="toolbar" style="margin-bottom:8px">
+        <span class="seg" id="test-asset">
+          <button data-asset="code" class="active">代码块</button>
+          <button data-asset="memories">经验</button>
+        </span>
+        <span class="faint" id="test-asset-note" style="font-size:11.5px">当前：代码块（/v1/search，按作用域）</span>
+      </div>
       <div class="toolbar">
         <input id="test-ns" placeholder="选择作用域（或在表格点「用于检索」）" style="width:360px;max-width:100%">
-        <input id="test-q" placeholder="输入查询，例如：订单支付后的库存扣减" style="flex:1;min-width:240px">
+        <input id="test-q" placeholder="输入查询，例如：订单支付后的库存扣减 / 经验关键词" style="flex:1;min-width:240px">
         <input id="test-k" type="number" value="5" min="1" max="20" title="返回条数" style="width:64px">
         <button class="primary" id="btn-test">检索</button>
       </div>
       <div id="test-out" class="faint" style="font-size:12.5px">选择作用域、输入查询后点「检索」；结果来自服务端 kNN（附覆盖率与耗时）。</div>
     </section>
     <section class="card wide">
-      <h2>作用域（永久快照）<span class="tail" id="scope-count"></span></h2>
+      <h2>代码资产 · 作用域（永久快照）<span class="tail" id="scope-count"></span></h2>
       <div class="toolbar scope-toolbar">
         <input id="filter" type="search" placeholder="搜索仓库 / repoId / 分支 / namespace / 指纹…" style="max-width:300px">
         <select id="scope-repo-filter" title="按仓库筛选"><option value="">全部仓库</option></select>
@@ -870,10 +926,10 @@ ADMIN_HTML = r"""<!doctype html>
         <table class="model-table scope-table">
           <thead><tr>
             <th style="width:32px"><input id="scope-check-all" type="checkbox" title="选择当前页"></th>
-            <th>仓库</th><th>类型</th><th>引用 / 根</th><th class="num">块 / 文件</th><th class="num">向量</th><th>覆盖率</th>
+            <th>仓库</th><th>类型</th><th>引用 / 根</th><th class="num">块 / 文件</th><th class="num">向量</th><th class="num">块均向量</th><th>覆盖率</th>
             <th class="num">占用</th><th>最近同步</th><th>命名空间</th><th style="width:150px;text-align:right">操作</th>
           </tr></thead>
-          <tbody id="scopes"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
+          <tbody id="scopes"><tr><td colspan="12" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div class="scope-pager">
@@ -889,7 +945,8 @@ ADMIN_HTML = r"""<!doctype html>
         <summary>字段说明</summary>
         <div class="grid">
           <div><b>永久快照</b>：服务端不再自动过期或自动删除；作用域只能由管理员手动删除。</div>
-          <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入限速异步，刚同步完会从 0% 涨到 100%。</div>
+          <div><b>覆盖率</b>：vectors ÷ chunks。后台嵌入限速异步，刚同步完会从 0% 涨到 100%；覆盖率 &lt;100% 的行整行黄色高亮。</div>
+          <div><b>块均向量</b>：vectors ÷ chunks，正常嵌入完成后约等于 1.00。</div>
           <div><b>块 / 文件</b>：块数 / 不同文件数；“N 个指纹”表示同一仓库/类型/引用存在多个索引指纹（常见于不同根目录或切块配置）。</div>
         </div>
       </details>
@@ -899,9 +956,64 @@ ADMIN_HTML = r"""<!doctype html>
       <div class="faint" style="font-size:12px;margin-bottom:10px">删除服务端全部作用域、块、向量与正文（API Key、调用统计、模型设置保留），随后 VACUUM 回收空间。清空后检索会暂时没有结果，客户端（插件 / review-service）下次同步会自动全量重建；本机已建索引的仓库可用重推脚本一次补齐。</div>
       <div class="toolbar" style="margin:0">
         <input id="reset-confirm" placeholder="输入 RESET 确认" style="min-width:200px">
-        <button class="danger" id="btn-reset-index">清空所有作用域</button>
+        <button class="danger" id="btn-reset-index">清空所有代码资产</button>
         <span class="faint" id="reset-out" style="font-size:11.5px"></span>
       </div>
+    </section>
+  </section>
+
+  <!-- ============================ 经验 ============================ -->
+  <section id="tab-memories" class="panel">
+    <section class="card wide">
+      <h2>冲突裁决 <span class="tail faint">contradict 不自动决断，走人工裁决（保留新/保留旧/都保留）</span></h2>
+      <div id="mem-conflicts"><div class="empty">加载中…</div></div>
+    </section>
+    <section class="card wide">
+      <h2>经验条目 <span class="tail" id="mem-count"></span></h2>
+      <div class="mem-toolbar">
+        <input id="mem-q" type="search" placeholder="搜索 what / when / why…">
+        <select id="mem-lens-filter"><option value="">全部 lens</option></select>
+        <select id="mem-repo-filter"><option value="">全部仓库</option></select>
+        <select id="mem-status-filter">
+          <option value="">全部状态</option>
+          <option value="active" selected>active</option>
+          <option value="conflicting">conflicting</option>
+          <option value="retired">retired</option>
+        </select>
+        <button class="primary small" id="btn-mem-new">＋ 新建</button>
+        <button class="small" id="btn-mem-import">⤒ 批量导入(JSON)</button>
+        <input id="mem-import-file" type="file" accept="application/json,.json" style="display:none">
+        <span class="spacer"></span>
+        <button class="small" id="btn-mem-export">导出 CSV</button>
+        <button class="small" id="btn-mem-refresh">刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>id</th><th>lens</th><th>what</th><th>repo</th><th>状态</th>
+            <th class="num">命中/采纳</th><th style="width:190px;text-align:right">操作</th></tr></thead>
+          <tbody id="mem-rows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="scope-pager">
+        <span class="faint" id="mem-range"></span>
+        <span class="spacer"></span>
+        <span class="faint">每页</span>
+        <select id="mem-page-size"><option>25</option><option selected>50</option><option>100</option><option>200</option></select>
+        <button id="mem-prev" class="small">上一页</button>
+        <span class="faint" id="mem-page"></span>
+        <button id="mem-next" class="small">下一页</button>
+      </div>
+      <details class="help">
+        <summary>说明</summary>
+        <div class="grid">
+          <div><b>检索测试</b>：在「代码资产」页的检索测试里切到「经验」即可对照试两类资产的召回（/v1/memories/search）。</div>
+          <div><b>待退役</b>：90 天未命中批量退役需要服务端新增 stale_days 参数，下一版本提供；当前可按 status=retired 过滤查看已退役条目。</div>
+        </div>
+      </details>
+    </section>
+    <section class="card wide">
+      <h2>打点与生命周期统计</h2>
+      <div class="stats" id="mem-stat-cards"><div class="empty">加载中…</div></div>
     </section>
   </section>
 
@@ -924,6 +1036,12 @@ ADMIN_HTML = r"""<!doctype html>
   </section>
 </main>
 <div id="toast"></div>
+<div id="mem-drawer" class="mem-drawer" aria-hidden="true">
+  <button class="close-x" id="mem-drawer-close" title="关闭">✕</button>
+  <h3 id="mem-drawer-title" style="margin:0 0 12px;font-size:15px">—</h3>
+  <div class="drawer-kv" id="mem-drawer-body"></div>
+</div>
+<div id="drawer-scrim" class="drawer-scrim"></div>
 <script>
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -972,7 +1090,7 @@ async function api(path, opts = {}) {
 const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div class="k">' + k + '</div><div class="v"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + v + '</div>').join(''); };
 
 // ---------------- Tab 路由 ----------------
-const TABS = ['overview', 'models', 'keys', 'stats', 'scopes', 'logs'];
+const TABS = ['overview', 'models', 'keys', 'stats', 'scopes', 'memories', 'logs'];
 function showTab(name) {
   if (!TABS.includes(name)) name = 'overview';
   $$('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
@@ -982,6 +1100,7 @@ function showTab(name) {
   if (name === 'stats') { loadStats(STATS_DAYS); startStatsTimer(); } else { stopStatsTimer(); }
   if (name === 'logs') loadLogs();
   if (name === 'scopes') { loadScopes(); startScopesTimer(); } else { stopScopesTimer(); }
+  if (name === 'memories') loadMemories();
   if (name === 'overview' || name === 'models') startRuntimeTimer(); else stopRuntimeTimer();
   if (name === 'overview' || name === 'scopes') refreshHealth();
   location.hash = name;
@@ -1031,6 +1150,7 @@ function renderOverview() {
     '<span class="mono">' + escapeHtml(t.tag) + '</span> <span class="faint">' + fmtNum(t.vectors) + ' 条 · ' + fmtBytes(t.bytes) + '</span>',
   ]) : [['—', '<span class="faint">还没有向量</span>']]);
   $('#btn-purge-tags').disabled = !tags.some((t) => t.tag !== d.tag && t.vectors > 0);
+  loadAssetCards();
   kv($('#auth-kv'), [
     ['API 鉴权', auth.authRequired ? '<span class="chip ok"><span class="dot"></span>已强制 Bearer Key</span>' : '<span class="chip warn"><span class="dot"></span>未开启（任何人可检索）</span>'],
     ['Key 数量', fmtNum((auth.keys || 0) + (auth.legacyKey ? 1 : 0)) + ' <span class="faint">（含 env legacy）</span>'],
@@ -1240,8 +1360,10 @@ function scopeRowHtml(x, { groupMode = false, extraClass = '' } = {}) {
     ? '<span class="scope-dup-badge" title="同一仓库存在多个 repoId：通常来自读不到 git origin 时回退成路径哈希；删除非 canonical 的那个即可">重复身份</span>'
     : '';
   const files = Number(x.files || 0);
+  const chunksN = Number(x.chunks || 0);
+  const avgVec = chunksN > 0 ? Math.round((Number(x.vectors || 0) / chunksN) * 100) / 100 : null;
   const checked = SCOPES_SELECTED.has(x.namespace) ? ' checked' : '';
-  const klasses = [checked ? 'is-selected' : '', extraClass || ''].filter(Boolean).join(' ');
+  const klasses = [checked ? 'is-selected' : '', extraClass || '', pct < 100 ? 'cov-warn-row' : ''].filter(Boolean).join(' ');
   return '<tr class="' + klasses + '">'
     + '<td><input type="checkbox" data-scope-select value="' + escapeHtml(x.namespace) + '"' + checked + '></td>'
     + '<td>' + repoCell + variant + dup + '</td>'
@@ -1253,6 +1375,7 @@ function scopeRowHtml(x, { groupMode = false, extraClass = '' } = {}) {
       + '</td>'
     + '<td class="num" title="' + fmtNum(x.chunks) + ' 块 / ' + fmtNum(files) + ' 文件">' + fmtNum(x.chunks) + ' / ' + fmtNum(files) + '</td>'
     + '<td class="num">' + fmtNum(x.vectors) + '</td>'
+    + '<td class="num" title="vectors ÷ chunks">' + (avgVec === null ? '—' : avgVec.toFixed(2)) + '</td>'
     + '<td><div class="cov"><span class="bar ' + cls + '"><i style="width:' + pct + '%"></i></span><span class="num">' + pct + '%</span></div></td>'
     + '<td class="num">' + fmtBytes(x.totalBytes) + '</td>'
     + '<td title="' + absTime(x.updatedAt) + '">' + rel(x.updatedAt) + '</td>'
@@ -1282,7 +1405,7 @@ function scopeGroupHtml(rows) {
     const dups = items.filter((x) => x.duplicateIdentity).length;
     const collapsed = SCOPE_GROUP_COLLAPSED.has(name);
     const chunks = items.reduce((s, x) => s + Number(x.chunks || 0), 0);
-    const head = '<tr class="scope-group" data-group="' + escapeHtml(name) + '"><td colspan="11">'
+    const head = '<tr class="scope-group" data-group="' + escapeHtml(name) + '"><td colspan="12">'
       + '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span> <b>' + escapeHtml(name) + '</b>'
       + ' <span class="faint mono" style="font-size:11px">' + ids.map((v) => escapeHtml(v)).join(', ') + '</span>'
       + ' <span class="faint">· ' + items.length + ' 条 · ' + fmtNum(chunks) + ' 块</span>'
@@ -1322,7 +1445,7 @@ function renderScopes() {
   $('#scope-prev').disabled = SCOPES.offset <= 0;
   $('#scope-next').disabled = !SCOPES.hasMore;
   if (!rows.length) {
-    $('#scopes').innerHTML = '<tr><td colspan="11" class="empty">没有匹配的作用域</td></tr>';
+    $('#scopes').innerHTML = '<tr><td colspan="12" class="empty">没有匹配的作用域</td></tr>';
     updateScopeSelection();
     return;
   }
@@ -1396,11 +1519,26 @@ async function deleteScopes(namespaces, promptText) {
   await loadScopes();
 }
 async function searchTest() {
-  const ns = $('#test-ns').value;
   const q = $('#test-q').value.trim();
   const k = Math.max(1, Math.min(20, Number($('#test-k').value) || 5));
   const out = $('#test-out');
-  if (!ns || !q) { out.innerHTML = '<span style="color:var(--warn)">请选择作用域并输入查询</span>'; return; }
+  if (!q) { out.innerHTML = '<span style="color:var(--warn)">请输入查询</span>'; return; }
+  if (TEST_ASSET === 'memories') {
+    out.textContent = '经验检索中…';
+    const r = await api('/v1/memories/search', { method: 'POST', body: JSON.stringify({ q, top_k: k }) });
+    if (r.status !== 200) { out.innerHTML = '经验检索失败：' + escapeHtml((r.body && r.body.error) || r.status); return; }
+    const d = r.body;
+    const note = d.vectorNote ? (' · ' + escapeHtml(d.vectorNote)) : '';
+    const head = '命中 ' + (d.hits || []).length + ' 条 · ' + (d.ms != null ? d.ms + ' ms' : '—') + note;
+    out.innerHTML = '<div class="faint" style="margin-bottom:6px">' + head + '</div>'
+      + ((d.hits || []).map((h) => '<div style="padding:4px 0;border-bottom:1px solid var(--line)">'
+        + '<span class="mono">' + escapeHtml(h.id) + '</span> ' + lensChip(h.lens)
+        + ' <span title="' + escapeHtml(h.what) + '">' + escapeHtml(truncate(h.what, 60)) + '</span> '
+        + '<span class="faint">score ' + h.score + '</span></div>').join('') || '<span class="faint">没有命中（经验检索只看 active 条目）</span>');
+    return;
+  }
+  const ns = $('#test-ns').value;
+  if (!ns) { out.innerHTML = '<span style="color:var(--warn)">请选择作用域并输入查询</span>'; return; }
   out.textContent = '检索中…';
   const r = await api('/v1/search', { method: 'POST', body: JSON.stringify({ namespace: ns, query: q, k }) });
   if (r.status !== 200) { out.innerHTML = '检索失败：' + escapeHtml((r.body && r.body.error) || r.status); return; }
@@ -1410,6 +1548,15 @@ async function searchTest() {
     + ((d.hits || []).map((h) => '<div style="padding:4px 0;border-bottom:1px solid var(--line)">'
       + '<span class="mono">' + escapeHtml(h.path) + ':' + h.start + '-' + h.end + '</span> '
       + '<span class="faint">score ' + h.score + '</span></div>').join('') || '<span class="faint">没有命中（可能该作用域还没嵌入完）</span>');
+}
+let TEST_ASSET = 'code';
+function setTestAsset(name) {
+  TEST_ASSET = name === 'memories' ? 'memories' : 'code';
+  $$('#test-asset button').forEach((b) => b.classList.toggle('active', b.dataset.asset === TEST_ASSET));
+  $('#test-asset-note').textContent = TEST_ASSET === 'memories'
+    ? '当前：经验（/v1/memories/search，只看 active）'
+    : '当前：代码块（/v1/search，按作用域）';
+  $('#test-ns').disabled = TEST_ASSET === 'memories';
 }
 
 // ---------------- 模型 ----------------
@@ -2046,7 +2193,7 @@ function renderStatsErrors() {
   const cats = STATS.categories || {};
   const prevCats = STATS.prevCategories || {};
   const biz = businessCats(cats), prevBiz = businessCats(prevCats);
-  const eps = (STATS.byEndpoint || []).slice();
+  const eps = endpointSplitRows(STATS.byEndpoint || []);
   const top = eps.filter((e) => e.errors > 0).sort((a, b) => b.errors - a.errors)[0];
   const byDay = STATS.byDay || [];
   const today = byDay.length ? byDay[byDay.length - 1] : {};
@@ -2437,13 +2584,280 @@ async function loadLogs() {
   }
 }
 
+// ---------------- 经验资产（memories）----------------
+const LENS_CLASS = { index: 'index', jargon: 'jargon', logic: 'logic' };
+const MEM_STATUS_LABEL = { active: 'active✓', retired: 'retired', conflicting: 'conflicting⚠' };
+let MEM = { rows: [], total: 0, offset: 0, limit: 50, q: '', lens: '', repo: '', status: 'active', inflight: null, searchTimer: null };
+let MEM_CONFLICTS = [];
+let MEM_STATS = null;
+function lensChip(lens) {
+  const l = String(lens || '—');
+  const cls = LENS_CLASS[l] || 'other';
+  return '<span class="lens-chip ' + cls + '" title="镜头 ' + escapeHtml(l) + '">' + escapeHtml(l) + '</span>';
+}
+function memStatusChip(s) {
+  const st = String(s || 'active');
+  const cls = st === 'active' ? 'ok' : (st === 'conflicting' ? 'warn' : '');
+  return '<span class="chip ' + cls + '">' + (MEM_STATUS_LABEL[st] || st) + '</span>';
+}
+function truncate(v, n) { const s = String(v || ''); return s.length > n ? s.slice(0, n) + '…' : s; }
+function memQuery() {
+  return {
+    q: ($('#mem-q').value || '').trim(),
+    lens: ($('#mem-lens-filter').value || ''),
+    repo: ($('#mem-repo-filter').value || ''),
+    status: ($('#mem-status-filter').value || ''),
+    limit: Number($('#mem-page-size').value || 50),
+    offset: Number(MEM.offset || 0),
+  };
+}
+function renderMemRows() {
+  const rows = MEM.rows || [];
+  $('#mem-count').textContent = '（' + fmtNum(MEM.total) + '）';
+  const start = MEM.offset + 1, end = MEM.offset + rows.length;
+  $('#mem-range').textContent = rows.length ? (start + '–' + end + ' / ' + fmtNum(MEM.total)) : '0 / 0';
+  $('#mem-page').textContent = rows.length ? (Math.floor(MEM.offset / MEM.limit) + 1 + ' / ' + Math.max(1, Math.ceil(MEM.total / MEM.limit))) : '0 / 0';
+  $('#mem-prev').disabled = MEM.offset <= 0;
+  $('#mem-next').disabled = MEM.offset + rows.length >= MEM.total;
+  if (!rows.length) { $('#mem-rows').innerHTML = '<tr><td colspan="7" class="empty">没有匹配的经验条目</td></tr>'; return; }
+  $('#mem-rows').innerHTML = rows.map((x) => '<tr class="clickable-row" data-mem-id="' + escapeHtml(x.id) + '">'
+    + '<td class="mono" title="点击展开详情">' + escapeHtml(x.id) + '</td>'
+    + '<td>' + lensChip(x.lens) + '</td>'
+    + '<td title="' + escapeHtml(x.what) + '" style="max-width:320px;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(truncate(x.what, 80)) + '</td>'
+    + '<td class="mono" style="font-size:11.5px">' + escapeHtml(x.repo || '—') + '</td>'
+    + '<td>' + memStatusChip(x.status) + '</td>'
+    + '<td class="num" title="最后命中 ' + absTime(x.last_hit_at) + '">' + fmtNum(x.stats_hits) + ' / ' + fmtNum(x.stats_adopted) + '</td>'
+    + '<td class="scope-actions">'
+    + '<button class="ghost small" data-mem-hit="' + escapeHtml(x.id) + '" title="命中 +1">hit+1</button>'
+    + '<button class="ghost small" data-mem-edit="' + escapeHtml(x.id) + '">编辑</button>'
+    + '<button class="ghost small" data-mem-retire="' + escapeHtml(x.id) + '" title="软删（status=retired）">退役</button>'
+    + '</td></tr>').join('');
+  $$('#mem-rows [data-mem-hit]').forEach((b) => { b.onclick = async (ev) => { ev.stopPropagation();
+    const r = await api('/v1/memories/' + encodeURIComponent(b.dataset.memHit) + '/hit', { method: 'POST', body: '{}' });
+    toast(r.status === 200 ? '已记一次命中' : 'hit 失败（' + r.status + '）'); loadMemories(); }; });
+  $$('#mem-rows [data-mem-edit]').forEach((b) => { b.onclick = (ev) => { ev.stopPropagation();
+    const m = MEM.rows.find((x) => x.id === b.dataset.memEdit); if (m) openMemForm(m); }; });
+  $$('#mem-rows [data-mem-retire]').forEach((b) => { b.onclick = async (ev) => { ev.stopPropagation();
+    if (!confirm('退役该经验条目？（软删：status=retired，可再恢复）')) return;
+    const r = await api('/v1/memories/' + encodeURIComponent(b.dataset.memRetire), { method: 'DELETE' });
+    if (r.status !== 200) { toast('退役失败：' + r.status); return; }
+    toast('已退役'); loadMemories(); }; });
+}
+function renderMemFacets() {
+  const lenses = new Map(), repos = new Map();
+  for (const x of MEM.rows || []) {
+    if (x.lens) lenses.set(x.lens, (lenses.get(x.lens) || 0) + 1);
+    if (x.repo) repos.set(x.repo, (repos.get(x.repo) || 0) + 1);
+  }
+  const fill = (sel, map, allLabel) => {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">' + allLabel + '</option>' + [...map.keys()].sort()
+      .map((v) => '<option value="' + escapeHtml(v) + '">' + escapeHtml(v) + '（' + map.get(v) + '）</option>').join('');
+    if (cur) sel.value = cur;
+  };
+  fill($('#mem-lens-filter'), lenses, '全部 lens');
+  fill($('#mem-repo-filter'), repos, '全部仓库');
+}
+function renderMemStats() {
+  const m = MEM_STATS || {};
+  const hits = Number(m.hits || 0), adopted = Number(m.adopted || 0);
+  const rate = hits ? Math.round(adopted * 100 / hits) + '%' : '—';
+  $('#mem-stat-cards').innerHTML = [
+    statCard('总命中', fmtNum(hits), ''),
+    statCard('采纳率', rate, '<span class="sub">' + fmtNum(adopted) + ' / ' + fmtNum(hits) + '</span>'),
+    statCard('条目总数', fmtNum(Number(m.total || 0)), ''),
+    statCard('待退役', '<span class="faint" style="font-size:12px">下一版提供</span>', '<span class="sub">90 天未命中批量退役需后端 stale_days 参数</span>'),
+  ].join('');
+}
+function renderConflicts() {
+  const el = $('#mem-conflicts');
+  if (!(MEM_CONFLICTS || []).length) { el.innerHTML = '<div class="empty">没有待裁决的冲突 ✓</div>'; return; }
+  const ids = MEM_CONFLICTS.map((x) => x.id);
+  el.innerHTML = MEM_CONFLICTS.map((c) => {
+    const old = (MEM.rows || []).find((x) => x.id !== c.id && x.status === 'conflicting');
+    const candHtml = (cap, m) => '<div class="conflict-col"><b class="cap">' + cap + ' · ' + escapeHtml((m || {}).id || '—') + '</b>'
+      + '<div class="what">' + escapeHtml((m || {}).what || '—') + '</div>'
+      + '<div class="w2">when: ' + escapeHtml((m || {}).when_expr || '—') + '</div>'
+      + '<div class="w2">why: ' + escapeHtml((m || {}).why || '—') + '</div>'
+      + '<div class="w2">evidence: ' + escapeHtml(memEvidenceText((m || {}).evidence)) + '</div></div>';
+    return '<div class="conflict-card" style="border-radius:10px;padding:12px 14px;margin-bottom:12px">'
+      + '<div style="display:flex;align-items:center;gap:8px"><b>⚠ ' + escapeHtml(c.what || '—') + '</b>'
+      + '<span class="chip warn">' + escapeHtml(c.lens || '') + '</span>'
+      + '<span class="faint mono" style="font-size:11px">' + escapeHtml(c.repo || '') + '</span></div>'
+      + '<div class="conflict-grid">'
+      + candHtml('新候选（conflicting）', c)
+      + candHtml('既有条目（同队列）', old)
+      + '</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap" data-conflict-actions="' + escapeHtml(c.id) + '">'
+      + '<button class="primary small" data-mem-resolve="' + escapeHtml(c.id) + '" data-resolve-status="active">保留新（active）</button>'
+      + '<button class="small" data-mem-resolve-retire="' + escapeHtml(c.id) + '">保留旧（退役此条）</button>'
+      + '<button class="small" data-mem-keep-both="' + escapeHtml(c.id) + '">都保留</button>'
+      + '</div></div>';
+  }).join('') + '<div class="faint" style="font-size:11.5px">待裁决 id：' + ids.map(escapeHtml).join('、') + '</div>';
+  $$('#mem-conflicts [data-mem-resolve]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memResolve, 'active'); });
+  $$('#mem-conflicts [data-mem-resolve-retire]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memResolveRetire, 'retired'); });
+  $$('#mem-conflicts [data-mem-keep-both]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memKeepBoth, 'active', true); });
+}
+function memEvidenceText(ev) {
+  if (!Array.isArray(ev) || !ev.length) return '—';
+  return ev.map((e) => {
+    if (e.archive_ref) return 'archive:' + e.archive_ref;
+    if (e.issue) return 'issue:' + e.issue;
+    if (e.mr) return 'mr:' + e.mr;
+    return JSON.stringify(e);
+  }).join('、');
+}
+async function resolveMemory(id, status, keepBoth) {
+  const r = await api('/v1/memories/' + encodeURIComponent(id) + '/resolve', { method: 'POST', body: JSON.stringify({ status }) });
+  if (r.status !== 200) { toast('resolve 失败：' + r.status); return; }
+  toast(keepBoth ? '已保留（都保留）' : (status === 'active' ? '已裁决：保留该条（active）' : '已裁决：退役该条（retired）'));
+  loadMemories();
+}
+function openMemDrawer(m) {
+  const ev = Array.isArray(m.evidence) && m.evidence.length
+    ? m.evidence.map((e) => {
+        if (e.archive_ref) return '<div>🗄 archive：<span class="mono">' + escapeHtml(e.archive_ref) + '</span></div>';
+        if (e.issue) return '<div>🎫 issue：<span class="mono">' + escapeHtml(e.issue) + '</span></div>';
+        if (e.mr) return '<div>🔀 MR：<span class="mono">' + escapeHtml(e.mr) + '</span></div>';
+        return '<div class="mono faint">' + escapeHtml(JSON.stringify(e)) + '</div>';
+      }).join('') : '<div class="faint">—</div>';
+  $('#mem-drawer-title').innerHTML = escapeHtml(m.id) + ' ' + lensChip(m.lens) + ' ' + memStatusChip(m.status);
+  $('#mem-drawer-body').innerHTML = [
+    ['what', escapeHtml(m.what || '—')],
+    ['when', escapeHtml(m.when_expr || '—')],
+    ['why', escapeHtml(m.why || '—')],
+    ['evidence', ev],
+    ['source', '<span class="mono">' + escapeHtml(m.source || '—') + '</span>'],
+    ['repo', '<span class="mono">' + escapeHtml(m.repo || '—') + '</span>'],
+    ['命中/采纳', fmtNum(m.stats_hits) + ' / ' + fmtNum(m.stats_adopted)],
+    ['最后命中', absTime(m.last_hit_at)],
+    ['创建', absTime(m.created_at)],
+    ['更新', absTime(m.updated_at) + ' <span class="faint">(' + rel(m.updated_at) + ')</span>'],
+  ].map(([k, v]) => '<div class="k">' + k + '</div><div class="v">' + v + '</div>').join('');
+  $('#mem-drawer').classList.add('open');
+  $('#mem-drawer').setAttribute('aria-hidden', 'false');
+  $('#drawer-scrim').classList.add('open');
+}
+function closeMemDrawer() {
+  $('#mem-drawer').classList.remove('open');
+  $('#mem-drawer').setAttribute('aria-hidden', 'true');
+  $('#drawer-scrim').classList.remove('open');
+}
+function openMemForm(m) {
+  const isEdit = !!m;
+  const repo = isEdit ? m.repo : '', lens = isEdit ? m.lens : '', what = isEdit ? m.what : '';
+  const whenExpr = isEdit ? (m.when_expr || '') : '', why = isEdit ? (m.why || '') : '';
+  const evText = isEdit ? memEvidenceText(m.evidence) : '';
+  const html = '<div style="display:grid;gap:8px">'
+    + '<div class="toolbar" style="margin:0"><label>repo <input id="mf-repo" style="min-width:180px" value="' + escapeHtml(repo) + '"></label>'
+    + '<label>lens <input id="mf-lens" style="min-width:140px" value="' + escapeHtml(lens) + '" placeholder="index / jargon / logic / …"></label></div>'
+    + '<label>what（经验本体）<textarea id="mf-what" rows="3" style="width:100%;padding:6px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit">' + escapeHtml(what) + '</textarea></label>'
+    + '<label>when（适用时机）<input id="mf-when" value="' + escapeHtml(whenExpr) + '"></label>'
+    + '<label>why（原因）<input id="mf-why" value="' + escapeHtml(why) + '"></label>'
+    + '<label>evidence（逗号分隔 archive:xxx / issue:XXX-1 / mr:!89）<input id="mf-ev" value="' + escapeHtml(evText) + '"></label>'
+    + '</div>';
+  showConfirm(isEdit ? '编辑经验 ' + m.id : '新建经验', html, async () => {
+    const get = (id2) => ($(id2).value || '').trim();
+    const evidence = get('#mf-ev') ? get('#mf-ev').split(/[,，]/).map((s) => {
+      s = s.trim();
+      if (s.startsWith('archive:')) return { archive_ref: s.slice(8).trim() };
+      if (s.startsWith('issue:')) return { issue: s.slice(6).trim() };
+      if (s.startsWith('mr:')) return { mr: s.slice(3).trim() };
+      return { archive_ref: s };
+    }).filter((e) => Object.values(e)[0]) : [];
+    const body = { repo: get('#mf-repo'), lens: get('#mf-lens'), what: get('#mf-what'),
+      when_expr: get('#mf-when'), why: get('#mf-why'), evidence };
+    const r = await api('/v1/memories', { method: 'POST', body: JSON.stringify(body) });
+    if (r.status !== 200) { toast('保存失败：' + ((r.body && r.body.error) || r.status)); return false; }
+    toast('已保存（' + ((r.body || {}).action || '?') + '）');
+    loadMemories();
+    return true;
+  });
+}
+async function loadMemories() {
+  const q = memQuery();
+  MEM.limit = q.limit; MEM.offset = q.offset;
+  const params = new URLSearchParams({ limit: q.limit, offset: q.offset });
+  if (q.q) params.set('q', q.q);
+  if (q.lens) params.set('lens', q.lens);
+  if (q.repo) params.set('repo', q.repo);
+  if (q.status) params.set('status', q.status);
+  if (MEM.inflight) return MEM.inflight;
+  MEM.inflight = (async () => {
+    const [lr, cr, sr] = await Promise.all([
+      api('/v1/memories?' + params.toString()),
+      api('/v1/memories/conflicts?limit=100'),
+      api('/v1/admin/stats?days=7'),
+    ]);
+    if (lr.status !== 200) { $('#mem-rows').innerHTML = '<tr><td colspan="7" class="empty">加载失败：' + lr.status + '</td></tr>'; return; }
+    const b = lr.body || {};
+    MEM.rows = b.items || []; MEM.total = Number(b.total || 0);
+    MEM_CONFLICTS = (cr.status === 200 && cr.body ? cr.body.items : []) || [];
+    MEM_STATS = (sr.status === 200 && sr.body ? sr.body.memories : null) || {};
+    renderMemRows(); renderMemFacets(); renderConflicts(); renderMemStats();
+  })().finally(() => { MEM.inflight = null; });
+  return MEM.inflight;
+}
+function resetMemOffset() { MEM.offset = 0; loadMemories(); }
+async function loadAssetCards() {
+  const [sr, mr, st] = await Promise.all([
+    api('/v1/scopes?limit=100'),
+    api('/v1/memories/conflicts?limit=1'),
+    api('/v1/admin/stats?days=1'),
+  ]);
+  const sc = (sr.status === 200 && sr.body ? sr.body.scopes : []) || [];
+  let scopes = 0, lineages = new Set(), chunks = 0, vectors = 0, pending = 0;
+  for (const x of sc) {
+    scopes += 1;
+    if (x.repoId) lineages.add(x.repoId);
+    chunks += Number(x.chunks || 0);
+    vectors += Number(x.vectors || 0);
+    pending += Math.max(0, Number(x.chunks || 0) - Number(x.vectors || 0));
+  }
+  const cov = chunks ? Math.round(vectors * 1000 / chunks) / 10 : null;
+  const ep = (st.status === 200 && st.body ? st.body.byEndpoint : []) || [];
+  const cnt = (name) => { const e = ep.find((x) => (x.endpoint || '') === name); return e ? Number(e.requests || 0) : 0; };
+  $('#asset-code').innerHTML = [
+    ['作用域 / 血统', fmtNum(scopes) + ' / ' + fmtNum(lineages.size)],
+    ['块数', fmtNum(chunks)],
+    ['向量覆盖', cov === null ? '—' : cov + '%'],
+    ['今日 sync / search', fmtNum(cnt('sync')) + ' / ' + fmtNum(cnt('search'))],
+  ].map(([l, r]) => '<div class="asset-line"><span class="l">' + l + '</span><span class="r">' + r + '</span></div>').join('');
+  const m = (mr.status === 200 && mr.body ? mr.body : { items: [], total: 0 });
+  const conflicts = Number(m.total || 0);
+  const mst = (st.status === 200 && st.body ? st.body.memories : null) || {};
+  const mh = Number(mst.hits || 0), ma = Number(mst.adopted || 0);
+  $('#asset-mem').innerHTML = [
+    ['条目总数', fmtNum(Number(mst.total || 0))],
+    ['命中 / 采纳', fmtNum(mh) + ' / ' + fmtNum(ma) + (mh ? '（' + Math.round(ma * 100 / mh) + '%）' : '')],
+    ['冲突待裁决', fmtNum(conflicts)],
+  ].map(([l, r]) => '<div class="asset-line"><span class="l">' + l + '</span><span class="r">' + r + '</span></div>').join('');
+  const dot = $('#mem-conflict-dot');
+  if (dot) { if (conflicts > 0) { dot.style.display = ''; dot.textContent = conflicts; } else { dot.style.display = 'none'; } }
+}
+
+function endpointSplitRows(eps) {
+  // retrieval 聚合行拆成 search / rerank / bodies / memories 单列（前端拼合，口径同 /v1/admin/stats categories）
+  const out = (eps || []).filter((e) => (e.endpoint || '') !== 'retrieval');
+  const agg = (eps || []).find((e) => (e.endpoint || '') === 'retrieval');
+  if (!agg) return out;
+  const parts = ['search', 'rerank', 'bodies', 'memories'].map((name) => {
+    const e = (eps || []).find((x) => (x.endpoint || '') === name);
+    return e || { endpoint: name, requests: 0, errors: 0, latencyAvg: 0 };
+  });
+  const known = parts.reduce((s, e) => s + Number(e.requests || 0), 0);
+  const rest = Number(agg.requests || 0) - known;
+  if (rest > 0) parts.push({ endpoint: 'retrieval 其它', requests: rest,
+    errors: Math.max(0, Number(agg.errors || 0) - parts.reduce((s, e) => s + Number(e.errors || 0), 0)), latencyAvg: 0 });
+  return out.concat(parts);
+}
+
 // ---------------- 初始化 ----------------
 $('#btn-refresh').onclick = () => { refreshHealth(); if (location.hash === '#scopes') loadScopes(); if (location.hash === '#models') loadModels(); if (location.hash === '#stats') loadStats(STATS_DAYS); if (location.hash === '#keys') loadKeys(); if (location.hash === '#logs') loadLogs(); };
 $('#btn-pause').onclick = () => action('pause');
 $('#btn-resume').onclick = () => action('resume');
 $('#btn-purge-tags').onclick = purgeTags;
 $('#btn-test').onclick = searchTest;
-$('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
 $('#btn-create-key').onclick = createKey;
 $('#key-role').onchange = updateRoleHint;
 $('#key-filter').oninput = renderKeys;
@@ -2479,6 +2893,8 @@ $('#btn-stats-refresh').onclick = () => loadStats(STATS_DAYS);
 $('#btn-stats-export').onclick = exportStatsCsv;
 $('#stats-auto').onchange = () => { if (location.hash === '#stats') startStatsTimer(); };
 $$('#stats-sub button').forEach((b) => { b.onclick = () => setStatsSub(b.dataset.sub); });
+$$('#test-asset button').forEach((b) => { b.onclick = () => setTestAsset(b.dataset.asset); });
+$('#test-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchTest(); });
 $('#tab-stats').addEventListener('click', (e) => {
   const rect = e.target.closest('svg.svg-chart rect[data-day]');
   if (rect) {
@@ -2512,6 +2928,65 @@ $('#key-sort').onchange = () => {
   KEY_BOARD.sort = parts[0]; KEY_BOARD.dir = Number(parts[1]) || -1; renderKeyBoard();
 };
 $('#btn-log-filter').onclick = loadLogs;
+// ---- 经验 tab 事件 ----
+$('#mem-q').oninput = () => { clearTimeout(MEM.searchTimer); MEM.searchTimer = setTimeout(resetMemOffset, 300); };
+$('#mem-lens-filter').onchange = resetMemOffset;
+$('#mem-repo-filter').onchange = resetMemOffset;
+$('#mem-status-filter').onchange = resetMemOffset;
+$('#mem-page-size').onchange = resetMemOffset;
+$('#btn-mem-refresh').onclick = loadMemories;
+$('#btn-mem-new').onclick = () => openMemForm(null);
+$('#btn-mem-import').onclick = () => $('#mem-import-file').click();
+$('#mem-import-file').onchange = async () => {
+  const file = $('#mem-import-file').files[0];
+  $('#mem-import-file').value = '';
+  if (!file) return;
+  let list;
+  try { list = JSON.parse(await file.text()); } catch (e) { toast('JSON 解析失败：' + e.message); return; }
+  if (!Array.isArray(list)) list = [list];
+  if (!confirm('导入 ' + list.length + ' 条经验？')) return;
+  let ok = 0;
+  for (const item of list) {
+    const r = await api('/v1/memories', { method: 'POST', body: JSON.stringify(item) });
+    if (r.status === 200) ok += 1; else toast('第 ' + (ok + 1) + ' 条失败：' + ((r.body && r.body.error) || r.status));
+  }
+  toast('导入完成：成功 ' + ok + ' / ' + list.length);
+  loadMemories();
+};
+$('#btn-mem-export').onclick = () => {
+  if (!MEM.rows || !MEM.rows.length) { toast('当前页没有可导出的条目'); return; }
+  const esc = (v) => { const s = String(v === undefined || v === null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = ['id,repo,lens,status,what,when_expr,why,evidence,source,hits,adopted,created_at,updated_at'];
+  for (const x of MEM.rows) {
+    lines.push([x.id, x.repo, x.lens, x.status, esc(x.what), esc(x.when_expr), esc(x.why),
+      esc(memEvidenceText(x.evidence)), esc(x.source), x.stats_hits || 0, x.stats_adopted || 0,
+      x.created_at ? new Date(x.created_at * 1000).toISOString() : '',
+      x.updated_at ? new Date(x.updated_at * 1000).toISOString() : ''].join(','));
+  }
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'memories-page-' + (Math.floor(MEM.offset / MEM.limit) + 1) + '.csv';
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(a.href); }, 3000);
+};
+$('#mem-prev').onclick = () => { if (MEM.offset > 0) { MEM.offset = Math.max(0, MEM.offset - MEM.limit); loadMemories(); } };
+$('#mem-next').onclick = () => { if (MEM.offset + MEM.rows.length < MEM.total) { MEM.offset += MEM.limit; loadMemories(); } };
+$('#mem-drawer-close').onclick = closeMemDrawer;
+$('#drawer-scrim').onclick = closeMemDrawer;
+$('#tab-memories').addEventListener('click', (e) => {
+  const row = e.target.closest('#mem-rows tr[data-mem-id]');
+  if (row && !e.target.closest('button')) {
+    const m = MEM.rows.find((x) => x.id === row.dataset.memId);
+    if (m) openMemDrawer(m);
+  }
+});
+$$('#tab-overview .asset-card').forEach((card) => {
+  card.onclick = () => {
+    if (card.id === 'asset-mem-card') showTab('memories');
+    else if (card.id === 'asset-code-card') showTab('scopes');
+  };
+});
 $('#log-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLogs(); });
 $('#log-level').onchange = loadLogs;
 $$('[data-goto]').forEach((b) => { b.onclick = () => { location.hash = '#' + b.dataset.goto; }; });
