@@ -37,11 +37,11 @@ def token_len(text):
 
 def make_db(path, chunks=CHUNKS, pre=PRE_EMBEDDED, dup_every=None):
     store = index_store.IndexStore(path)
-    ns = "erp-pos#main"
-    store.ensure_lineage("git@example.com:erp/pos.git", ns)
-    store.ensure_repo(ns, "erp/pos", "fp1", index_store.lineage_id_of("git@example.com:erp/pos.git", ns),
-                      tag="bge-base-zh-v1.5-abc12345-fp16")
-    repo = store.repo(ns)
+    # v2：canonical namespace + 血统整数 id + scopes 表
+    ns = index_store.canonical_namespace("erp-pos", "fp1", "main", "x")
+    lineage = store.ensure_lineage("git@example.com:erp/pos.git", "erp-pos", "erp/pos")
+    store.ensure_scope(ns, "erp/pos", "fp1", lineage, tag="bge-base-zh-v1.5-abc12345-fp16")
+    repo = store.scope(ns)
     rnd = random.Random(7)
     bodies = {}
     shared = "def handler(request):\n    return dispatch(request)  # 复制粘贴的样板代码\n" * 8
@@ -56,17 +56,17 @@ def make_db(path, chunks=CHUNKS, pre=PRE_EMBEDDED, dup_every=None):
     with store.lock:
         now = int(time.time())
         store.db.executemany(
-            "insert or replace into chunks(namespace, lineage_id, path, start, \"end\", hash) values (?,?,?,?,?,?)",
-            [(ns, repo["lineage_id"], f"src/f{i % 97}.py", i, i + 10, "%064x" % (i + 1)) for i in range(chunks)],
+            "insert or replace into chunks(scope_id, path, start_line, end_line, hash) values (?,?,?,?,?)",
+            [(repo["id"], f"src/f{i % 97}.py", i, i + 10, "%064x" % (i + 1)) for i in range(chunks)],
         )
         store.db.executemany(
-            "insert or replace into blobs(lineage_id, hash, body, updated_at) values (?,?,?,?)",
-            [(repo["lineage_id"], h, b, now) for h, b in bodies.items()],
+            "insert or replace into blobs(hash, body, created_at) values (?,?,?)",
+            [(h, b.encode("utf-8"), now) for h, b in bodies.items()],
         )
         hashes = list(bodies)[:pre]
         store.db.executemany(
-            "insert or replace into vectors(lineage_id, tag, hash, dim, v, updated_at) values (?,?,?,?,?,?)",
-            [(repo["lineage_id"], repo["tag"], h, DIM, b"\0" * (4 * DIM), now) for h in hashes],
+            "insert or replace into vectors(tag, hash, dim, vec, updated_at) values (?,?,?,?,?)",
+            [(repo["tag"], h, DIM, b"\0" * (4 * DIM), now) for h in hashes],
         )
         store.db.commit()
         store._invalidate()
@@ -122,7 +122,7 @@ def exp1_db_latency(store, ns, tag, repo):
     print(f"  {'counts() 热缓存':28s} {ms:8.2f} ms")
     vec = np.zeros(DIM, dtype=np.float32)
     pairs8 = [("%064x" % (10_000 + i), vec) for i in range(8)]
-    _, ms = timed(lambda: store.put_vectors(repo["lineage_id"], tag, pairs8), n=3)
+    _, ms = timed(lambda: store.put_vectors(tag, pairs8), n=3)
     print(f"  {'put_vectors(8) 含 commit':28s} {ms:8.2f} ms")
 
 
@@ -211,7 +211,7 @@ def _simulate(tmp, name, window, dedupe, sec_per_token, dup_every=None):
     import numpy as np
 
     store, ns, _repo = make_db(os.path.join(tmp, name), dup_every=dup_every)
-    pending0 = store.pending_count(ns, store.repo(ns)["tag"])
+    pending0 = store.pending_count(ns, store.scope(ns)["tag"])
 
     class VirtualClock:
         def __init__(self):
@@ -240,7 +240,7 @@ def _simulate(tmp, name, window, dedupe, sec_per_token, dup_every=None):
                                      dedupe=dedupe, log=lambda *_: None, clock=clock)
     gov.kick(ns)
     ticks = 0
-    while ticks < 20_000 and store.pending(ns, store.repo(ns)["tag"], 1):
+    while ticks < 20_000 and store.pending(ns, store.scope(ns)["tag"], 1):
         gov._tick(ns)
         ticks += 1
     dots = float(pending0) / clock.t if clock.t > 0 else 0.0

@@ -82,9 +82,9 @@ NS_UNKNOWN = istore.canonical_namespace("ghost", "fp-bodies", "main", "default")
 
 st = istore.IndexStore(os.path.join(TMP, "index.db"))
 LID = st.ensure_lineage("https://example.com/demo.git", "demo")
-st.ensure_repo(NS, "demo", "fp-bodies", LID, tag="tag-bodies", repo_name="demo")
-st.ensure_repo(NS_SLASH, "team/demo", "fp-bodies", LID, tag="tag-bodies",
-               repo_name="team/demo")
+st.ensure_scope(NS, "demo", "fp-bodies", LID, tag="tag-bodies", repo_name="demo")
+st.ensure_scope(NS_SLASH, "team/demo", "fp-bodies", LID, tag="tag-bodies",
+                repo_name="team/demo")
 st.put_chunks(NS, [
     {"hash": H1, "body": B1},
     {"hash": H2, "body": B2},

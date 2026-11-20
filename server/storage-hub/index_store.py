@@ -1,23 +1,26 @@
-"""索引存储：血统（lineage）/命名空间（namespace）/* 内容寻址的 blob 与 vector。
+"""storage-hub 存储层 v2：代码资产（lineages/scopes/chunks/blobs/vectors）+ 经验资产
+（memories/memory_vectors/excerpts/memory_excerpts/memory_conflicts/memory_events）+
+任务与统计（exp_jobs/api_calls/meta）。
 
-## 为什么按"血统 + 内容哈希"存，而不是全局
+## 本文件是 v2 schema 的唯一实现，**不含任何兼容/迁移代码**
 
-实测（4 个无关仓库两两比对）：跨项目块重合 **0.00%** —— 全局去重对无关项目毫无收益，
-只会线性累积。而同一项目的不同分支/不同克隆，仓库级复用率 **~98%**。
-所以存储边界是**血统**（= 归一化后的 git remote URL），血统内按内容哈希去重：
+契约见 `docs/schema-v2.md`：
+  · 一种数据只存一份：正文进 `blobs(hash)`、向量进 `vectors(tag,hash)`（内容寻址），
+    `chunks` 只记"这个快照里有哪些块"；
+  · 整数主键 + 外键 + ON DELETE CASCADE：删除自动级联，不靠手工清；
+  · 全表 `STRICT`：类型错误插不进去（旧库最大的隐患是 `'123'` 与 `123` 混存）；
+  · 状态用「表」不用「列值」：冲突是一等公民 `memory_conflicts`，
+    `memories.status` 只有 active/retired；
+  · 幂等键显式化：`memories.fingerprint` 唯一索引，upsert 靠它；
+  · `memories_fts` 用外部内容表 + 触发器，不再手工双写。
 
-    10 个分支的同一仓库 → 235 MB（去重后），而不是 2.35 GB（每分支一份）
+启动校验：`meta.schema_version` 必须等于 `'2'`；旧库（没有 meta 表、或版本不等于 2）
+直接 `RuntimeError`，提示"重置重建（docs/schema-v2.md §5）"——**不做运行时迁移**。
 
-跨血统只留两个显式口子（默认不共享）：`adopt()`（调用方点名从哪个血统借）；
-以及"simhash 候选 → 精确哈希 adopt"（`similar_lineages()` / `adopt_overlap()` /
-`adopt_hashes()`，给 fork / remote 改名 / vendor 副本的冷启动用）。后者只复制
-**候选里确实存在、且目标自己 manifest 也拥有**的内容哈希，绝不复制 chunks / path。
+对外 id：`memories.id` 是 `INTEGER PRIMARY KEY`，API 层格式化为 `exp-%06d`
+（`format_memory_id` / `parse_memory_id` 是唯一的转换入口）。
 
-## 为什么 blob 与 vector 都用 hash 做主键的一部分
-
-切块在客户端做（服务端不切块），客户端送上来的是 `(path, start, end, hash)` + 正文。
-hash = sha256(块正文) 是内容身份：同一段代码换了路径/行号仍然是同一行存储，
-因此"改文件 → 只有变化的块需要重嵌"这件事在存储层天然成立。
+namespace 字符串格式保持不变：`{repoId}@{chunkFp}#{kind}:{refToken}[~root:{sha8}]`。
 """
 import hashlib
 import json
@@ -29,149 +32,266 @@ import time
 
 import numpy as np
 
+# ---------------------------------------------------------------- 显示层中文名（决策 7）
+# API 直接返回 `lensLabel` / `categoryLabel`，前端不再自己维护一份枚举到中文的映射。
+LENS_LABELS = {
+    "jargon": "黑话镜头",
+    "index": "索引镜头",
+    "logic": "逻辑镜头",
+}
+CATEGORY_LABELS = {
+    "business": "业务知识",
+    "debug": "调试经验",
+    "repo": "仓库联动",
+    "tool": "工具环境",
+    "process": "交付流程",
+}
+LENSES = tuple(LENS_LABELS)
+# process 属于"已由 skill 覆盖"的交付流程，默认不入库（写入层拒绝；标签表保留供展示旧数据）。
+CATEGORIES = ("business", "debug", "repo", "tool")
+CATEGORIES_STORED = tuple(CATEGORY_LABELS)
+
+WORKFLOWS = ("erp-bug", "pay-bug", "release", "erp-req", "ops", "ledger", "local-dev")
+
+SCHEMA_VERSION = "2"
+_CHUNK_SCHEMA = "v2"
+
+OLD_DB_MESSAGE = (
+    "旧库不兼容，请重置重建（docs/schema-v2.md §5）："
+    "停服务后删掉 index.db / index.db-wal / index.db-shm，再起服务，由客户端重推索引。"
+    "v2 不提供迁移代码（schema_version='2' 是硬门槛）。"
+)
+
+# ---------------------------------------------------------------- 完整 DDL（docs/schema-v2.md §2）
+# 与文档逐行一致；只补 `if not exists`（启动可重入），其余不增不减。
 SCHEMA = """
+-- ---------------------------------------------------------------- 基础
+create table if not exists meta (
+  key   text primary key,
+  value text not null
+) strict;
+-- 必需键：schema_version='2' / embed_tag / chunk_schema
+
+-- ---------------------------------------------------------------- 代码资产
+-- 血统：一个来源仓库（跨克隆/跨机器同一性）
 create table if not exists lineages (
-  id text primary key,
-  url_norm text,
-  created_at integer not null,
-  last_seen integer not null,
-  merged_into text,              -- 已被合并进的目标血统（观察期软标记，7 天后可 --hard 物理清理）
-  merged_at integer              -- 合并发生时间（unix 秒）
-);
-create table if not exists repos (
-  namespace text primary key,
-  lineage_id text not null,
-  repo_id text not null,
-  repo_name text,
-  chunk_fp text not null,
-  revision integer not null default 0,
-  tag text,
-  repo_state text,
-  repo_state_chunks integer,
-  updated_at integer not null,
-  scope_kind text not null default 'main',
-  scope_ref text,
-  root_rel text,
-  commit_sha text,
-  ttl_days integer,
-  expires_at integer,
-  pinned integer not null default 0,
-  created_at integer,
-  simhash_path text,
-  simhash_content text,
-  simhash_algo text,
-  simhash_files integer,
-  simhash_at integer
-);
+  id          integer primary key,
+  repo_name   text not null,
+  url_norm    text,
+  root_hint   text,
+  created_at  integer not null,
+  last_seen   integer not null
+) strict;
+create unique index if not exists lineages_url  on lineages(url_norm) where url_norm is not null;
+create unique index if not exists lineages_root on lineages(root_hint) where root_hint is not null;
+create index        if not exists lineages_name on lineages(repo_name);
+
+-- 快照：一个 lineage 的一次具体视图（分支/PR/worktree/子目录）
+create table if not exists scopes (
+  id            integer primary key,
+  lineage_id    integer not null references lineages(id) on delete cascade,
+  kind          text not null,
+  ref           text not null default 'default',
+  root_rel      text,
+  chunk_fp      text not null,
+  namespace     text not null,
+  tag           text,
+  revision      integer not null default 0,
+  chunk_count   integer not null default 0,
+  vector_count  integer not null default 0,
+  repo_state    text,
+  commit_sha    text,
+  simhash_path     text,
+  simhash_content  text,
+  simhash_algo     text,
+  simhash_files    integer,
+  simhash_at       integer,
+  created_at    integer not null,
+  updated_at    integer not null
+) strict;
+create unique index if not exists scopes_namespace on scopes(namespace);
+create unique index if not exists scopes_ident on scopes(lineage_id, kind, ref, coalesce(root_rel,''), chunk_fp);
+create index if not exists scopes_lineage on scopes(lineage_id, updated_at desc);
+
+-- 块清单：这个快照里有哪些块（正文/向量都在别处，按 hash 引用）
 create table if not exists chunks (
-  namespace text not null,
-  lineage_id text not null,
-  path text not null,
-  start integer not null,
-  "end" integer not null,
-  hash text not null,
-  primary key (namespace, path, start)
-);
-create index if not exists chunks_ns_hash on chunks(namespace, hash);
-create index if not exists chunks_lin_hash on chunks(lineage_id, hash);
+  scope_id   integer not null references scopes(id) on delete cascade,
+  path       text not null,
+  start_line integer not null,
+  end_line   integer not null,
+  hash       text not null,
+  primary key (scope_id, path, start_line)
+) strict;
+create index if not exists chunks_hash  on chunks(hash);
+create index if not exists chunks_scope_path on chunks(scope_id, path);
+
+-- 块正文：内容寻址，全局唯一（同内容多快照只存一份）
 create table if not exists blobs (
-  lineage_id text not null,
-  hash text not null,
-  body text not null,
-  updated_at integer not null,
-  primary key (lineage_id, hash)
-);
+  hash       text primary key,
+  body       blob not null,
+  created_at integer not null
+) strict;
+
+-- 块向量：内容寻址（同 hash 同 tag 只算一次）
 create table if not exists vectors (
-  lineage_id text not null,
-  tag text not null,
-  hash text not null,
-  dim integer not null,
-  v blob not null,
-  updated_at integer not null,
-  primary key (lineage_id, tag, hash)
-);
--- 向量 CAS（内容寻址）：同一 (tag, hash) 全局只存一份向量负载，不带 lineage_id。
--- 主键取 (tag, hash) 复合而不是 hash 单列：tag（embedding 模型指纹）参与唯一性——
--- 同一内容哈希在不同模型下是不同向量，单列 hash pk 会把换模型期间的旧向量挤掉。
--- 代价：按 hash 单列检索吃不了主键前缀（实际没有这种查询；读写都带 tag）。
--- 旧 vectors 表保留，但 v2 迁移后降级为「血统→(tag,hash) 成员表」：v 列清空（负载唯一份在
--- v2），lineage 维度的语义（_missing / counts / adopt 成员判断 / gc）继续走它，保证兼容读。
-create table if not exists vectors_v2 (
-  tag text not null,
-  hash text not null,
-  dim integer not null,
-  v blob not null,
+  tag        text not null,
+  hash       text not null references blobs(hash) on delete cascade,
+  dim        integer not null,
+  vec        blob not null,
   updated_at integer not null,
   primary key (tag, hash)
-);
--- 服务端元数据键值表（schema 版本标记等；vectors_schema=cas 表示向量已完成 CAS 迁移）。
-create table if not exists meta (
-  key text primary key,
-  value text
-);
+) strict;
+
+-- ---------------------------------------------------------------- 经验资产
 create table if not exists memories (
-  id text primary key,
-  repo text not null,
-  lens text not null,
-  what text not null,
-  when_expr text,
-  why text,
-  evidence text,
-  status text not null default 'active',
-  source text not null default 'pipeline',
-  stats_hits integer not null default 0,
-  stats_adopted integer not null default 0,
+  id          integer primary key,
+  fingerprint text not null,
+  category    text not null,
+  lens        text not null,
+  workflow    text,
+  repo        text,
+  what        text not null,
+  when_expr   text not null,
+  why         text not null,
+  status      text not null default 'active',
+  source      text not null,
+  audit       text,
+  exp_job_id  integer references exp_jobs(id) on delete set null,
+  hits        integer not null default 0,
+  adopted     integer not null default 0,
   last_hit_at integer,
-  created_at integer not null,
-  updated_at integer not null,
-  against_id text,               -- 冲突配对：与本条目冲突的另一条 id（可空；存量/单边为 NULL）
-  trigger_words text             -- 冲突触发词对（json 数组，如 ["必须","无需"]；存于 conflicting 行上）
-);
-create index if not exists memories_repo_status on memories(repo, status);
-create index if not exists memories_lens_status on memories(lens, status);
-create index if not exists memories_status on memories(status);
-create index if not exists memories_created on memories(created_at desc);
--- memories_against(against_id) 索引不在 SCHEMA 里建：老库 memories 表还没有 against_id 列
--- （列由 __init__ 的 ALTER 块补齐），SCHEMA 的 executescript 先于 ALTER 执行会直接
--- "no such column"（生产库副本预演实测踩到）。索引在补列之后建（__init__ 内）。
--- 条目事件时间线：upsert/hit/adopt/resolve/软删/冲突配对各写一行（治理可见性，audit 用）
+  created_at  integer not null,
+  updated_at  integer not null
+) strict;
+create unique index if not exists memories_fp     on memories(fingerprint);
+create index        if not exists memories_cat    on memories(category, status);
+create index        if not exists memories_wf     on memories(workflow, status);
+create index        if not exists memories_lens   on memories(lens, status);
+create index        if not exists memories_hit_at on memories(last_hit_at);
+create index        if not exists memories_created on memories(created_at desc);
+
+-- 经验向量（1:1，独立表而不是塞进 memories：重建向量不动行）
+create table if not exists memory_vectors (
+  memory_id  integer primary key references memories(id) on delete cascade,
+  tag        text not null,
+  dim        integer not null,
+  vec        blob not null,
+  updated_at integer not null
+) strict;
+
+-- 证据片段：CAS（同片段被多条经验引用只存一份）
+create table if not exists excerpts (
+  id          integer primary key,
+  sha256      text not null unique,
+  text        text not null,
+  kind        text not null default 'quote',
+  archive_ref text,
+  captured_at integer not null,
+  expires_at  integer
+) strict;
+
+create table if not exists memory_excerpts (
+  memory_id integer not null references memories(id) on delete cascade,
+  excerpt_id integer not null references excerpts(id) on delete cascade,
+  primary key (memory_id, excerpt_id)
+) strict;
+create index if not exists memory_excerpts_ev on memory_excerpts(excerpt_id);
+
+-- 冲突：一等公民。双方都是 active（冲突未决仍可召回）
+create table if not exists memory_conflicts (
+  id          integer primary key,
+  memory_a    integer not null references memories(id) on delete cascade,
+  memory_b    integer not null references memories(id) on delete cascade,
+  trigger_words text,
+  status      text not null default 'open',
+  resolution  text,
+  resolved_by text,
+  resolved_at integer,
+  created_at  integer not null,
+  unique (memory_a, memory_b)
+) strict;
+create index if not exists memory_conflicts_open on memory_conflicts(status, created_at desc);
+
+-- 事件流：只追加，用于条目 timeline 与漏斗统计
 create table if not exists memory_events (
-  id integer primary key autoincrement,
-  memory_id text not null,
-  at integer not null,
-  event text not null,           -- created | updated | hit | adopted | conflicted | resolved | retired
-  detail text                    -- JSON（触发词/来源/裁决方向等；可空）
-);
-create index if not exists memory_events_mid on memory_events(memory_id, at desc, id desc);
--- 治理跑批留痕：pipeline 每跑一次上报一行（候选/拦截/合并/四判计数 + 明细摘要）
-create table if not exists pipeline_runs (
-  id integer primary key autoincrement,
-  run_id text not null,
-  started_at integer not null,
-  finished_at integer not null,
-  engine text not null,
-  dry_run integer not null default 0,
-  candidates integer not null default 0,
-  review_passed integer not null default 0,
-  review_blocked integer not null default 0,
-  dedup_kept integer not null default 0,
-  dedup_merged integer not null default 0,
-  actions text not null,         -- JSON：{create,update,skip,contradict} 计数
-  details text                   -- JSON：拦截/合并/冲突明细（截断后的摘要，可空）
-);
-create index if not exists pipeline_runs_started on pipeline_runs(started_at desc);
-create unique index if not exists pipeline_runs_run_id on pipeline_runs(run_id);
--- 全文索引：trigram 对 ASCII 子串与连续中文都按「原文子串」匹配，且 sqlite>=3.34 自带，
--- 与代码检索用的 tokenizer 语义对齐（免装 fts5 trigram 之外的扩展）。
+  id        integer primary key,
+  memory_id integer not null references memories(id) on delete cascade,
+  at        integer not null,
+  event     text not null,
+  detail    text
+) strict;
+create index if not exists memory_events_mid on memory_events(memory_id, at desc);
+create index if not exists memory_events_at  on memory_events(at desc);
+
+-- ---------------------------------------------------------------- 任务与统计
+create table if not exists exp_jobs (
+  id             integer primary key,
+  session_id     text,
+  segment_no     integer,
+  workflow       text,
+  mode           text not null,
+  status         text not null,
+  model          text,
+  prompt_version text,
+  tokens_in      integer,
+  tokens_out     integer,
+  ms             integer,
+  candidates     integer not null default 0,
+  blocked        integer not null default 0,
+  created_n      integer not null default 0,
+  updated_n      integer not null default 0,
+  skipped_n      integer not null default 0,
+  contradicted_n integer not null default 0,
+  reasons        text,
+  error          text,
+  created_at     integer not null,
+  finished_at    integer
+) strict;
+create index if not exists exp_jobs_created on exp_jobs(created_at desc);
+create index if not exists exp_jobs_seg     on exp_jobs(session_id, segment_no);
+
+create table if not exists api_calls (
+  id       integer primary key,
+  at       integer not null,
+  group_   text not null,
+  key_id   text,
+  ms       integer,
+  status   integer,
+  err      text
+) strict;
+create index if not exists api_calls_at    on api_calls(at desc);
+create index if not exists api_calls_group on api_calls(group_, at desc);
+
+-- ---------------------------------------------------------------- FTS
+-- 经验全文：外部内容表 + 触发器同步（不再手工维护两份文本）
 create virtual table if not exists memories_fts using fts5(
   what, when_expr, why,
-  tokenize='trigram'
+  content   = 'memories',
+  content_rowid = 'id',
+  tokenize  = 'trigram'
 );
-create table if not exists memories_vec (
-  mid integer primary key,
-  dim integer not null,
-  v blob not null,
-  updated_at integer not null
+
+create trigger if not exists memories_ai after insert on memories begin
+  insert into memories_fts(rowid, what, when_expr, why)
+  values (new.id, new.what, new.when_expr, new.why);
+end;
+create trigger if not exists memories_ad after delete on memories begin
+  insert into memories_fts(memories_fts, rowid, what, when_expr, why)
+  values ('delete', old.id, old.what, old.when_expr, old.why);
+end;
+create trigger if not exists memories_au after update of what, when_expr, why on memories begin
+  insert into memories_fts(memories_fts, rowid, what, when_expr, why)
+  values ('delete', old.id, old.what, old.when_expr, old.why);
+  insert into memories_fts(rowid, what, when_expr, why)
+  values (new.id, new.what, new.when_expr, new.why);
+end;
+
+-- 代码块全文（trigram；服务端仅在 fts 模式或管理端搜索时用）
+create virtual table if not exists chunks_fts using fts5(
+  body,
+  content   = 'blobs',
+  content_rowid = 'rowid',
+  tokenize  = 'trigram'
 );
 """
 
@@ -181,10 +301,10 @@ SCOPE_KINDS = ("main", "branch", "pr", "worktree")
 
 # ---------------------------------------------------------------- simhash 候选（跨血统冷启动）
 # 客户端把整棵文件清单压成两个 64-bit simhash（path-aware / content-only）。
-# 服务端只用它**找候选**，绝不把它当存储键：真正复制的仍是精确内容哈希（blobs/vectors）。
+# 服务端只用它**找候选**，绝不把它当存储键：真正复用的仍是精确内容哈希。
 SIMHASH_HEX_LEN = 16          # 64-bit → 16 hex
 SIMHASH_MIN_SIMILARITY = 0.85  # max(path/content 相似度) 门槛
-ADOPT_MIN_OVERLAP = 0.80       # 目标 chunks ∩ 候选当前 tag vectors / 目标 chunks
+ADOPT_MIN_OVERLAP = 0.80       # 目标 chunks ∩ 已有当前 tag 向量的比例
 MAX_ADOPT_CANDIDATES = 5
 MAX_ADOPT_HASHES = 50000
 MAX_SIMHASH_FILES = 10_000_000
@@ -194,6 +314,14 @@ _TOKENS = {"main": "main", "branch": "branch", "pr": "pr", "worktree": "wt"}
 _TOKEN_KINDS = {v: k for k, v in _TOKENS.items()}
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _DIGITS_RE = re.compile(r"^[0-9]+$")
+
+# repo_id 一直编码在 namespace 里（`<repoId>@<chunkFp>#...`）：v2 不再冗余存列，
+# 统一的派生表达式放这里，凡按 repoId 过滤/分组都复用它。
+_REPO_ID_SQL = "substr({alias}.namespace, 1, instr({alias}.namespace, '@') - 1)"
+
+
+def repo_id_sql(alias="s"):
+    return _REPO_ID_SQL.format(alias=alias)
 
 
 class ScopeFormatError(ValueError):
@@ -278,7 +406,6 @@ def canonical_namespace(repo_id, chunk_fp, kind, ref, root=None):
     """canonical_namespace(repoId, chunkFp, kind, ref, root=None)
     -> "{repoId}@{chunkFp}#{kind}:{refToken}[~root:{sha8}]"。
 
-    - legacy 命名空间（不含 #）**不经过本函数**，原样保留（见 legacy_namespace()）；
     - `root` 为空 = 仓库根；非空 = 该仓库的某个子目录（同一 (repoId, kind, ref) 下允许并存，
       靠 `~root:<sha8>` 区分）。
     """
@@ -360,13 +487,13 @@ def normalize_url(url):
         return ""
     s = s.split("@")[-1] if "@" in s and "://" in s else s
     if s.startswith("ssh://"):
-        s = s[len("ssh://") :]
+        s = s[len("ssh://"):]
     if s.startswith("git@"):
-        s = s[len("git@") :].replace(":", "/", 1)
+        s = s[len("git@"):].replace(":", "/", 1)
     if "://" in s:
         s = s.split("://", 1)[1]
     if s.startswith("ssh:"):
-        s = s[len("ssh:") :].lstrip("/")
+        s = s[len("ssh:"):].lstrip("/")
     s = s.split("@")[-1]
     s = s.rstrip("/")
     if s.endswith(".git"):
@@ -377,11 +504,6 @@ def normalize_url(url):
     else:
         s = s.lower()
     return s
-
-
-def lineage_id_of(url_norm, fallback_seed):
-    seed = url_norm or f"local:{fallback_seed}"
-    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------- simhash 校验 / 距离
@@ -441,7 +563,7 @@ def hamming_similarity(a, b):
 def _chunked(seq, size=400):
     """把 IN (...) 的参数分批：SQLite 老版本变量上限是 999，adopt 可能有几万 hash。"""
     for i in range(0, len(seq), size):
-        yield seq[i : i + size]
+        yield seq[i: i + size]
 
 
 def _as_bool(value):
@@ -455,276 +577,263 @@ def _as_bool(value):
     return False
 
 
-# ---------------------------------------------------------------- 向量 CAS 迁移（T-261120-dedup）
-# 部署模型（2026-11-20 授权：历史数据可清理，不做运行时静默迁移）：
-#   停写 → cleanup-lineages.py --db <index.db> --migrate-cas [--vacuum] → 起服务。
-# 服务启动只认 v2（IndexStore.__init__ 的 gate）；旧 schema 直接 RuntimeError 报提示。
-def cas_migrate_conn(db):
-    """CAS 迁移核心（单事务 BEGIN IMMEDIATE），在给定连接上执行，幂等。
-
-    ① 建表兜底（vectors_v2 / meta）；
-    ② meta 无 `vectors_schema=cas` 时：旧表 (lineage,tag,hash) 行按 (tag,hash) 去重
-       搬进 v2（REPLACE 语义 + ORDER BY updated_at，新者胜），然后清空旧 v 列——
-       旧表降级为「血统→(tag,hash) 成员表」，兼容所有按血统的既有读路径；
-    ③ meta 记 `vectors_schema=cas`，COMMIT。
-
-    返回 `{migrated, cleared, v2Vectors, legacyMembershipRows}`；
-    meta 已是 cas → migrated=False，只做建表兜底（跑两次结果一致）。
-    """
-    if db.in_transaction:
-        db.commit()
-    db.execute("begin immediate")
-    try:
-        db.execute(
-            "create table if not exists vectors_v2 ("
-            " tag text not null, hash text not null, dim integer not null, v blob not null,"
-            " updated_at integer not null, primary key (tag, hash))"
-        )
-        db.execute("create table if not exists meta (key text primary key, value text)")
-        state = db.execute("select value from meta where key = 'vectors_schema'").fetchone()
-        migrated = False
-        cleared = 0
-        if state is None or (state["value"] or "") != "cas":
-            db.execute(
-                "insert or replace into vectors_v2(tag, hash, dim, v, updated_at)"
-                " select tag, hash, dim, v, updated_at from vectors order by updated_at"
-            )
-            cur = db.execute("update vectors set v = '' where length(v) > 0")
-            cleared = int(cur.rowcount or 0)
-            db.execute(
-                "insert or replace into meta(key, value) values ('vectors_schema', 'cas')"
-            )
-            migrated = True
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    v2_total = int(db.execute("select count(*) as n from vectors_v2").fetchone()["n"])
-    legacy_total = int(db.execute("select count(*) as n from vectors").fetchone()["n"])
-    return {
-        "migrated": migrated,
-        "cleared": cleared,
-        "v2Vectors": v2_total,
-        "legacyMembershipRows": legacy_total,
-    }
+def _to_blob(body):
+    """块正文入库形态：统一存 BLOB（STRICT 表列是 BLOB，TEXT 值会被类型检查拒绝）。"""
+    if isinstance(body, bytes):
+        return body
+    if isinstance(body, bytearray):
+        return bytes(body)
+    if isinstance(body, str):
+        return body.encode("utf-8")
+    return str(body).encode("utf-8")
 
 
-def cas_migrate_db(db_path, vacuum=False):
-    """一次性显式迁移（部署脚本 `cleanup-lineages.py --migrate-cas` 用）。
-
-    独立连接打开库文件执行 cas_migrate_conn，不动服务进程（建议停写后跑）。
-    `vacuum=True` 顺带 VACUUM + checkpoint——迁移清空的旧 v 列释放的页先进
-    freelist，文件真正缩小靠它。幂等，可重复执行。
-    """
-    db = sqlite3.connect(db_path, timeout=60)
-    db.row_factory = sqlite3.Row
-    try:
-        out = cas_migrate_conn(db)
-    finally:
-        db.close()
-    if vacuum:
-        db = sqlite3.connect(db_path, timeout=60)
+def _to_text(body):
+    """块正文出库形态：API 一律返回 str（JSON 不能装 bytes）。"""
+    if isinstance(body, str):
+        return body
+    if isinstance(body, (bytes, bytearray)):
         try:
-            db.execute("pragma wal_checkpoint(truncate)")
-            db.execute("vacuum")
-            db.commit()
-            out["vacuumed"] = True
-        except Exception as e:  # noqa: BLE001 —— 迁移已提交，vacuum 失败只报告
-            out["vacuumError"] = f"{type(e).__name__}: {e}"
-        finally:
-            db.close()
-    return out
+            return bytes(body).decode("utf-8")
+        except UnicodeDecodeError:
+            return bytes(body).decode("utf-8", errors="replace")
+    return str(body)
 
 
+def _connect(db_path):
+    """统一连接工厂：WAL + NORMAL + **每连接强制外键**（v2 依赖 cascade 自动清）。"""
+    db = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+    db.row_factory = sqlite3.Row
+    db.execute("pragma journal_mode = wal")
+    db.execute("pragma synchronous = normal")
+    db.execute("pragma foreign_keys = on")
+    return db
+
+
+def check_schema(db):
+    """启动 schema 校验（**唯一**的库版本门槛）。
+
+    返回 "fresh"（空库，将按 v2 DDL 建）或 "v2"（已是 v2 库）。
+    其它一切情况（有表但没有 meta / 版本不等于 2）→ RuntimeError（提示重置重建）。
+    """
+    tables = {
+        r["name"]
+        for r in db.execute("select name from sqlite_master where type = 'table'").fetchall()
+    }
+    if not tables:
+        return "fresh"
+    if "meta" not in tables:
+        raise RuntimeError(OLD_DB_MESSAGE)
+    row = db.execute("select value from meta where key = 'schema_version'").fetchone()
+    if row is None or str(row["value"]) != SCHEMA_VERSION:
+        raise RuntimeError(OLD_DB_MESSAGE)
+    return "v2"
+
+
+# ---------------------------------------------------------------- 代码资产
 class IndexStore:
+    """lineages / scopes / chunks / blobs / vectors 的读写。
+
+    - 一种数据只存一份：`chunks` 只记 (scope, path, start) → hash；正文在 `blobs(hash)`，
+      向量在 `vectors(tag, hash)`，两者都是内容寻址，跨快照/跨血统自动共享；
+    - 删除靠 cascade：删 scope → chunks 自动清；随后 `gc()` 回收孤儿 blobs/vectors；
+    - 计数/体积必须缓存：`counts()` 的 JOIN 在 16 万块上要 0.4 s，而它在**每次查询**里都要用；
+      只在会改变数据的操作（sync/put_chunks/put_vectors/gc）后失效。
+    """
+
     def __init__(self, db_path):
         self.db_path = db_path
-        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        parent = os.path.dirname(os.path.abspath(db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self.lock = threading.RLock()
-        # 计数/体积缓存：coverage 的 JOIN 计数在 16 万块上要 400 ms，而它在**每次查询**里都要用。
-        # 只在会改变数据的操作（sync/put_chunks/put_vectors/gc/adopt）后失效。
         self._cache = {}
-        self.db = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("pragma journal_mode = wal")
-        self.db.execute("pragma synchronous = normal")
-        self.db.executescript(SCHEMA)
-        # 幂等迁移：历史库补齐列；TTL/pinned 列保留但不再读写。
-        cols = {r["name"] for r in self.db.execute("pragma table_info(repos)").fetchall()}
-        for name, ddl in (
-            ("scope_kind", "text not null default 'main'"),
-            ("scope_ref", "text"),
-            ("root_rel", "text"),
-            ("commit_sha", "text"),
-            ("ttl_days", "integer"),
-            ("expires_at", "integer"),
-            ("pinned", "integer not null default 0"),
-            ("created_at", "integer"),
-            ("repo_name", "text"),
-        ):
-            if name not in cols:
-                self.db.execute(f"alter table repos add column {name} {ddl}")
-        if "repo_state_chunks" not in cols:
-            self.db.execute("alter table repos add column repo_state_chunks integer")
-        # P3 simhash：只增不删的幂等列（旧库启动自动补齐；旧客户端不写 → 保持 null）。
-        for name, ddl in (
-            ("simhash_path", "text"),
-            ("simhash_content", "text"),
-            ("simhash_algo", "text"),
-            ("simhash_files", "integer"),
-            ("simhash_at", "integer"),
-        ):
-            if name not in cols:
-                self.db.execute(f"alter table repos add column {name} {ddl}")
-        # memories 治理可见性列（旧库补齐；SCHEMA 已含新表 memory_events / pipeline_runs）：
-        # against_id/trigger_words 由 MemoryStore.link_conflict 在冲突配对时双写。
-        mem_cols = {r["name"] for r in self.db.execute("pragma table_info(memories)").fetchall()}
-        for name, ddl in (
-            ("against_id", "text"),
-            ("trigger_words", "text"),
-        ):
-            if name not in mem_cols:
-                self.db.execute(f"alter table memories add column {name} {ddl}")
-        # 索引必须在补列之后建（老库列刚 ALTER 进来）；SCHEMA 里没有它（见 SCHEMA 注释）
-        self.db.execute("create index if not exists memories_against on memories(against_id)")
-        # lineages 合并软标记列（旧库补齐；merge 端点写，--hard 观察期后物理清理）。
-        lin_cols = {r["name"] for r in self.db.execute("pragma table_info(lineages)").fetchall()}
-        for name, ddl in (
-            ("merged_into", "text"),
-            ("merged_at", "integer"),
-        ):
-            if name not in lin_cols:
-                self.db.execute(f"alter table lineages add column {name} {ddl}")
+        self.db = _connect(db_path)
+        state = check_schema(self.db)
+        if state == "fresh":
+            self.db.executescript(SCHEMA)
+            self.db.execute("insert or replace into meta(key, value) values ('schema_version', ?)",
+                            (SCHEMA_VERSION,))
+            self.db.execute("insert or replace into meta(key, value) values ('chunk_schema', ?)",
+                            (_CHUNK_SCHEMA,))
+            self.db.execute("insert or replace into meta(key, value) values ('embed_tag', '')")
+            self.db.commit()
+        else:
+            self.db.executescript(SCHEMA)  # 幂等兜底（含 if not exists）：补齐漏建的表/索引
+            self.db.commit()
+        self.meta_set("schema_version", SCHEMA_VERSION, commit=False)
         self.db.commit()
-        # 向量 CAS（v2）：服务只认已迁移的库（2026-11-20 授权：历史数据可清理，
-        # 不做运行时静默迁移）。旧 schema（vectors 带真负载且 meta 未记 cas）→ 报错并
-        # 提示先跑显式迁移脚本；空库直接落 cas 标记。
-        state = self.db.execute("select value from meta where key = 'vectors_schema'").fetchone()
-        if not state or (state["value"] or "") != "cas":
-            payload = self.db.execute("select 1 from vectors where length(v) > 0 limit 1").fetchone()
-            if payload:
-                raise RuntimeError(
-                    "vectors 仍是旧 schema（未做 CAS 迁移）。部署序：停写 → "
-                    "python scripts/cleanup-lineages.py --db <index.db> --migrate-cas [--vacuum] → 重启服务。"
-                    " 迁移把旧表 (lineage,tag,hash) 负载按 (tag,hash) 去重搬进 vectors_v2，"
-                    "并清空旧 v 列（历史数据已授权清理）。")
+
+    # ---------------------------------------------------------------- meta
+    def meta_get(self, key, default=None):
+        with self.lock:
+            row = self.db.execute("select value from meta where key = ?", (str(key),)).fetchone()
+        return row["value"] if row else default
+
+    def meta_set(self, key, value, commit=True):
+        with self.lock:
             self.db.execute(
-                "insert or replace into meta(key, value) values ('vectors_schema', 'cas')"
+                "insert into meta(key, value) values (?, ?)"
+                " on conflict(key) do update set value = excluded.value",
+                (str(key), "" if value is None else str(value)),
+            )
+            if commit:
+                self.db.commit()
+        return value
+
+    def embed_tag(self):
+        return self.meta_get("embed_tag")
+
+    def set_embed_tag(self, tag):
+        """当前 embedding 模型 tag（meta.embed_tag；诊断/迁移后核对用）。"""
+        return self.meta_set("embed_tag", "" if tag is None else str(tag))
+
+    # ---------------------------------------------------------------- 血统 / 作用域
+    def ensure_lineage(self, url_norm, fallback_seed, repo_name=None):
+        """按归一化 URL（优先）或 root_hint（无 remote 时）定位/创建血统，返回整数 id。"""
+        url = normalize_url(url_norm or "")
+        seed = "" if fallback_seed is None else str(fallback_seed)
+        hint = None if url else (seed or "unknown")
+        name = (str(repo_name).strip() if repo_name else "") or seed or hint or "unknown"
+        now = int(time.time())
+        with self.lock:
+            row = None
+            if url:
+                row = self.db.execute(
+                    "select id, repo_name from lineages where url_norm = ?", (url,)
+                ).fetchone()
+            elif hint:
+                row = self.db.execute(
+                    "select id, repo_name from lineages where root_hint = ?", (hint,)
+                ).fetchone()
+            if row:
+                lid = int(row["id"])
+                self.db.execute("update lineages set last_seen = ? where id = ?", (now, lid))
+                if repo_name and (row["repo_name"] or "") != name:
+                    self.db.execute("update lineages set repo_name = ? where id = ?", (name, lid))
+                self.db.commit()
+                return lid
+            cur = self.db.execute(
+                "insert into lineages(repo_name, url_norm, root_hint, created_at, last_seen)"
+                " values (?,?,?,?,?)",
+                (name, url or None, hint, now, now),
             )
             self.db.commit()
-        # 废弃 legacy：删除旧格式作用域（scope_kind='legacy' 或 namespace 不含 #）及其 chunks。
-        # blob/vector 按内容哈希共享，交给 janitor/retention 回收，不在这里删。
-        legacy_rows = self.db.execute(
-            "select namespace from repos where scope_kind = 'legacy' or namespace not like '%#%'"
-        ).fetchall()
-        if legacy_rows:
-            for lr in legacy_rows:
-                self.db.execute("delete from chunks where namespace = ?", (lr["namespace"],))
-                self.db.execute("delete from repos where namespace = ?", (lr["namespace"],))
-            self.db.commit()
-            self._invalidate()
-        self.db.execute("update repos set created_at = updated_at where created_at is null")
-        self.db.commit()
+            return int(cur.lastrowid)
 
-    # ---------------------------------------------------------------- 血统 / 命名空间
-    def ensure_lineage(self, url_norm, fallback_seed):
-        lid = lineage_id_of(url_norm, fallback_seed)
-        now = int(time.time())
+    def lineage(self, lineage_id):
         with self.lock:
-            row = self.db.execute(
-                "select id, merged_into from lineages where id = ?", (lid,)
-            ).fetchone()
-            # 合并观察期回退：该 id 的血统已被 merge 吸收 → 后续 sync 直接落在目标血统，
-            # 不把旧血统复活（merged_into 链最多跟 8 跳防环）。
-            hops = 0
-            while row is not None and row["merged_into"] and hops < 8:
-                nxt = self.db.execute(
-                    "select id, merged_into from lineages where id = ?", (row["merged_into"],)
-                ).fetchone()
-                if nxt is None:
-                    break
-                row, lid, hops = nxt, nxt["id"], hops + 1
-            if row:
-                self.db.execute("update lineages set last_seen = ? where id = ?", (now, lid))
-            else:
-                self.db.execute(
-                    "insert into lineages(id, url_norm, created_at, last_seen) values (?,?,?,?)",
-                    (lid, url_norm or "", now, now),
-                )
-            self.db.commit()
-        return lid
-
-    def ensure_repo(self, namespace, repo_id, chunk_fp, lineage_id, tag=None, repo_name=None):
-        now = int(time.time())
-        with self.lock:
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-            if not row:
-                # 行先按 namespace 反推 scope 元信息落库；带 scope 的同步随后由 register_scope() 校准。
-                meta = parse_scope_namespace(namespace)
-                kind = meta["kind"] or "main"
-                self.db.execute(
-                    "insert into repos(namespace, lineage_id, repo_id, repo_name, chunk_fp, revision, tag,"
-                    " repo_state, repo_state_chunks, updated_at, scope_kind, scope_ref, commit_sha, created_at)"
-                    " values (?,?,?,?,?,0,?,null,null,?,?,?,null,?)",
-                    (
-                        namespace,
-                        lineage_id,
-                        repo_id,
-                        repo_name,
-                        chunk_fp,
-                        tag,
-                        now,
-                        kind,
-                        meta["scope_ref"],
-                        now,
-                    ),
-                )
-                self.db.commit()
-            elif repo_name and (row["repo_name"] or "") != repo_name:
-                # 老行补名字（插件/客户端后续同步时带上 repoName）
-                self.db.execute(
-                    "update repos set repo_name = ?, updated_at = ? where namespace = ?",
-                    (repo_name, now, namespace),
-                )
-                self.db.commit()
-        return self.repo(namespace)
-
-    def repo(self, namespace):
-        with self.lock:
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
+            row = self.db.execute("select * from lineages where id = ?", (int(lineage_id),)).fetchone()
         return dict(row) if row else None
 
-    def set_tag(self, namespace, tag):
-        """服务端模型换了 → 该命名空间现有向量作废（tag 变了，missing 会重新算）。"""
+    def scope(self, namespace):
+        """按 namespace 取作用域（合并 lineage 的可读信息，供 API 层直接用）。"""
+        ns = "" if namespace is None else str(namespace)
         with self.lock:
-            self.db.execute("update repos set tag = ?, updated_at = ? where namespace = ?", (tag, int(time.time()), namespace))
+            row = self.db.execute(
+                "select s.*, l.repo_name as lineage_name, l.url_norm as lineage_url"
+                " from scopes s join lineages l on l.id = s.lineage_id where s.namespace = ?",
+                (ns,),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        repo_id, _chunk_fp = namespace_identity(ns)
+        item["repo_id"] = repo_id
+        item["repo_name"] = item.get("lineage_name")
+        item["lineageUrl"] = item.get("lineage_url") or ""
+        return item
+
+    # 兼容别名不再保留：调用方一律用 scope()。
+
+    def _scope_id(self, namespace):
+        row = self.db.execute("select id from scopes where namespace = ?", (str(namespace),)).fetchone()
+        return int(row["id"]) if row else None
+
+    def ensure_scope(self, namespace, repo_id, chunk_fp, lineage_id=None, tag=None,
+                     repo_name=None, root_rel=None):
+        """确保作用域行存在（已存在则只更新 tag/名字/root，绝不改血统——血统在创建时定死）。
+
+        `root_rel` 必须是可读的相对路径（子目录索引时由 sync payload 的 scope.root 提供）。
+        `scopes_ident` 的唯一键是 (lineage, kind, ref, COALESCE(root_rel,''), chunk_fp)：
+        子目录作用域若把 root_rel 留 NULL，就会和仓库根撞唯一索引（实测踩到）。
+        """
+        now = int(time.time())
+        meta = parse_scope_namespace(namespace)
+        kind = meta["kind"] or "main"
+        root_rel = normalize_root(root_rel) or None
+        with self.lock:
+            row = self.db.execute(
+                "select id, lineage_id, tag from scopes where namespace = ?", (str(namespace),)
+            ).fetchone()
+            if row:
+                if tag and (row["tag"] or "") != tag:
+                    self.db.execute("update scopes set tag = ? where id = ?", (tag, int(row["id"])))
+                if root_rel:
+                    self.db.execute(
+                        "update scopes set root_rel = coalesce(root_rel, ?) where id = ?",
+                        (root_rel, int(row["id"])),
+                    )
+                if repo_name and lineage_id is None:
+                    self.db.execute(
+                        "update lineages set repo_name = ? where id = ? and (repo_name = '' or repo_name is null)",
+                        (str(repo_name), int(row["lineage_id"])),
+                    )
+                self.db.commit()
+                return self.scope(namespace)
+            lid = int(lineage_id) if lineage_id else self.ensure_lineage(
+                "", repo_id or namespace_identity(namespace)[0] or "unknown", repo_name,
+            )
+            try:
+                self.db.execute(
+                    "insert or ignore into scopes(lineage_id, kind, ref, root_rel, chunk_fp,"
+                    " namespace, tag, revision, chunk_count, vector_count, created_at, updated_at)"
+                    " values (?,?,?,?,?,?,?,0,0,0,?,?)",
+                    (lid, kind, meta["scope_ref"] or "default", root_rel,
+                     chunk_fp, str(namespace), tag, now, now),
+                )
+                self.db.commit()
+            except sqlite3.IntegrityError as e:  # pragma: no cover —— 防御：并发建同名作用域
+                self.db.rollback()
+                raise SyncDiverged(f"作用域创建冲突：{namespace}（{e}）")
+            if self._scope_id(namespace) is None:
+                raise SyncDiverged(
+                    f"同一血统下已存在等价作用域（lineage/kind/ref/root/chunkFp 相同）：{namespace}"
+                )
+            return self.scope(namespace)
+
+    def set_tag(self, namespace, tag):
+        """服务端模型换了 → 该作用域现有向量作废（tag 变了，missing 会重新算）。"""
+        with self.lock:
+            self.db.execute("update scopes set tag = ?, updated_at = ? where namespace = ?",
+                            (tag, int(time.time()), str(namespace)))
             self.db.commit()
-            self._invalidate()  # set_tag 改了数据 → 计数/体积缓存失效
+            self._invalidate()
 
     def set_all_tags(self, tag):
-        """把所有**已同步**仓库的 tag 批量改成新模型 tag（热切换用）；返回影响行数。
+        """把所有**已同步**作用域的 tag 批量改成新模型 tag（热切换用）；返回影响行数。
 
-        - 只更新 tag 非空的行：从未定过 tag 的仓库（还没带 tag 同步过）保持原样，
-          它们的 pending 语义是"全部待嵌"，不能被一次热切换误标成已同步；
-        - 单条 UPDATE、单事务（调完一起 commit），16 万块规模也只是一次行更新；
-        - 改 tag 等价于让现有向量作废（旧 tag 的向量留在库里，missing 按新 tag 重算，
-          旧向量由 purge_tag_vectors() 显式清理），所以必须失效计数/体积/覆盖度缓存。
+        - 只更新 tag 非空的行：从未定过 tag 的作用域保持原样，它们的 pending 语义是
+          "全部待嵌"，不能被一次热切换误标成已同步；
+        - 单条 UPDATE、单事务；同时写 meta.embed_tag。
         """
         tag = "" if tag is None else str(tag)
         if not tag:
             raise ValueError("set_all_tags 的 tag 不能为空")
         with self.lock:
             cur = self.db.execute(
-                "update repos set tag = ?, updated_at = ? where tag is not null and tag != ''",
+                "update scopes set tag = ?, updated_at = ? where tag is not null and tag != ''",
                 (tag, int(time.time())),
             )
             self.db.commit()
-            self._invalidate()  # tag 全改 → counts 的 vectors/coverage 缓存全部失效
-            return int(cur.rowcount or 0)
+            self._invalidate()
+            changed = int(cur.rowcount or 0)
+        self.meta_set("embed_tag", tag)
+        return changed
 
     # ---------------------------------------------------------------- 作用域生命周期
     def register_scope(self, namespace, kind, ref, commit_sha=None, scope_ref=None, root_rel=None):
-        """写/更新 scope 元数据；作用域永久，不再计算 TTL/pin。
+        """写/更新 scope 元数据（kind/ref/root/commit）。
 
         `root_rel`：索引根相对 git 顶层的路径（仓库根传 None/空串）；
         命名空间里只带 `~root:<sha8>`，这里同时存一份可读路径供控制台展示。
@@ -737,74 +846,84 @@ class IndexStore:
             scope_ref = self._scope_ref_value(kind, ref)
         root_rel = normalize_root(root_rel) or None
         with self.lock:
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-            if row is None:
+            sid = self._scope_id(namespace)
+            if sid is None:
                 repo_id, chunk_fp = namespace_identity(namespace)
                 lineage = self.ensure_lineage("", repo_id or "unknown")
-                self.db.execute(
-                    "insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
-                    " repo_state_chunks, updated_at, scope_kind, scope_ref, root_rel, commit_sha, created_at)"
-                    " values (?,?,?,?,0,null,null,null,?,?,?,?,?,?)",
-                    (namespace, lineage, repo_id or "unknown", chunk_fp or "default", now, kind, scope_ref,
-                     root_rel, commit_sha, now),
+                cur = self.db.execute(
+                    "insert or ignore into scopes(lineage_id, kind, ref, root_rel, chunk_fp,"
+                    " namespace, tag, revision, chunk_count, vector_count, commit_sha,"
+                    " created_at, updated_at) values (?,?,?,?,?,?,null,0,0,0,?,?,?)",
+                    (lineage, kind, scope_ref or "default", root_rel, chunk_fp or "default",
+                     str(namespace), commit_sha, now, now),
                 )
                 self.db.commit()
-                row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-            sets = ["scope_kind = ?", "scope_ref = ?", "updated_at = ?"]
-            args = [kind, scope_ref, now]
-            # root_rel 只在显式给了根时写（仓库根同步不写，避免把旧行已有值清掉）
+                sid = self._scope_id(namespace)
+                if sid is None:
+                    raise ScopeFormatError("scope-conflict", f"无法注册作用域：{namespace}")
+            sets = ["kind = ?", "ref = ?", "updated_at = ?"]
+            args = [kind, scope_ref or "default", now]
             if root_rel:
                 sets.append("root_rel = ?")
                 args.append(root_rel)
             if commit_sha is not None:
                 sets.append("commit_sha = ?")
                 args.append(commit_sha)
-            args.append(namespace)
-            self.db.execute(f"update repos set {', '.join(sets)} where namespace = ?", args)
-            self.db.commit()
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
-        return dict(row) if row else None
+            try:
+                self.db.execute(f"update scopes set {', '.join(sets)} where id = ?", [*args, sid])
+                self.db.commit()
+            except sqlite3.IntegrityError as e:
+                self.db.rollback()
+                raise ScopeFormatError(
+                    "scope-conflict",
+                    f"作用域身份冲突（同一血统下已有等价的 kind/ref/root/chunkFp）：{namespace}（{e}）",
+                )
+        return self.scope(namespace)
 
     def delete_scope(self, namespace):
-        """删除一个 scope：chunks + repos 行；blob/vector 交给 gc（可能还被别的 scope 引用）。幂等。"""
+        """删除一个作用域：chunks 由外键 cascade 清理；blob/vector 交给 gc（可能仍被引用）。幂等。"""
         with self.lock:
-            row = self.db.execute("select * from repos where namespace = ?", (namespace,)).fetchone()
+            row = self.db.execute(
+                "select id, lineage_id, chunk_count from scopes where namespace = ?", (str(namespace),)
+            ).fetchone()
             if not row:
                 return {"deleted": False, "chunks": 0, "lineage": None}
-            chunks = int(
-                self.db.execute("select count(*) as n from chunks where namespace = ?", (namespace,)).fetchone()["n"]
-            )
-            self.db.execute("delete from chunks where namespace = ?", (namespace,))
-            self.db.execute("delete from repos where namespace = ?", (namespace,))
+            sid = int(row["id"])
+            chunks = int(row["chunk_count"] or 0)
+            if not chunks:
+                chunks = int(self.db.execute(
+                    "select count(*) as n from chunks where scope_id = ?", (sid,)
+                ).fetchone()["n"])
+            self.db.execute("delete from scopes where id = ?", (sid,))
             self.db.commit()
-            self._invalidate()  # 删块 → 计数/体积缓存失效
-        return {"deleted": True, "chunks": chunks, "lineage": row["lineage_id"]}
+            self._invalidate()
+        return {"deleted": True, "chunks": chunks, "lineage": int(row["lineage_id"])}
 
     def bulk_delete_scopes(self, namespaces):
         """批量删除作用域；返回 deleted/failed/lineages，调用方统一做 GC。"""
-        deleted = []
-        failed = []
-        lineages = []
+        deleted, failed, lineages = [], [], []
         total_chunks = 0
         with self.lock:
             for raw in namespaces or []:
                 ns = str(raw or "").strip()
                 if not ns:
                     continue
-                row = self.db.execute("select lineage_id from repos where namespace = ?", (ns,)).fetchone()
+                row = self.db.execute(
+                    "select id, lineage_id from scopes where namespace = ?", (ns,)
+                ).fetchone()
                 if not row:
                     failed.append({"namespace": ns, "error": "not-found"})
                     continue
                 try:
+                    sid = int(row["id"])
                     n = int(self.db.execute(
-                        "select count(*) as n from chunks where namespace = ?", (ns,)
+                        "select count(*) as n from chunks where scope_id = ?", (sid,)
                     ).fetchone()["n"])
-                    self.db.execute("delete from chunks where namespace = ?", (ns,))
-                    self.db.execute("delete from repos where namespace = ?", (ns,))
+                    self.db.execute("delete from scopes where id = ?", (sid,))
                     total_chunks += n
                     deleted.append(ns)
-                    lineage = row["lineage_id"]
-                    if lineage and lineage not in lineages:
+                    lineage = int(row["lineage_id"])
+                    if lineage not in lineages:
                         lineages.append(lineage)
                 except Exception as e:  # noqa: BLE001
                     failed.append({"namespace": ns, "error": f"{type(e).__name__}: {e}"})
@@ -813,36 +932,42 @@ class IndexStore:
                 self._invalidate()
         return {"deleted": deleted, "failed": failed, "lineages": lineages, "chunks": total_chunks}
 
+    def count_scopes(self):
+        with self.lock:
+            return int(self.db.execute("select count(*) as n from scopes").fetchone()["n"])
+
     def scope_overview(self, repo_id=None, kind=None, limit=50):
-        """overview() 的每一项再加 scope 元信息（给历史 /v1/scopes 与 /health）。"""
-        where = []
-        args = []
+        """overview() 的每一项再加 scope 元信息（给 /v1/scopes 与 /health）。"""
+        where, args = [], []
         if repo_id:
-            where.append("r.repo_id = ?")
-            args.append(repo_id)
+            where.append(repo_id_sql("s") + " = ?")
+            args.append(str(repo_id))
         if kind:
-            where.append("r.scope_kind = ?")
-            args.append(kind)
+            where.append("s.kind = ?")
+            args.append(str(kind))
         sql = (
-            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks,"
-            " (select url_norm from lineages l where l.id = r.lineage_id) as lineage_url"
-            " from repos r"
+            f"select s.*, l.repo_name as lineage_name, l.url_norm as lineage_url,"
+            f" (select count(*) from chunks c where c.scope_id = s.id) as chunks"
+            f" from scopes s join lineages l on l.id = s.lineage_id"
         )
         if where:
             sql += " where " + " and ".join(where)
-        sql += " order by r.updated_at desc limit ?"
+        sql += " order by s.updated_at desc limit ?"
         args.append(int(limit))
         with self.lock:
             rows = self.db.execute(sql, args).fetchall()
         out = []
         for r in rows:
             item = dict(r)
+            repo_id_v, _ = namespace_identity(r["namespace"])
+            item["repo_id"] = repo_id_v
+            item["repo_name"] = r["lineage_name"]
+            item["lineageUrl"] = r["lineage_url"] or ""
             item.update(self.counts(r["namespace"]))
             item.update(self.lineage_bytes(r["lineage_id"]))
-            item["lineageUrl"] = r["lineage_url"] or ""
             item["scope"] = {
-                "kind": r["scope_kind"] or "main",
-                "ref": r["scope_ref"],
+                "kind": r["kind"] or "main",
+                "ref": r["ref"],
                 "root": r["root_rel"],
                 "commit": r["commit_sha"],
                 "createdAt": r["created_at"],
@@ -850,37 +975,32 @@ class IndexStore:
             out.append(item)
         return out
 
-    def count_scopes(self):
-        with self.lock:
-            return int(self.db.execute("select count(*) as n from repos").fetchone()["n"])
-
     def _scope_where(self, repo_id=None, kind=None, q=None):
-        where = []
-        args = []
+        where, args = [], []
         if repo_id:
-            where.append("r.repo_id = ?")
+            where.append(repo_id_sql("s") + " = ?")
             args.append(str(repo_id))
         if kind:
-            where.append("r.scope_kind = ?")
+            where.append("s.kind = ?")
             args.append(str(kind))
         if q:
             needle = "%" + str(q).strip().lower() + "%"
-            where.append("(lower(coalesce(r.repo_name,'')) like ? or lower(r.repo_id) like ?"
-                         " or lower(r.namespace) like ? or lower(coalesce(r.scope_ref,'')) like ?"
-                         " or lower(coalesce(r.root_rel,'')) like ?"
-                         " or lower(r.chunk_fp) like ?)")
-            args.extend([needle] * 6)
+            where.append("(lower(coalesce(l.repo_name,'')) like ? or lower(s.namespace) like ?"
+                         " or lower(coalesce(s.ref,'')) like ? or lower(coalesce(s.root_rel,'')) like ?"
+                         " or lower(s.chunk_fp) like ?)")
+            args.extend([needle] * 5)
         return where, args
 
     def scope_page(self, repo_id=None, kind=None, q=None, sort="updated_at", order="desc",
                    limit=50, offset=0):
         """分页作用域列表 + 总数 + facets；只对当前页计算计数/占用。"""
         sort_map = {
-            "updated_at": "r.updated_at",
-            "created_at": "r.created_at",
-            "repo_name": "coalesce(r.repo_name, r.repo_id)",
-            "scope_kind": "r.scope_kind",
-            "chunks": "chunks",
+            "updated_at": "s.updated_at",
+            "created_at": "s.created_at",
+            "repo_name": "coalesce(l.repo_name, s.namespace)",
+            "repo_kind": "s.kind",
+            "kind": "s.kind",
+            "chunks": "s.chunk_count",
         }
         sort_col = sort_map.get(sort, sort_map["updated_at"])
         direction = "asc" if str(order).lower() == "asc" else "desc"
@@ -888,25 +1008,29 @@ class IndexStore:
         clause = (" where " + " and ".join(where)) if where else ""
         limit = max(1, min(int(limit), 200))
         offset = max(0, int(offset))
-        count_sql = "select count(*) as n from repos r" + clause
+        count_sql = "select count(*) as n from scopes s join lineages l on l.id = s.lineage_id" + clause
         data_sql = (
-            "select r.*, (select count(*) from chunks c where c.namespace = r.namespace) as chunks,"
-            " (select url_norm from lineages l where l.id = r.lineage_id) as lineage_url"
-            " from repos r" + clause + f" order by {sort_col} {direction}, r.namespace asc limit ? offset ?"
+            f"select s.*, l.repo_name as lineage_name, l.url_norm as lineage_url,"
+            f" (select count(*) from chunks c where c.scope_id = s.id) as chunks,"
+            f" {repo_id_sql('s')} as repo_id"
+            f" from scopes s join lineages l on l.id = s.lineage_id" + clause
+            + f" order by {sort_col} {direction}, s.namespace asc limit ? offset ?"
         )
         with self.lock:
             total = int(self.db.execute(count_sql, args).fetchone()["n"])
             rows = self.db.execute(data_sql, [*args, limit, offset]).fetchall()
             variant_rows = self.db.execute(
-                "select repo_id, scope_kind, coalesce(scope_ref,'') as scope_ref, count(*) as n"
-                " from repos group by repo_id, scope_kind, coalesce(scope_ref,'')"
+                f"select {repo_id_sql('s')} as repo_id, s.kind as kind, coalesce(s.ref,'') as ref,"
+                f" count(*) as n from scopes s group by 1, 2, 3"
             ).fetchall()
             repo_rows = self.db.execute(
-                "select repo_id, coalesce(repo_name,'') as repo_name, count(*) as n"
-                " from repos group by repo_id, coalesce(repo_name,'') order by n desc, repo_name asc"
+                f"select {repo_id_sql('s')} as repo_id,"
+                f" coalesce(max(l.repo_name), '') as repo_name, count(*) as n"
+                f" from scopes s join lineages l on l.id = s.lineage_id"
+                f" group by 1 order by n desc, repo_name asc"
             ).fetchall()
             kind_rows = self.db.execute(
-                "select scope_kind, count(*) as n from repos group by scope_kind"
+                "select kind, count(*) as n from scopes group by kind"
             ).fetchall()
             facets_repos = [
                 {"repoId": r["repo_id"], "repoName": r["repo_name"] or r["repo_id"], "count": int(r["n"])}
@@ -914,28 +1038,29 @@ class IndexStore:
             ]
             facets_kinds = {k: 0 for k in SCOPE_KINDS}
             for r in kind_rows:
-                key = r["scope_kind"] or "main"
+                key = r["kind"] or "main"
                 facets_kinds[key] = facets_kinds.get(key, 0) + int(r["n"])
             variants = {
-                (r["repo_id"], r["scope_kind"] or "main", r["scope_ref"] or ""): int(r["n"])
+                (r["repo_id"], r["kind"] or "main", r["ref"] or ""): int(r["n"])
                 for r in variant_rows
             }
             items = []
             for r in rows:
                 item = dict(r)
+                item["repo_name"] = r["lineage_name"]
+                item["lineageUrl"] = r["lineage_url"] or ""
                 item.update(self.counts(r["namespace"]))
                 item.update(self.lineage_bytes(r["lineage_id"]))
                 item["files"] = int(self.db.execute(
-                    "select count(distinct path) as n from chunks where namespace = ?", (r["namespace"],)
+                    "select count(distinct path) as n from chunks where scope_id = ?", (int(r["id"]),)
                 ).fetchone()["n"])
                 item["updatedAt"] = r["updated_at"]
-                item["lineageUrl"] = r["lineage_url"] or ""
                 item["variantCount"] = variants.get(
-                    (r["repo_id"], r["scope_kind"] or "main", r["scope_ref"] or ""), 1
+                    (r["repo_id"], r["kind"] or "main", r["ref"] or ""), 1
                 )
                 item["scope"] = {
-                    "kind": r["scope_kind"] or "main",
-                    "ref": r["scope_ref"],
+                    "kind": r["kind"] or "main",
+                    "ref": r["ref"],
                     "root": r["root_rel"],
                     "commit": r["commit_sha"],
                     "createdAt": r["created_at"],
@@ -944,24 +1069,24 @@ class IndexStore:
             # 重复身份检测：同一 repoName 出现多个 repoId 时，只有"有 git URL 的血统"是 canonical，
             # 其余标 duplicateIdentity（历史上读不到 origin 时回退成路径哈希会造成这种分裂）。
             id_rows = self.db.execute(
-                "select r.repo_id, coalesce(r.repo_name, r.repo_id) as name,"
-                " coalesce((select url_norm from lineages l where l.id = r.lineage_id), '') as url"
-                " from repos r"
+                f"select {repo_id_sql('s')} as repo_id,"
+                f" coalesce(l.repo_name, s.namespace) as name, coalesce(l.url_norm, '') as url"
+                f" from scopes s join lineages l on l.id = s.lineage_id"
             ).fetchall()
-            by_name = {}
-            for r in id_rows:
-                by_name.setdefault(r["name"], []).append((r["repo_id"], r["url"]))
-            canonical = {}
-            for name, lst in by_name.items():
-                ids = {rid for rid, _ in lst}
-                if len(ids) <= 1:
-                    continue
-                with_url = [rid for rid, url in lst if url]
-                canonical[name] = with_url[0] if with_url else lst[0][0]
-            for item in items:
-                name = item.get("repo_name") or item["repo_id"]
-                want = canonical.get(name)
-                item["duplicateIdentity"] = bool(want) and item["repo_id"] != want
+        by_name = {}
+        for r in id_rows:
+            by_name.setdefault(r["name"], []).append((r["repo_id"], r["url"]))
+        canonical = {}
+        for name, lst in by_name.items():
+            ids = {rid for rid, _ in lst}
+            if len(ids) <= 1:
+                continue
+            with_url = [rid for rid, url in lst if url]
+            canonical[name] = with_url[0] if with_url else lst[0][0]
+        for item in items:
+            name = item.get("repo_name") or item["repo_id"]
+            want = canonical.get(name)
+            item["duplicateIdentity"] = bool(want) and item["repo_id"] != want
         return {
             "scopes": items,
             "total": total,
@@ -977,20 +1102,23 @@ class IndexStore:
         if hit is not None:
             return dict(hit)
         with self.lock:
-            total = int(self.db.execute("select count(*) as n from repos").fetchone()["n"])
-            rows = self.db.execute("select scope_kind, count(*) as n from repos group by scope_kind").fetchall()
+            total = int(self.db.execute("select count(*) as n from scopes").fetchone()["n"])
+            rows = self.db.execute("select kind, count(*) as n from scopes group by kind").fetchall()
             by_kind = {k: 0 for k in SCOPE_KINDS}
             for r in rows:
-                key = r["scope_kind"] or "main"
+                key = r["kind"] or "main"
                 by_kind[key] = by_kind.get(key, 0) + int(r["n"])
             chunks = int(self.db.execute("select count(*) as n from chunks").fetchone()["n"])
             vectors = int(self.db.execute(
-                "select count(*) as n from chunks c join repos r on r.namespace = c.namespace"
-                " join vectors v on v.lineage_id = c.lineage_id and v.tag = r.tag and v.hash = c.hash"
+                "select count(*) as n from chunks c join scopes s on s.id = c.scope_id"
+                " join vectors v on v.tag = s.tag and v.hash = c.hash"
             ).fetchone()["n"])
-            body_bytes = int(self.db.execute("select coalesce(sum(length(body)),0) as n from blobs").fetchone()["n"])
-            # CAS 后向量负载唯一份在 v2（旧成员表 v 列已清空），体积按 v2 全局去重口径。
-            vector_bytes = int(self.db.execute("select coalesce(sum(length(v)),0) as n from vectors_v2").fetchone()["n"])
+            body_bytes = int(self.db.execute(
+                "select coalesce(sum(length(body)),0) as n from blobs"
+            ).fetchone()["n"])
+            vector_bytes = int(self.db.execute(
+                "select coalesce(sum(length(vec)),0) as n from vectors"
+            ).fetchone()["n"])
         out = {
             "total": total,
             "byKind": by_kind,
@@ -1023,8 +1151,8 @@ class IndexStore:
         """应用一次清单差分。
 
         payload:
-          repoId, chunkFp, url, lineage?, tag,
-          repoState, revision, mode: 'diff'|'full',
+          repoId, chunkFp, url, lineage?, tag, repoName,
+          repoState, revision, mode: 'diff'|'full', chunkCount,
           upsert: [{path, hash, chunks:[{hash,start,end}]}],
           remove: [path]
 
@@ -1037,22 +1165,25 @@ class IndexStore:
         mode = payload.get("mode") or "diff"
         client_rev = payload.get("revision")
         repo_state = payload.get("repoState") or ""
+        repo_name = payload.get("repoName") or payload.get("repo_name")
+        # scope.root 是子目录索引的相对路径；它参与 scopes_ident 唯一键，必须落库。
+        scope_meta = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+        root_rel = normalize_root(scope_meta.get("root")) or None
 
         lineage = payload.get("lineage")
         if not lineage:
-            lineage = self.ensure_lineage(url, repo_id)
-        repo_name = payload.get("repoName") or payload.get("repo_name")
-        cur = self.ensure_repo(namespace, repo_id, chunk_fp, lineage, tag=tag, repo_name=repo_name)
+            lineage = self.ensure_lineage(url, repo_id, repo_name)
+        cur = self.ensure_scope(namespace, repo_id, chunk_fp, int(lineage), tag=tag,
+                                repo_name=repo_name, root_rel=root_rel)
         # **血统在创建时定死**：后续同步即使不带 url/repoId，也绝不重新推导 ——
-        # 否则一个"最小载荷"（只发 repoState + revision）会凭空造出一个新血统，
-        # 表现是"刚 adopt 过的向量又变成缺失"。这个坑由自测用例抓出来。
-        lineage = cur["lineage_id"]
+        # 否则一个"最小载荷"（只发 repoState + revision）会凭空造出一个新血统。
+        lineage = int(cur["lineage_id"])
 
         # ① 状态指纹短路：指纹一致**且块数一致**才立刻回。
         # 只比指纹是不够的：指纹是客户端算的，若上一次同步是"空清单"（客户端本地早已建好索引、
         # 本轮 0 变更），服务端会把指纹记下来却一块内容都没有 —— 之后两端指纹永远相同，
         # 服务端就永远短路、永远 missing=0。实测被 ES 16 万块的预热直接踩中。
-        cur_chunks = cur.get("repo_state_chunks")
+        cur_chunks = cur.get("chunk_count")
         client_chunks = payload.get("chunkCount", -1)
         if (
             repo_state
@@ -1081,7 +1212,9 @@ class IndexStore:
 
         # ③ 切块配置不同 → 不同命名空间，绝不混写同一份 (path,start)
         if cur["chunk_fp"] != chunk_fp:
-            raise SyncDiverged(f"namespace {namespace} 的 chunkFp 不一致：服务端 {cur['chunk_fp']} vs 客户端 {chunk_fp}")
+            raise SyncDiverged(
+                f"namespace {namespace} 的 chunkFp 不一致：服务端 {cur['chunk_fp']} vs 客户端 {chunk_fp}"
+            )
 
         upsert = payload.get("upsert") or []
         remove = payload.get("remove") or []
@@ -1091,12 +1224,11 @@ class IndexStore:
                 raise SyncDiverged(f"path 同时出现在 upsert 与 remove：{f.get('path')}")
 
         now = int(time.time())
+        sid = int(cur["id"])
         # simhash 只作为候选线索：非法值直接忽略（老客户端/坏客户端不能拖垮 sync）。
         simhash = parse_simhash(payload.get("simhash"))
         # 跨血统冷启动复用只在 full + 客户端显式 adopt 开关 + reuse 非 off 时发生；
-        # 其他 sync（diff / 普通 full）**绝不做**候选查询，避免热路径多付一次全 repos 扫描。
-        # adopt 开关优先看 payload.adopt；客户端只发 reuse 时，"auto" 本身就是
-        # "达到阈值自动复制"的显式配置（suggest/off 都不复制）。
+        # 其他 sync（diff / 普通 full）**绝不做**候选查询，避免热路径多付一次全 scope 扫描。
         reuse = str(payload.get("reuse") or "").strip().lower()
         if payload.get("adopt") is not None:
             adopt_switch = _as_bool(payload.get("adopt"))
@@ -1109,39 +1241,41 @@ class IndexStore:
         with self.lock:
             # ① 删除：整文件移除 + 文件内不再存在的块
             for path in remove_set:
-                self.db.execute("delete from chunks where namespace = ? and path = ?", (namespace, path))
+                self.db.execute("delete from chunks where scope_id = ? and path = ?", (sid, str(path)))
             for f in upsert:
-                path = f["path"]
+                path = str(f["path"])
                 keep = [(c["start"], c["end"], c["hash"]) for c in (f.get("chunks") or [])]
-                self.db.execute("delete from chunks where namespace = ? and path = ?", (namespace, path))
+                self.db.execute("delete from chunks where scope_id = ? and path = ?", (sid, path))
                 for start, end, chash in keep:
                     self.db.execute(
-                        'insert or replace into chunks(namespace, lineage_id, path, start, "end", hash)'
-                        " values (?,?,?,?,?,?)",
-                        (namespace, lineage, path, int(start), int(end), chash),
+                        "insert or replace into chunks(scope_id, path, start_line, end_line, hash)"
+                        " values (?,?,?,?,?)",
+                        (sid, path, int(start), int(end), str(chash)),
                     )
-
             self.db.execute(
-                "update repos set revision = revision + 1, repo_state = ?, tag = coalesce(?, tag), updated_at = ?,"
-                " repo_state_chunks = (select count(*) from chunks where namespace = ?) where namespace = ?",
-                (repo_state, tag, now, namespace, namespace),
+                "update scopes set revision = revision + 1, repo_state = ?,"
+                " tag = coalesce(?, tag), updated_at = ?,"
+                " chunk_count = (select count(*) from chunks where scope_id = ?)"
+                " where id = ?",
+                (repo_state, tag, now, sid, sid),
             )
             self.db.execute("update lineages set last_seen = ? where id = ?", (now, lineage))
             self.db.commit()
-            self._invalidate()  # sync 改了数据 → 计数/体积缓存失效
-            rev = int(self.db.execute("select revision from repos where namespace = ?", (namespace,)).fetchone()["revision"])
-            # 每次 sync 都刷新 simhash（仅当本次带了合法值）
+            self._invalidate()
+            rev = int(self.db.execute(
+                "select revision from scopes where id = ?", (sid,)
+            ).fetchone()["revision"])
             if simhash:
                 try:
                     self._write_simhash(namespace, simhash, now=now)
                 except Exception:  # noqa: BLE001 —— simhash 落库失败不影响 sync
                     pass
-            # 写入目标 chunks 之后、计算 _missing 之前尝试 adopt；失败回滚并继续正常 sync。
+            # 写入目标 chunks 之后、计算 _missing 之前尝试 adopt；失败继续正常 sync。
             if adopt_requested and simhash:
                 try:
                     adopted = self._maybe_adopt(namespace, lineage, tag, simhash)
                 except Exception as e:  # noqa: BLE001 —— adopt 是尽力而为，绝不返回 500
-                    self.db.rollback()  # adopt 中途失败时不要留下半截事务
+                    self.db.rollback()
                     adopted = None
                     adopt_error = f"{type(e).__name__}: {e}"
             # suggest 只返回候选元信息，不复制；让调用方决定是否改 auto。
@@ -1153,7 +1287,14 @@ class IndexStore:
                     )
                 except Exception:  # noqa: BLE001 —— 候选只是建议
                     adopt_candidates = None
-            missing = self._missing(namespace, lineage, tag)
+            missing = self._missing(namespace, tag, limit=None, scope_id=sid)
+            # vector_count 是冗余计数（列表页/status 免 JOIN），每次 sync 刷新
+            self.db.execute(
+                "update scopes set vector_count = ? where id = ?",
+                (max(0, self._chunk_total(sid) - len(missing)), sid),
+            )
+            self.db.commit()
+            self._invalidate()
 
         out = {"revision": rev, "unchanged": False, "missing": missing, **self.counts(namespace)}
         if adopted:
@@ -1164,17 +1305,25 @@ class IndexStore:
             out["adoptError"] = adopt_error
         return out
 
-    def _missing(self, namespace, lineage, tag, limit=None):
-        """该命名空间里"没有向量的块"。tag 为空表示还没定过模型 → 全部视为缺。"""
+    def _chunk_total(self, scope_id):
+        return int(self.db.execute(
+            "select count(*) as n from chunks where scope_id = ?", (scope_id,)
+        ).fetchone()["n"])
+
+    def _missing(self, namespace, tag, limit=None, scope_id=None):
+        """该作用域里"没有当前 tag 向量"的块。tag 为空表示还没定过模型 → 全部视为缺。"""
+        sid = scope_id if scope_id is not None else self._scope_id(namespace)
+        if sid is None:
+            return []
         if not tag:
-            sql = "select c.hash from chunks c where c.namespace = ?"
-            args = [namespace]
+            sql = "select c.hash from chunks c where c.scope_id = ?"
+            args = [sid]
         else:
             sql = (
-                "select c.hash from chunks c where c.namespace = ? and not exists ("
-                " select 1 from vectors v where v.lineage_id = c.lineage_id and v.tag = ? and v.hash = c.hash)"
+                "select c.hash from chunks c where c.scope_id = ? and not exists ("
+                " select 1 from vectors v where v.tag = ? and v.hash = c.hash)"
             )
-            args = [namespace, tag]
+            args = [sid, str(tag)]
         if limit:
             sql += f" limit {int(limit)}"
         with self.lock:
@@ -1182,11 +1331,9 @@ class IndexStore:
 
     # ---------------------------------------------------------------- 正文
     def put_chunks(self, namespace, bodies):
-        """上传块正文（幂等）。返回 {accepted, deduped}。"""
-        repo = self.repo(namespace)
-        if not repo:
+        """上传块正文（幂等，内容寻址全局去重）。返回 {accepted, deduped}。"""
+        if self._scope_id(namespace) is None:
             raise SyncDiverged(f"未知命名空间：{namespace}")
-        lineage = repo["lineage_id"]
         now = int(time.time())
         accepted = deduped = 0
         with self.lock:
@@ -1195,58 +1342,61 @@ class IndexStore:
                 body = item.get("body")
                 if not h or body is None:
                     continue
-                cur = self.db.execute(
-                    "select 1 from blobs where lineage_id = ? and hash = ?", (lineage, h)
-                ).fetchone()
-                if cur:
+                h = str(h)
+                if self.db.execute("select 1 from blobs where hash = ?", (h,)).fetchone():
                     deduped += 1
                     continue
                 self.db.execute(
-                    "insert into blobs(lineage_id, hash, body, updated_at) values (?,?,?,?)",
-                    (lineage, h, body, now),
+                    "insert into blobs(hash, body, created_at) values (?,?,?)",
+                    (h, _to_blob(body), now),
                 )
                 accepted += 1
             self.db.commit()
-            self._invalidate()  # put_chunks 改了数据 → 计数/体积缓存失效
+            self._invalidate()
         return {"accepted": accepted, "deduped": deduped}
 
     def pending(self, namespace, tag, limit=64, order="spread"):
         """待嵌入的块（正文来自 blobs）。order='spread' 按 hash 排序 → 全仓均匀覆盖。"""
-        repo = self.repo(namespace)
-        if not repo:
+        sid = self._scope_id(namespace)
+        if sid is None:
             return []
-        clause = "c.namespace = ? and not exists (select 1 from vectors v where v.lineage_id = c.lineage_id and v.tag = ? and v.hash = c.hash)"
-        order_sql = "c.hash" if order == "spread" else "c.path, c.start"
+        clause = "c.scope_id = ? and not exists (select 1 from vectors v where v.tag = ? and v.hash = c.hash)"
+        order_sql = "c.hash" if order == "spread" else "c.path, c.start_line"
         sql = (
-            "select distinct c.hash, b.body from chunks c join blobs b"
-            " on b.lineage_id = c.lineage_id and b.hash = c.hash"
+            "select distinct c.hash as hash, b.body as body from chunks c join blobs b"
+            " on b.hash = c.hash"
             f" where {clause} order by {order_sql} limit ?"
         )
         with self.lock:
-            rows = self.db.execute(sql, (namespace, tag, int(limit))).fetchall()
-        return [{"hash": r["hash"], "body": r["body"]} for r in rows]
+            rows = self.db.execute(sql, (sid, str(tag or ""), int(limit))).fetchall()
+        return [{"hash": r["hash"], "body": _to_text(r["body"])} for r in rows]
 
-    def put_vectors(self, lineage, tag, pairs):
-        """pairs: [(hash, np.ndarray)]
+    def put_vectors(self, tag, pairs):
+        """pairs: [(hash, np.ndarray)] → `vectors(tag, hash)` 单表 upsert。
 
-        CAS 双写：v2 存全局唯一负载（(tag,hash) 主键）；旧 vectors 表只记
-        「该血统已完成此 (tag,hash) 的嵌入」成员关系，v 列写空串（负载不重复存）。
-        lineage 参数保留在签名里：成员语义与 ensure_capacity / adopt 判断仍按血统走。
+        内容寻址：同 (tag, hash) 全局只有一份，不再有"血统成员表"。
+        外键兜底：`vectors.hash` 指向 `blobs(hash)`，这里用 `insert ... select ... where exists`
+        保证"没有正文的块不会长出向量"（有向量没正文会让检索拿到空文本）。
         """
+        if not tag:
+            raise ValueError("put_vectors 需要 embedding tag")
+        tag = str(tag)
         now = int(time.time())
+        written = 0
         with self.lock:
             for h, vec in pairs:
-                v = np.asarray(vec, dtype=np.float32)
-                self.db.execute(
-                    "insert or replace into vectors_v2(tag, hash, dim, v, updated_at) values (?,?,?,?,?)",
-                    (tag, h, int(v.shape[0]), v.tobytes(), now),
+                v = np.asarray(vec, dtype=np.float32).reshape(-1)
+                cur = self.db.execute(
+                    "insert into vectors(tag, hash, dim, vec, updated_at)"
+                    " select ?, ?, ?, ?, ? where exists (select 1 from blobs where hash = ?)"
+                    " on conflict(tag, hash) do update set dim = excluded.dim,"
+                    " vec = excluded.vec, updated_at = excluded.updated_at",
+                    (tag, str(h), int(v.shape[0]), v.tobytes(), now, str(h)),
                 )
-                self.db.execute(
-                    "insert or replace into vectors(lineage_id, tag, hash, dim, v, updated_at) values (?,?,?,?,?,?)",
-                    (lineage, tag, h, int(v.shape[0]), b"", now),
-                )
+                written += max(0, int(cur.rowcount or 0))
             self.db.commit()
-            self._invalidate()  # put_vectors 改了数据 → 计数/体积缓存失效
+            self._invalidate()
+        return {"written": written}
 
     def missing_bodies(self, namespace, tag, limit=64, order="spread"):
         return self.pending(namespace, tag, limit, order)
@@ -1255,67 +1405,64 @@ class IndexStore:
     def matrix(self, namespace, tag):
         """返回 (hashes, matrix[float32, N×dim], meta{hash: (path,start,end)})。
 
+        取样路径（§4）：`scopes → chunks.hash 集合 → vectors(tag, hash)`。
         只读快照：调用方在锁外做点积，避免长时间占锁。
-
-        CAS：向量负载在 vectors_v2（(tag,hash) 全局唯一），查询改为「namespace 的
-        chunks → hash 集 → v2」，不再连血统。合并回退：旧 namespace 自己的 chunks
-        被 merge 去重清空、但 repos 行还挂着（revision > 0）时，按血统读目标
-        namespace 的块——这就是 merge 后旧 namespace 的「兼容读」路径。
         """
+        sid = self._scope_id(namespace)
+        if sid is None:
+            return [], np.empty((0, 0), dtype=np.float32), {}
         with self.lock:
             rows = self.db.execute(
-                "select c.hash, c.path, c.start, c.\"end\" as end, v.v, v.dim from chunks c"
-                " join vectors_v2 v on v.tag = ? and v.hash = c.hash"
-                " where c.namespace = ?",
-                (tag, namespace),
+                "select c.hash, c.path, c.start_line as start, c.end_line as end,"
+                " v.vec, v.dim from chunks c join vectors v"
+                " on v.tag = ? and v.hash = c.hash where c.scope_id = ?",
+                (str(tag or ""), sid),
             ).fetchall()
-            if not rows:
-                repo = self.db.execute(
-                    "select lineage_id, revision from repos where namespace = ?", (namespace,)
-                ).fetchone()
-                if repo and int(repo["revision"] or 0) > 0:
-                    rows = self.db.execute(
-                        "select c.hash, c.path, c.start, c.\"end\" as end, v.v, v.dim from chunks c"
-                        " join vectors_v2 v on v.tag = ? and v.hash = c.hash"
-                        " where c.lineage_id = ?",
-                        (tag, repo["lineage_id"]),
-                    ).fetchall()
         hashes = []
         meta = {}
         dim = rows[0]["dim"] if rows else 0
         mat = np.empty((len(rows), dim), dtype=np.float32) if rows else np.empty((0, 0), dtype=np.float32)
         for i, r in enumerate(rows):
-            mat[i] = np.frombuffer(r["v"], dtype=np.float32, count=r["dim"])
+            mat[i] = np.frombuffer(r["vec"], dtype=np.float32, count=r["dim"])
             hashes.append(r["hash"])
             meta[r["hash"]] = (r["path"], int(r["start"]), int(r["end"]))
         return hashes, mat, meta
 
-    def bodies(self, lineage, hashes):
-        if not hashes:
+    def bodies(self, hashes):
+        """按内容哈希直读正文（v2：blobs 是全局内容寻址表，不需要血统参数）。"""
+        wanted = [str(h) for h in (hashes or []) if h]
+        if not wanted:
             return {}
-        q = ",".join("?" * len(hashes))
+        out = {}
         with self.lock:
-            rows = self.db.execute(
-                f"select hash, body from blobs where lineage_id = ? and hash in ({q})", [lineage, *hashes]
-            ).fetchall()
-        return {r["hash"]: r["body"] for r in rows}
+            for part in _chunked(wanted):
+                q = ",".join("?" * len(part))
+                rows = self.db.execute(
+                    f"select hash, body from blobs where hash in ({q})", part
+                ).fetchall()
+                for r in rows:
+                    out[r["hash"]] = _to_text(r["body"])
+        return out
 
     def pending_count(self, namespace, tag):
         """便宜的待嵌入计数（给 /status 用，不要把整表捞出来）。"""
+        sid = self._scope_id(namespace)
+        if sid is None:
+            return 0
         if not tag:
-            sql = "select count(distinct c.hash) as n from chunks c where c.namespace = ?"
-            args = (namespace,)
+            sql = "select count(distinct c.hash) as n from chunks c where c.scope_id = ?"
+            args = (sid,)
         else:
             sql = (
-                "select count(distinct c.hash) as n from chunks c where c.namespace = ? and not exists ("
-                " select 1 from vectors v where v.lineage_id = c.lineage_id and v.tag = ? and v.hash = c.hash)"
+                "select count(distinct c.hash) as n from chunks c where c.scope_id = ? and not exists ("
+                " select 1 from vectors v where v.tag = ? and v.hash = c.hash)"
             )
-            args = (namespace, tag)
+            args = (sid, str(tag))
         with self.lock:
             return int(self.db.execute(sql, args).fetchone()["n"])
 
     def _invalidate(self):
-        """任何会改变 chunks/blobs/vectors 的操作后调用（sync/put_chunks/put_vectors/gc/adopt）。"""
+        """任何会改变 chunks/blobs/vectors 的操作后调用（sync/put_chunks/put_vectors/gc）。"""
         self._cache.clear()
 
     def counts(self, namespace):
@@ -1329,191 +1476,168 @@ class IndexStore:
         if hit is not None:
             return dict(hit)
         with self.lock:
-            chunks = self.db.execute("select count(*) as n from chunks where namespace = ?", (namespace,)).fetchone()["n"]
-            repo = self.db.execute("select lineage_id, tag from repos where namespace = ?", (namespace,)).fetchone()
-            if not repo:
+            sid = self._scope_id(namespace)
+            if sid is None:
                 out = {"chunks": 0, "vectors": 0, "coverage": 0.0}
                 self._cache[("counts", namespace)] = out
                 return dict(out)
+            tag = self.db.execute("select tag from scopes where id = ?", (sid,)).fetchone()["tag"]
+            chunks = self.db.execute(
+                "select count(*) as n from chunks where scope_id = ?", (sid,)
+            ).fetchone()["n"]
             vectors = self.db.execute(
                 "select count(*) as n from chunks c join vectors v"
-                " on v.lineage_id = c.lineage_id and v.tag = ? and v.hash = c.hash where c.namespace = ?",
-                (repo["tag"] or "", namespace),
+                " on v.tag = ? and v.hash = c.hash where c.scope_id = ?",
+                (tag or "", sid),
             ).fetchone()["n"]
-        out = {"chunks": int(chunks), "vectors": int(vectors), "coverage": round(vectors / chunks, 4) if chunks else 0.0}
+        out = {
+            "chunks": int(chunks),
+            "vectors": int(vectors),
+            "coverage": round(vectors / chunks, 4) if chunks else 0.0,
+        }
         self._cache[("counts", namespace)] = out
         return dict(out)
 
     def lineage_bytes(self, lineage):
-        """正文/向量占用。sum(length(...)) 在 16 万块上实测 0.5 s，同样必须缓存。
-
-        CAS 后向量负载在 v2（全局）：vectorBytes 按「该血统 chunks 引用到的 hash」
-        从 v2 归集——多血统共享同一份向量时不重复计数，数值即真实逻辑占用。
-        """
-        hit = self._cache.get(("bytes", lineage))
+        """正文/向量逻辑占用（按该血统 chunks 引用到的 hash 归集；共享内容不重复计数）。"""
+        lid = int(lineage)
+        hit = self._cache.get(("bytes", lid))
         if hit is not None:
             return dict(hit)
         with self.lock:
-            b = self.db.execute("select coalesce(sum(length(body)),0) as n from blobs where lineage_id = ?", (lineage,)).fetchone()["n"]
+            hq = "select c.hash from chunks c join scopes s on s.id = c.scope_id where s.lineage_id = ?"
+            b = self.db.execute(
+                f"select coalesce(sum(length(body)),0) as n from blobs where hash in ({hq})", (lid,)
+            ).fetchone()["n"]
             v = self.db.execute(
-                "select coalesce(sum(length(v.v)),0) as n from vectors_v2 v"
-                " where v.hash in (select hash from chunks where lineage_id = ?)",
-                (lineage,),
+                f"select coalesce(sum(length(vec)),0) as n from vectors where hash in ({hq})", (lid,)
             ).fetchone()["n"]
         out = {"bodyBytes": int(b), "vectorBytes": int(v), "totalBytes": int(b) + int(v)}
-        self._cache[("bytes", lineage)] = out
+        self._cache[("bytes", lid)] = out
         return dict(out)
 
     def vector_count(self, lineage, tag=None):
+        lid = int(lineage)
+        hq = "select c.hash from chunks c join scopes s on s.id = c.scope_id where s.lineage_id = ?"
         if tag:
-            sql, args = "select count(*) as n from vectors where lineage_id = ? and tag = ?", (lineage, tag)
+            sql, args = f"select count(*) as n from vectors where tag = ? and hash in ({hq})", (str(tag), lid)
         else:
-            sql, args = "select count(*) as n from vectors where lineage_id = ?", (lineage,)
+            sql, args = f"select count(*) as n from vectors where hash in ({hq})", (lid,)
         with self.lock:
             return int(self.db.execute(sql, args).fetchone()["n"])
 
     def tag_stats(self):
         """所有向量 tag 的条数与占用（换模型后旧 tag 会继续占空间，需要显式清理）。
 
-        CAS 后读 vectors_v2：条数/字节数是**全局去重后**的真实占用（旧表多血统
-        重复行会把同一份向量计 N 次）。
-
-        **必须缓存**：`sum(length(v))` 要扫全表（16 万行 ≈ 3 s），而 `/health` 每次都会调；
-        不缓存会让后台首页每次刷新都卡 3 秒。写向量/清 tag 后 _invalidate() 自动失效。
+        **必须缓存**：`sum(length(vec))` 要扫全表（16 万行 ≈ 3 s），而 `/health` 每次都会调。
         """
         hit = self._cache.get(("tagstats",))
         if hit is not None:
             return [dict(x) for x in hit]
         with self.lock:
             rows = self.db.execute(
-                "select tag, count(*) as vectors, coalesce(sum(length(v)),0) as bytes"
-                " from vectors_v2 group by tag order by vectors desc"
+                "select tag, count(*) as vectors, coalesce(sum(length(vec)),0) as bytes"
+                " from vectors group by tag order by vectors desc"
             ).fetchall()
         out = [{"tag": r["tag"], "vectors": int(r["vectors"]), "bytes": int(r["bytes"])} for r in rows]
         self._cache[("tagstats",)] = out
         return [dict(x) for x in out]
 
     def purge_tag_vectors(self, keep_tag=None, drop_tag=None):
-        """删指定 tag 的向量，或保留 keep_tag 删其余所有 tag；返回 {deleted}。
-
-        CAS：同时清 v2（负载）与旧 vectors（成员表），两者口径保持一致。
-        """
+        """删指定 tag 的向量，或保留 keep_tag 删其余所有 tag；返回 {deleted}。"""
         if drop_tag is None and keep_tag is None:
             raise ValueError("drop_tag 或 keep_tag 必须给一个")
         with self.lock:
             if drop_tag is not None:
-                cur = self.db.execute("delete from vectors_v2 where tag = ?", (drop_tag,))
-                self.db.execute("delete from vectors where tag = ?", (drop_tag,))
+                cur = self.db.execute("delete from vectors where tag = ?", (str(drop_tag),))
             else:
-                cur = self.db.execute("delete from vectors_v2 where tag is null or tag != ?", (keep_tag,))
-                self.db.execute("delete from vectors where tag is null or tag != ?", (keep_tag,))
+                cur = self.db.execute(
+                    "delete from vectors where tag is null or tag != ?", (str(keep_tag),)
+                )
             self.db.commit()
             self._invalidate()
             return {"deleted": int(cur.rowcount or 0), "keptTag": keep_tag, "droppedTag": drop_tag}
 
     def total_bytes(self):
-        """全库正文+向量占用；同样要缓存（1.6GB 全扫），写操作后由 _invalidate() 失效。
-
-        向量占用按 v2 全局去重口径统计（旧成员表 v 列已清空，不再重复计入）。
-        """
+        """全库正文+向量占用；同样要缓存（1.6 GB 全扫），写操作后由 _invalidate() 失效。"""
         hit = self._cache.get(("totalbytes",))
         if hit is not None:
             return int(hit)
         with self.lock:
             b = self.db.execute("select coalesce(sum(length(body)),0) as n from blobs").fetchone()["n"]
-            v = self.db.execute("select coalesce(sum(length(v)),0) as n from vectors_v2").fetchone()["n"]
+            v = self.db.execute("select coalesce(sum(length(vec)),0) as n from vectors").fetchone()["n"]
         total = int(b) + int(v)
         self._cache[("totalbytes",)] = total
         return total
 
     def hashes_in_lineage(self, lineage, tag=None):
-        sql = "select distinct hash from chunks where lineage_id = ?"
-        args = [lineage]
+        lid = int(lineage)
         if tag:
-            sql = "select distinct hash from vectors where lineage_id = ? and tag = ?"
-            args.append(tag)
+            sql = (
+                "select distinct c.hash from chunks c join scopes s on s.id = c.scope_id"
+                " join vectors v on v.tag = ? and v.hash = c.hash where s.lineage_id = ?"
+            )
+            args = [str(tag), lid]
+        else:
+            sql = "select distinct c.hash from chunks c join scopes s on s.id = c.scope_id where s.lineage_id = ?"
+            args = [lid]
         with self.lock:
             return [r["hash"] for r in self.db.execute(sql, args).fetchall()]
 
     # ---------------------------------------------------------------- 维护
-    def gc(self, lineage):
-        """删掉"血统内已无任何块引用"的 blob / vector（显式删除后立即回收）。"""
+    def gc(self, lineage=None):
+        """回收孤儿内容（§4）：全库没有任何 chunks 行引用的 blob / vector。
+
+        v2 的 blobs/vectors 是**全局内容寻址**的，所以 GC 也是全局的：删掉作用域后
+        （chunks 由外键 cascade 清），这里把不再被引用的 blob 与 vector 一并清掉。
+        `vectors.hash` 外键指向 `blobs(hash)`，删 blob 时向量会被级联删；这里仍显式
+        先删向量，为的是给出可报告的行数。
+        lineage 参数保留给调用方（删除某血统后的 GC 只是同一件全局清理）。
+        """
         with self.lock:
-            live = set(self.hashes_in_lineage(lineage))
-            dead_b = [
-                r["hash"]
-                for r in self.db.execute("select hash from blobs where lineage_id = ?", (lineage,)).fetchall()
-                if r["hash"] not in live
-            ]
-            dead_v = [
-                (r["tag"], r["hash"])
-                for r in self.db.execute(
-                    "select tag, hash from vectors where lineage_id = ?", (lineage,)
-                ).fetchall()
-                if r["hash"] not in live
-            ]
-            for h in dead_b:
-                self.db.execute("delete from blobs where lineage_id = ? and hash = ?", (lineage, h))
-            for tag, h in dead_v:
-                self.db.execute("delete from vectors where lineage_id = ? and tag = ? and hash = ?", (lineage, tag, h))
-            # CAS 负载回收：v2 行只有在**全库没有任何 chunks 行引用**该 hash 时才是孤儿。
-            # 不能按血统删——vectors_v2 是全局内容寻址存储，别的血统可能正引用着。
-            self.db.execute(
-                "delete from vectors_v2 where not exists (select 1 from chunks c where c.hash = vectors_v2.hash)"
-            )
+            dead_v = int(self.db.execute(
+                "select count(*) as n from vectors where hash not in (select hash from chunks)"
+            ).fetchone()["n"])
+            self.db.execute("delete from vectors where hash not in (select hash from chunks)")
+            dead_b = int(self.db.execute(
+                "select count(*) as n from blobs where hash not in (select hash from chunks)"
+            ).fetchone()["n"])
+            self.db.execute("delete from blobs where hash not in (select hash from chunks)")
             self.db.commit()
-            self._invalidate()  # gc 改了数据 → 计数/体积缓存失效
-        return {"blobs": len(dead_b), "vectors": len(dead_v)}
+            self._invalidate()
+        return {"blobs": dead_b, "vectors": dead_v}
 
     def adopt(self, from_lineage, to_lineage, hashes=None):
-        """显式跨血统借用（fork / vendor）：把源血统的 blob 与 vector 复制到目标血统。
+        """显式跨血统借用。
 
-        CAS：向量负载在 v2 全局共享，无需复制字节——这里按「源血统成员表有的 (tag,hash)」
-        在 v2 确保存在（正常都已存在），并给目标血统补成员行（v=''）。blobs 仍按血统复制。
+        v2 里 blobs / vectors 都是**全局内容寻址**：内容只存一份，目标作用域的 chunks
+        引用到同一个 hash 时天然就能拿到正文和向量，所以"复制字节"这件事不存在了。
+        这个方法退化为**核对**：返回源血统可达的 hash 里，已经有正文 / 已经有向量的条数。
         """
-        now = int(time.time())
+        src = self.lineage_resolve(from_lineage)
+        src = src[0] if isinstance(src, list) and src else None
+        if src is None:
+            return {"blobs": 0, "vectors": 0}
+        wanted = [str(h) for h in (hashes or []) if h]
+        if not wanted:
+            wanted = self.hashes_in_lineage(src)
+        if not wanted:
+            return {"blobs": 0, "vectors": 0}
+        blobs = vectors = 0
         with self.lock:
-            if hashes:
-                q = ",".join("?" * len(hashes))
-                b = self.db.execute(
-                    f"select hash, body from blobs where lineage_id = ? and hash in ({q})", [from_lineage, *hashes]
-                ).fetchall()
-                v = self.db.execute(
-                    f"select m.tag, m.hash, v2.dim, v2.v from vectors m"
-                    f" join vectors_v2 v2 on v2.tag = m.tag and v2.hash = m.hash"
-                    f" where m.lineage_id = ? and m.hash in ({q})",
-                    [from_lineage, *hashes],
-                ).fetchall()
-            else:
-                b = self.db.execute("select hash, body from blobs where lineage_id = ?", (from_lineage,)).fetchall()
-                v = self.db.execute(
-                    "select m.tag, m.hash, v2.dim, v2.v from vectors m"
-                    " join vectors_v2 v2 on v2.tag = m.tag and v2.hash = m.hash"
-                    " where m.lineage_id = ?",
-                    (from_lineage,),
-                ).fetchall()
-            for r in b:
-                self.db.execute(
-                    "insert or ignore into blobs(lineage_id, hash, body, updated_at) values (?,?,?,?)",
-                    (to_lineage, r["hash"], r["body"], now),
-                )
-            for r in v:
-                # v2 幂等确保（同 (tag,hash) 内容一致）；成员表补目标血统的行（v 不再重复存）
-                self.db.execute(
-                    "insert or ignore into vectors_v2(tag, hash, dim, v, updated_at) values (?,?,?,?,?)",
-                    (r["tag"], r["hash"], r["dim"], r["v"], now),
-                )
-                self.db.execute(
-                    "insert or ignore into vectors(lineage_id, tag, hash, dim, v, updated_at) values (?,?,?,?,?,?)",
-                    (to_lineage, r["tag"], r["hash"], r["dim"], b"", now),
-                )
-            self.db.commit()
-            self._invalidate()  # adopt 改了数据 → 计数/体积缓存失效
-        return {"blobs": len(b), "vectors": len(v)}
+            for part in _chunked(wanted):
+                q = ",".join("?" * len(part))
+                blobs += int(self.db.execute(
+                    f"select count(*) as n from blobs where hash in ({q})", part
+                ).fetchone()["n"])
+                vectors += int(self.db.execute(
+                    f"select count(*) as n from vectors where hash in ({q})", part
+                ).fetchone()["n"])
+        return {"blobs": blobs, "vectors": vectors}
 
     # ---------------------------------------------------------------- simhash 候选 / 精确 adopt
     def set_simhash(self, namespace, simhash, now=None):
-        """写入/更新一个命名空间的 simhash 元信息；非法值抛 ValueError（sync 内部不走这里）。"""
+        """写入/更新一个作用域的 simhash 元信息；非法值抛 ValueError（sync 内部不走这里）。"""
         data = parse_simhash(simhash)
         if data is None:
             raise ValueError("bad simhash: path/content 必须是 ≤16 位十六进制，v/files 必须合法")
@@ -1524,9 +1648,9 @@ class IndexStore:
         ts = int(time.time()) if now is None else int(now)
         with self.lock:
             cur = self.db.execute(
-                "update repos set simhash_path = ?, simhash_content = ?, simhash_algo = ?,"
+                "update scopes set simhash_path = ?, simhash_content = ?, simhash_algo = ?,"
                 " simhash_files = ?, simhash_at = ? where namespace = ?",
-                (data["path"], data["content"], data["algo"], data["files"], ts, namespace),
+                (data["path"], data["content"], data["algo"], data["files"], ts, str(namespace)),
             )
             self.db.commit()
         return dict(data) if cur.rowcount else None
@@ -1534,18 +1658,16 @@ class IndexStore:
     def similar_lineages(self, simhash_path, simhash_content, exclude_lineage, tag,
                          limit=MAX_ADOPT_CANDIDATES, min_similarity=SIMHASH_MIN_SIMILARITY,
                          algo=None, target_namespace=None):
-        """按 simhash 找相似血统（只返回元信息，**不返回正文**）。
+        """按 simhash 找相似作用域（只返回元信息，**不返回正文**）。
 
-        实现取"扫 repos 行"而不是"扫块"：有 simhash 的行数 = 血统/scope 数，量级远小于块数。
+        实现取"扫 scopes 行"而不是"扫块"：有 simhash 的行数 = 作用域数，量级远小于块数。
         每个 lineage 按 updated_at 取最新一行再过滤：
 
           - 不是 `exclude_lineage`；
-          - 候选 `repos.tag == tag`：tag 为空直接返回 []，模型不同就没有可复用的向量；
+          - 候选 `scopes.tag == tag`：tag 为空直接返回 []，模型不同就没有可复用的向量；
           - `algo` 给定时算法版本必须一致（算法升级后旧 simhash 不参与候选）；
           - `similarity = max(pathSimilarity, contentSimilarity) >= min_similarity`；
-          - 给了 `target_namespace` 且目标血统当前 tag 已有向量 → 返回 []（不是冷启动，没必要）。
-
-        结果按相似度降序，最多 `limit` 条。
+          - 给了 `target_namespace` 且目标血统当前 tag 已有向量 → 返回 []（不是冷启动）。
         """
         query_path = normalize_simhash_hex(simhash_path)
         query_content = normalize_simhash_hex(simhash_content)
@@ -1566,28 +1688,31 @@ class IndexStore:
         with self.lock:
             if target_namespace:
                 trow = self.db.execute(
-                    "select lineage_id from repos where namespace = ?", (target_namespace,)
+                    "select lineage_id from scopes where namespace = ?", (str(target_namespace),)
                 ).fetchone()
                 if trow:
                     if not exclude_lineage:
-                        exclude_lineage = trow["lineage_id"]
-                    # 目标血统已经有当前 tag 的向量 → 不是冷启动，做候选/adopt 没有收益
-                    if self.vector_count(trow["lineage_id"], tag) > 0:
+                        exclude_lineage = int(trow["lineage_id"])
+                    # v2 内容全局共享：目标"已经有向量"是常态（共享内容天然命中），
+                    # 所以冷启动闸门改成"还有没有任何块缺当前 tag 向量" —— 全覆盖才算非冷启动。
+                    if self.pending_count(str(target_namespace), tag) == 0:
                         return []
             rows = self.db.execute(
-                "select namespace, lineage_id, repo_id, repo_name, tag, simhash_path, simhash_content,"
-                " simhash_algo, simhash_files, updated_at from repos"
-                " where simhash_path is not null and simhash_content is not null"
-                " order by updated_at desc"
+                f"select s.namespace, s.lineage_id, s.tag, s.simhash_path, s.simhash_content,"
+                f" s.simhash_algo, s.simhash_files, s.updated_at, l.repo_name,"
+                f" {repo_id_sql('s')} as repo_id"
+                f" from scopes s join lineages l on l.id = s.lineage_id"
+                f" where s.simhash_path is not null and s.simhash_content is not null"
+                f" order by s.updated_at desc"
             ).fetchall()
         seen = set()
         out = []
         for r in rows:
-            lineage = r["lineage_id"]
-            if not lineage or lineage in seen:
+            lineage = int(r["lineage_id"])
+            if lineage in seen:
                 continue
-            seen.add(lineage)  # 同 lineage 只取 updated_at 最大的那行（SQL 已倒序）
-            if exclude_lineage and lineage == exclude_lineage:
+            seen.add(lineage)
+            if exclude_lineage and lineage == int(exclude_lineage):
                 continue
             if (r["tag"] or "") != tag:
                 continue
@@ -1618,29 +1743,32 @@ class IndexStore:
         return out[:limit]
 
     def adopt_overlap(self, namespace, from_lineage, tag):
-        """目标 namespace 的 distinct chunk hash ∩ 候选 lineage 当前 tag vectors。
+        """目标作用域的 distinct chunk hash 里"已经有当前 tag 向量"的比例。
 
+        v2 的向量是全局内容寻址的，所以这个比例就是目标作用域的覆盖率；
+        `from_lineage` 参数保留在签名里（调用方语义是"从哪个候选比对"）。
         返回 `{hashes, overlap, matched, targetHashes, targetChunks}`；
-        `overlap = matched / targetHashes`（分母用 distinct hash：vectors 是按 hash 存的，
-        同内容多路径不该稀释比例；`targetChunks` 另给 chunk 行数，便于诊断）。
+        `overlap = matched / targetHashes`（分母用 distinct hash）。
         """
         tag = "" if tag is None else str(tag)
         empty = {"hashes": [], "overlap": 0.0, "matched": 0, "targetHashes": 0, "targetChunks": 0}
-        if not tag or not from_lineage or not namespace:
+        if not tag or not namespace:
+            return empty
+        sid = self._scope_id(namespace)
+        if sid is None:
             return empty
         with self.lock:
             row = self.db.execute(
                 "select count(*) as chunks, count(distinct hash) as hashes"
-                " from chunks where namespace = ?", (namespace,)
+                " from chunks where scope_id = ?", (sid,)
             ).fetchone()
             total_hashes = int(row["hashes"] or 0)
             if not total_hashes:
                 return empty
             rows = self.db.execute(
                 "select distinct c.hash from chunks c join vectors v"
-                " on v.lineage_id = ? and v.tag = ? and v.hash = c.hash"
-                " where c.namespace = ?",
-                (from_lineage, tag, namespace),
+                " on v.tag = ? and v.hash = c.hash where c.scope_id = ?",
+                (tag, sid),
             ).fetchall()
         hashes = [r["hash"] for r in rows]
         return {
@@ -1652,22 +1780,17 @@ class IndexStore:
         }
 
     def adopt_hashes(self, from_lineage, to_lineage, hashes, tag, namespace=None):
-        """只复制"目标确实拥有 + 候选 blobs/vectors 都有 + 当前 tag"的精确内容哈希。
+        """核对"目标确实拥有 + 当前 tag 向量已存在"的精确内容哈希。
 
-        - `namespace` 给定时再做一层防御：只允许该 namespace chunks 里确实存在的 hash；
-        - **绝不复制** chunks / repos / path：目标搜索永远只查自己的 namespace；
-        - `insert or ignore` 保证幂等；只有 blob 与当前 tag vector 同时在的 hash 才复制，
-          避免造出"有向量没正文"的块；
-        - 返回 `{blobs, vectors, hashes, truncated}`：blobs/vectors 是**实际新插入**行数，
-          hashes 是命中的精确 hash 数（>50000 会截断并置 truncated）。
+        v2 里内容全局共享，"复制"退化为**确认可复用**：
+          - `namespace` 给定时只认该作用域 chunks 里确实存在的 hash；
+          - 返回 `{blobs, vectors, hashes, truncated}`：blobs/vectors 是**可复用**条数
+            （有正文 / 有当前 tag 向量）。
         """
         tag = "" if tag is None else str(tag)
         if not tag:
             raise ValueError("adopt_hashes 需要当前 embedding tag")
-        if not from_lineage or not to_lineage or from_lineage == to_lineage:
-            return {"blobs": 0, "vectors": 0, "hashes": 0, "truncated": False}
-        wanted = []
-        seen = set()
+        wanted, seen = [], set()
         for h in hashes or []:
             h = "" if h is None else str(h)
             if not h or h in seen:
@@ -1678,76 +1801,47 @@ class IndexStore:
         wanted = wanted[:MAX_ADOPT_HASHES]
         if not wanted:
             return {"blobs": 0, "vectors": 0, "hashes": 0, "truncated": truncated}
-
-        now = int(time.time())
-        inserted_blobs = inserted_vectors = eligible_total = 0
         with self.lock:
             if namespace:
+                sid = self._scope_id(namespace)
+                if sid is None:
+                    return {"blobs": 0, "vectors": 0, "hashes": 0, "truncated": truncated}
                 allowed = set()
                 for part in _chunked(wanted):
                     q = ",".join("?" * len(part))
                     rows = self.db.execute(
-                        f"select distinct hash from chunks where namespace = ? and lineage_id = ?"
-                        f" and hash in ({q})",
-                        [namespace, to_lineage, *part],
+                        f"select distinct hash from chunks where scope_id = ? and hash in ({q})",
+                        [sid, *part],
                     ).fetchall()
                     allowed.update(r["hash"] for r in rows)
                 wanted = [h for h in wanted if h in allowed]
+            blobs = vectors = eligible = 0
             for part in _chunked(wanted):
                 q = ",".join("?" * len(part))
-                bodies = {
-                    r["hash"]: r["body"]
-                    for r in self.db.execute(
-                        f"select hash, body from blobs where lineage_id = ? and hash in ({q})",
-                        [from_lineage, *part],
-                    ).fetchall()
-                }
-                vectors = {
-                    r["hash"]: r
-                    for r in self.db.execute(
-                        f"select m.hash, v2.dim, v2.v from vectors m"
-                        f" join vectors_v2 v2 on v2.tag = m.tag and v2.hash = m.hash"
-                        f" where m.lineage_id = ? and m.tag = ? and m.hash in ({q})",
-                        [from_lineage, tag, *part],
-                    ).fetchall()
-                }
+                have_b = {r["hash"] for r in self.db.execute(
+                    f"select hash from blobs where hash in ({q})", part
+                ).fetchall()}
+                have_v = {r["hash"] for r in self.db.execute(
+                    f"select hash from vectors where tag = ? and hash in ({q})", [tag, *part]
+                ).fetchall()}
                 for h in part:
-                    if h not in bodies or h not in vectors:
-                        continue
-                    eligible_total += 1
-                    cur = self.db.execute(
-                        "insert or ignore into blobs(lineage_id, hash, body, updated_at) values (?,?,?,?)",
-                        (to_lineage, h, bodies[h], now),
-                    )
-                    inserted_blobs += max(0, int(cur.rowcount or 0))
-                    vec = vectors[h]
-                    # CAS：v2 全局幂等确保负载；成员表补目标血统行（v 不再重复存）。
-                    # inserted_vectors 记的是**成员表**实际新插入数（幂等语义与旧实现一致）。
-                    cur = self.db.execute(
-                        "insert or ignore into vectors_v2(tag, hash, dim, v, updated_at) values (?,?,?,?,?)",
-                        (tag, h, vec["dim"], vec["v"], now),
-                    )
-                    cur = self.db.execute(
-                        "insert or ignore into vectors(lineage_id, tag, hash, dim, v, updated_at)"
-                        " values (?,?,?,?,?,?)",
-                        (to_lineage, tag, h, vec["dim"], b"", now),
-                    )
-                    inserted_vectors += max(0, int(cur.rowcount or 0))
-            self.db.commit()
-            self._invalidate()  # adopt 改了 data → 计数/体积缓存失效
-        return {"blobs": inserted_blobs, "vectors": inserted_vectors,
-                "hashes": eligible_total, "truncated": truncated}
+                    if h in have_b:
+                        blobs += 1
+                    if h in have_v:
+                        vectors += 1
+                    if h in have_b and h in have_v:
+                        eligible += 1
+        return {"blobs": blobs, "vectors": vectors, "hashes": eligible, "truncated": truncated}
 
     def _maybe_adopt(self, namespace, lineage, tag, simhash):
-        """sync 内部的 best-effort adopt（候选 → overlap 门槛 → 精确 hash 复制）。
+        """sync 内部的 best-effort adopt（候选 → overlap 门槛 → 精确 hash 核对）。
 
         调用方负责 catch/rollback；这里只负责按阈值挑第一个合格候选。
         返回 `{fromLineage, fromRepo, similarity, overlap, blobs, vectors}` 或 None。
         """
         if not simhash or not namespace or not lineage or not tag:
             return None
-        target = self.repo(namespace)
-        if not target:
+        if not self.scope(namespace):
             return None
         candidates = self.similar_lineages(
             simhash["path"], simhash["content"], lineage, tag,
@@ -1777,75 +1871,47 @@ class IndexStore:
             return adopted
         return None
 
-    # ---------------------------------------------------------------- 向量 CAS / 血统合并（T-261120-dedup）
-    def cas_migrate(self, vacuum=False):
-        """已打开的 store 上的幂等迁移入口（测试/诊断用）。
-
-        部署期一次性迁移走模块级 `cas_migrate_db()`（独立连接，脚本 --migrate-cas）；
-        服务启动不再自动迁移（__init__ 的 gate 只认 v2，旧 schema 报错提示）。
-        `vacuum=True` 顺带 VACUUM + checkpoint 回收文件体积。
-        """
-        with self.lock:
-            core = cas_migrate_conn(self.db)
-            self._invalidate()
-        out = {
-            "schema": "cas",
-            "v2Vectors": core["v2Vectors"],
-            "legacyMembershipRows": core["legacyMembershipRows"],
-            "legacyBlobRowsCleared": core["cleared"],
-            "migrated": core["migrated"],
-        }
-        if vacuum:
-            with self.lock:
-                try:
-                    self.db.execute("pragma wal_checkpoint(truncate)")
-                    self.db.execute("vacuum")
-                    out["vacuumed"] = True
-                except Exception as e:  # noqa: BLE001 —— vacuum 失败不影响迁移结果
-                    out["vacuumError"] = f"{type(e).__name__}: {e}"
-        return out
-
-    def cas_status(self):
-        """当前向量存储形态（诊断 / 测试用，只读）。"""
-        with self.lock:
-            state = self.db.execute("select value from meta where key = 'vectors_schema'").fetchone()
-            v2_total = int(self.db.execute("select count(*) as n from vectors_v2").fetchone()["n"])
-            legacy_total = int(self.db.execute("select count(*) as n from vectors").fetchone()["n"])
-        return {
-            "schema": (state["value"] if state else None),
-            "v2Vectors": v2_total,
-            "legacyMembershipRows": legacy_total,
-        }
-
+    # ---------------------------------------------------------------- 血统治理
     def lineage_resolve(self, token):
         """把 repoId / lineageId / namespace 解析成血统 id 集合（去重，保序）。
 
-        - 精确命中 lineages.id → 就这一个；
-        - 命中 repos.repo_id → 该 repoId 下所有血统（一个 repoId 裂成多个血统正是要合的对象）；
-        - 命中 repos.namespace → 该 scope 的血统；
+        - 精确命中 lineages.id（整数或数字串）→ 就这一个；
+        - 命中 namespace（含 @ 或 #）→ 该作用域的血统；
+        - 命中 lineage repo_name / scopes 里 namespace 前缀的 repoId → 这些血统；
         - 都没命中 → ValueError（端点层转 400/404）。
         """
-        token = str(token or "").strip()
-        if not token:
+        raw = "" if token is None else str(token).strip()
+        if not raw:
             raise ValueError("empty lineage token")
-        out = []
-        seen = set()
+        out, seen = [], set()
         with self.lock:
-            row = self.db.execute("select id from lineages where id = ?", (token,)).fetchone()
-            if row:
-                out.append(row["id"])
-            else:
-                for r in self.db.execute(
-                    "select distinct lineage_id from repos where repo_id = ? order by lineage_id", (token,)
-                ).fetchall():
-                    if r["lineage_id"] and r["lineage_id"] not in seen:
-                        out.append(r["lineage_id"])
-                if not out:
-                    row = self.db.execute(
-                        "select lineage_id from repos where namespace = ?", (token,)
-                    ).fetchone()
-                    if row:
-                        out.append(row["lineage_id"])
+            if _DIGITS_RE.match(raw):
+                row = self.db.execute("select id from lineages where id = ?", (int(raw),)).fetchone()
+                if row:
+                    out.append(int(row["id"]))
+            if not out and ("@" in raw or "#" in raw):
+                row = self.db.execute(
+                    "select lineage_id from scopes where namespace = ?", (raw,)
+                ).fetchone()
+                if row:
+                    out.append(int(row["lineage_id"]))
+            if not out:
+                rows = self.db.execute(
+                    "select distinct s.lineage_id from scopes s join lineages l on l.id = s.lineage_id"
+                    " where lower(coalesce(l.repo_name,'')) = lower(?) or "
+                    + repo_id_sql("s") + " = ?",
+                    (raw, raw),
+                ).fetchall()
+                for r in rows:
+                    lid = int(r["lineage_id"])
+                    if lid not in seen:
+                        out.append(lid)
+            if not out:
+                row = self.db.execute(
+                    "select id from lineages where lower(repo_name) = lower(?)", (raw,)
+                ).fetchone()
+                if row:
+                    out.append(int(row["id"]))
         if not out:
             raise ValueError(f"unknown lineage/repo/namespace: {token}")
         for x in out:
@@ -1855,132 +1921,90 @@ class IndexStore:
     def lineage_merge(self, from_tokens, into_token):
         """把若干血统合并进目标血统（一次事务，BEGIN IMMEDIATE）。
 
-        每个源血统依次执行：
-          ① repos 行改挂靠：`update repos set lineage_id = into`（namespace 不动——
-             旧 namespace 继续有效，客户端照常同步/检索，只是血统归一）；
-          ② chunks：先把源血统的行改挂到 into，再按 (lineage_id, hash) 去重——
-             源 namespace 里 hash 已存在于 into 侧的行直接删（保留目标行的
-             path/start/end）；源独有的块保留；
-          ③ blobs：源血统的正文 insert-or-ignore 搬进 into（目标缺的补上），
-             然后删除源血统全部行（同 hash 同内容，纯冗余）；
-          ④ vectors 旧成员表：源血统的 (tag,hash) 成员行搬进 into 后删除源行；
-             v2 是全局内容寻址存储，无需删（本来就不带血统）；
-          ⑤ lineages.merged_into/merged_at 记录软标记（旧血统行不物理删，观察期 7 天，
-             过期后 lineage_hard_clean 物理清理）。
+        v2 不兼容历史数据 → **不留墓碑**：直接把源血统的作用域改挂到目标血统，
+        然后物理删掉源血统行（如果它已经空了）。blobs / vectors 是全局内容寻址的，
+        合并根本不涉及搬运或删除。
 
-        返回 `{merged, from, into, dropped_chunks, dropped_vectors, dropped_blobs, freed_bytes}`。
-        freed_bytes = 删除的 blob 正文字节 + 旧成员表 v 列字节 + 删除 chunk 行的 path 字节
-        （v2 不变；文件体积实际回收要 VACUUM，见 cas_migrate）。
+        返回 `{merged, from, into, droppedChunks, droppedVectors, droppedBlobs, freedBytes}`：
+        v2 下三个 dropped* 恒为 0（内容全局唯一），保留字段是为了响应契约稳定。
         """
         into_ids = self.lineage_resolve(into_token)
         if len(into_ids) != 1:
             raise ValueError(f"into 必须唯一解析成一个血统，得到 {len(into_ids)} 个：{into_token}")
-        into = into_ids[0]
-        # into 自身已被合并过 → 沿 merged_into 链落到最终目标（≤8 跳防环），
-        # 否则数据会挂在一个「指向别处的空血统」上。
-        hops = 0
-        with self.lock:
-            while hops < 8:
-                row = self.db.execute(
-                    "select merged_into from lineages where id = ?", (into,)
-                ).fetchone()
-                if row is None or not row["merged_into"]:
-                    break
-                into = row["merged_into"]
-                hops += 1
+        into = int(into_ids[0])
         from_lineages = []
         for tok in from_tokens or []:
             for lid in self.lineage_resolve(tok):
                 if lid != into and lid not in from_lineages:
-                    from_lineages.append(lid)
+                    from_lineages.append(int(lid))
         now = int(time.time())
-        dropped_chunks = dropped_vectors = dropped_blobs = 0
-        freed_bytes = 0
         merged = []
         with self.lock:
             if self.db.in_transaction:
                 self.db.commit()
             self.db.execute("begin immediate")
             try:
-                # 目标血统行必须存在（防御：namespace 反推可能在别处建过血统）
                 if not self.db.execute("select 1 from lineages where id = ?", (into,)).fetchone():
                     raise ValueError(f"target lineage not found: {into}")
                 for src in from_lineages:
-                    # 已合并过的血统跳过（幂等；merged_into 链一并防环）
-                    row = self.db.execute(
-                        "select merged_into from lineages where id = ?", (src,)
-                    ).fetchone()
-                    if row is None:
+                    if not self.db.execute("select 1 from lineages where id = ?", (src,)).fetchone():
                         continue
-                    if (row["merged_into"] or ""):
-                        merged.append({"from": src, "skipped": "already-merged", "into": row["merged_into"]})
-                        continue
-                    src_namespaces = [
+                    namespaces = [
                         r["namespace"]
                         for r in self.db.execute(
-                            "select namespace from repos where lineage_id = ?", (src,)
+                            "select namespace from scopes where lineage_id = ?", (src,)
                         ).fetchall()
                     ]
-                    # ① repos 改挂靠（namespace 保留）
-                    self.db.execute(
-                        "update repos set lineage_id = ?, updated_at = ? where lineage_id = ?",
-                        (into, now, src),
-                    )
-                    # ② chunks 改挂靠 + 按 (lineage, hash) 去重：源 namespace 行里
-                    #    hash 已在 into 侧存在的直接删（保留目标行的 path/start/end）
-                    self.db.execute(
-                        "update chunks set lineage_id = ? where lineage_id = ?", (into, src)
-                    )
-                    if src_namespaces:
-                        q = ",".join("?" * len(src_namespaces))
-                        path_bytes = int(self.db.execute(
-                            f"select coalesce(sum(length(path)),0) as n from chunks"
-                            f" where lineage_id = ? and namespace in ({q})"
-                            f" and hash in (select hash from chunks where lineage_id = ?"
-                            f" and namespace not in ({q}))",
-                            [into, *src_namespaces, into, *src_namespaces],
-                        ).fetchone()["n"])
-                        cur = self.db.execute(
-                            f"delete from chunks where lineage_id = ? and namespace in ({q})"
-                            f" and hash in (select hash from chunks where lineage_id = ?"
-                            f" and namespace not in ({q}))",
-                            [into, *src_namespaces, into, *src_namespaces],
-                        )
-                        dropped = int(cur.rowcount or 0)
-                        dropped_chunks += dropped
-                        freed_bytes += path_bytes
-                    # ③ blobs：目标缺的补上，然后删源血统全部行（同 hash 同内容纯冗余）
-                    blob_bytes = int(self.db.execute(
-                        "select coalesce(sum(length(body)),0) as n from blobs where lineage_id = ?",
-                        (src,),
-                    ).fetchone()["n"])
-                    self.db.execute(
-                        "insert or ignore into blobs(lineage_id, hash, body, updated_at)"
-                        " select ?, hash, body, updated_at from blobs where lineage_id = ?",
-                        (into, src),
-                    )
-                    cur = self.db.execute("delete from blobs where lineage_id = ?", (src,))
-                    dropped_blobs += int(cur.rowcount or 0)
-                    freed_bytes += blob_bytes
-                    # ④ 旧成员表：搬 (tag,hash) 成员行进 into（v 列已空，纯成员关系）
-                    vec_bytes = int(self.db.execute(
-                        "select coalesce(sum(length(v)),0) as n from vectors where lineage_id = ?",
-                        (src,),
-                    ).fetchone()["n"])
-                    self.db.execute(
-                        "insert or ignore into vectors(lineage_id, tag, hash, dim, v, updated_at)"
-                        " select ?, tag, hash, dim, v, ? from vectors where lineage_id = ?",
-                        (into, now, src),
-                    )
-                    cur = self.db.execute("delete from vectors where lineage_id = ?", (src,))
-                    dropped_vectors += int(cur.rowcount or 0)
-                    freed_bytes += vec_bytes
-                    # ⑤ 软标记（不物理删，观察期）
-                    self.db.execute(
-                        "update lineages set merged_into = ?, merged_at = ? where id = ?",
-                        (into, now, src),
-                    )
-                    merged.append({"from": src, "into": into, "namespaces": src_namespaces})
+                    dropped = 0
+                    for ns in namespaces:
+                        try:
+                            self.db.execute(
+                                "update scopes set lineage_id = ?, updated_at = ? where namespace = ?",
+                                (into, now, ns),
+                            )
+                        except sqlite3.IntegrityError:
+                            # 目标血统里已经有**等价作用域**（ident 唯一索引冲突）：
+                            # v2 的作用域身份不含 repoId，两个克隆看到的同一 (kind,ref,root,chunkFp)
+                            # 就是同一个快照 → 先并块（目标优先，同 path+start 保留目标行），
+                            # 再把源作用域行删掉（不留墓碑、不留重复身份）。
+                            src_row = self.db.execute(
+                                "select id, kind, ref, coalesce(root_rel,'') as root_rel, chunk_fp"
+                                " from scopes where namespace = ?", (ns,)
+                            ).fetchone()
+                            if not src_row:
+                                continue
+                            src_sid = int(src_row["id"])
+                            ident = self.db.execute(
+                                "select id from scopes where lineage_id = ? and kind = ? and ref = ?"
+                                " and coalesce(root_rel,'') = ? and chunk_fp = ?",
+                                (into, src_row["kind"], src_row["ref"], src_row["root_rel"],
+                                 src_row["chunk_fp"]),
+                            ).fetchone()
+                            if ident:
+                                tid = int(ident["id"])
+                                before = int(self.db.execute(
+                                    "select count(*) from chunks where scope_id = ?", (src_sid,)
+                                ).fetchone()[0])
+                                # v2 的 chunks 主键是 (scope_id, path, start_line)：同一 (path,start)
+                                # 只能留一份内容 → 目标优先，源侧同位置的行按"被丢弃"计数。
+                                cur = self.db.execute(
+                                    "insert or ignore into chunks(scope_id, path, start_line,"
+                                    " end_line, hash) select ?, path, start_line, end_line, hash"
+                                    " from chunks where scope_id = ?",
+                                    (tid, src_sid),
+                                )
+                                dropped += max(0, before - int(cur.rowcount or 0))
+                                self.db.execute(
+                                    "update scopes set chunk_count = (select count(*) from chunks"
+                                    " where scope_id = ?) where id = ?", (tid, tid),
+                                )
+                            self.db.execute("delete from scopes where namespace = ?", (ns,))
+                    self.db.execute("delete from lineages where id = ?", (src,))
+                    merged.append({
+                        "from": src, "into": into, "namespaces": namespaces,
+                        "droppedScopes": dropped,
+                    })
+                self.db.execute("update lineages set last_seen = ? where id = ?", (now, into))
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -1990,107 +2014,69 @@ class IndexStore:
             "merged": merged,
             "from": from_lineages,
             "into": into,
-            "droppedChunks": dropped_chunks,
-            "droppedVectors": dropped_vectors,
-            "droppedBlobs": dropped_blobs,
-            "freedBytes": freed_bytes,
-            "freedMb": round(freed_bytes / 1024 / 1024, 2),
+            "droppedChunks": 0,
+            "droppedVectors": 0,
+            "droppedBlobs": 0,
+            "droppedScopes": sum(int(m.get("droppedScopes") or 0) for m in merged),
+            "freedBytes": 0,
+            "freedMb": 0.0,
         }
 
     def lineage_duplicates(self):
         """重复血统检测（只读，纯 SQL 聚合 + 内存分组）。
 
-        按 repo_name（缺省回退 repo_id）分组；组内 ≥2 个未合并血统才算重复组；
-        再按 chunk_fp 聚类——same_chunk_fp=true 表示组内共享同一 chunk 指纹（同内容仓库
-        裂了多个血统，合并收益最大），false 表示同 repo 但内容指纹不同（合并需人工确认，
-        bug-analysis 场景）。suggest = chunks 最大的那个（并列取 last_seen 新者）。
-        每组附估算（estimates）：将删 chunk 行数 / 旧成员表向量行数 / 可释放字节
-        （按 blob 平均大小 × 重复 blob 行 + 向量 v2 平均大小估算——成员表 v 已空）。
+        按 repo_name 分组；组内 ≥2 个血统才算重复组；再按 chunk_fp 聚类——
+        same_chunk_fp=true 表示组内共享同一 chunk 指纹（同内容仓库裂了多个血统，
+        合并收益最大）。suggest = chunks 最多的那个（并列取 last_seen 新者）。
+
+        v2 下 blobs/vectors 全局唯一，合并本身不释放空间，所以 estimates 全为 0
+        （字段保留给控制台展示口径）。
         """
         with self.lock:
             rows = self.db.execute(
-                "select coalesce(nullif(r.repo_name,''), r.repo_id) as grp, r.repo_id,"
-                " r.repo_name, r.namespace, r.lineage_id, r.chunk_fp,"
-                " coalesce((select l.last_seen from lineages l where l.id = r.lineage_id), r.updated_at) as last_seen,"
-                " coalesce((select l.merged_into from lineages l where l.id = r.lineage_id), '') as merged_into"
-                " from repos r"
+                "select coalesce(nullif(l.repo_name,''), s.namespace) as grp,"
+                f" {repo_id_sql('s')} as repo_id, s.namespace, s.lineage_id, s.chunk_fp,"
+                " coalesce(l.last_seen, s.updated_at) as last_seen"
+                " from scopes s join lineages l on l.id = s.lineage_id"
             ).fetchall()
             chunk_counts = {
-                r["lineage_id"]: int(r["n"])
+                int(r["scope_id"]): int(r["n"])
                 for r in self.db.execute(
-                    "select lineage_id, count(*) as n from chunks group by lineage_id"
+                    "select scope_id, count(*) as n from chunks group by scope_id"
                 ).fetchall()
             }
-            avg_blob = self.db.execute(
-                "select coalesce(avg(length(body)),0) as n from blobs"
-            ).fetchone()["n"]
-            avg_vec = self.db.execute(
-                "select coalesce(avg(length(v)),0) as n from vectors_v2"
-            ).fetchone()["n"]
+            scope_ids = {
+                r["namespace"]: int(r["id"])
+                for r in self.db.execute("select id, namespace from scopes").fetchall()
+            }
         groups = {}
         for r in rows:
             groups.setdefault(r["grp"], []).append(r)
         out = []
         for grp, lst in groups.items():
-            live = [r for r in lst if not r["merged_into"]]
             lids = []
-            for r in live:
-                if r["lineage_id"] not in lids:
-                    lids.append(r["lineage_id"])
+            for r in lst:
+                if int(r["lineage_id"]) not in lids:
+                    lids.append(int(r["lineage_id"]))
             if len(lids) < 2:
                 continue
             by_lid = {}
-            for r in live:
-                by_lid.setdefault(r["lineage_id"], {
-                    "id": r["lineage_id"],
-                    "repoId": r["repo_id"],
-                    "repoIds": [],
-                    "namespaces": [],
-                    "chunkFps": [],
-                    "chunks": 0,
-                    "lastSeen": 0,
+            for r in lst:
+                lid = int(r["lineage_id"])
+                item = by_lid.setdefault(lid, {
+                    "id": lid, "repoId": r["repo_id"], "repoIds": [],
+                    "namespaces": [], "chunkFps": [], "chunks": 0, "lastSeen": 0,
                 })
-                item = by_lid[r["lineage_id"]]
                 if r["repo_id"] not in item["repoIds"]:
                     item["repoIds"].append(r["repo_id"])
                 if r["namespace"] not in item["namespaces"]:
                     item["namespaces"].append(r["namespace"])
                 if r["chunk_fp"] not in item["chunkFps"]:
                     item["chunkFps"].append(r["chunk_fp"])
+                item["chunks"] += int(chunk_counts.get(scope_ids.get(r["namespace"], -1), 0))
                 item["lastSeen"] = max(item["lastSeen"], int(r["last_seen"] or 0))
-            lineages = []
-            for lid in lids:
-                item = by_lid[lid]
-                item["chunks"] = int(chunk_counts.get(lid, 0))
-                lineages.append(item)
-            suggest = max(
-                lineages,
-                key=lambda x: (x["chunks"], x["lastSeen"]),
-            )
-            # 估算：每个非建议血统里，hash 已存在于建议血统的 chunk 行是纯冗余；
-            # blobs/vectors 成员行同理按行数 × 平均大小估释放字节。
-            sugg_hashes_q = (
-                "select count(*) as n from chunks c where c.lineage_id = ?"
-                " and c.hash in (select hash from chunks where lineage_id = ?)"
-            )
-            est_chunks = est_vectors = est_blobs = 0
-            for item in lineages:
-                if item["id"] == suggest["id"]:
-                    continue
-                est_chunks += int(self.db.execute(
-                    sugg_hashes_q, (item["id"], suggest["id"])
-                ).fetchone()["n"])
-                est_vectors += int(self.db.execute(
-                    "select count(*) as n from vectors m where m.lineage_id = ?"
-                    " and exists (select 1 from vectors m2 where m2.lineage_id = ?"
-                    " and m2.tag = m.tag and m2.hash = m.hash)",
-                    (item["id"], suggest["id"]),
-                ).fetchone()["n"])
-                est_blobs += int(self.db.execute(
-                    "select count(*) as n from blobs b where b.lineage_id = ?"
-                    " and b.hash in (select hash from blobs where lineage_id = ?)",
-                    (item["id"], suggest["id"]),
-                ).fetchone()["n"])
+            lineages = [by_lid[lid] for lid in lids]
+            suggest = max(lineages, key=lambda x: (x["chunks"], x["lastSeen"]))
             chunk_fps = sorted({fp for item in lineages for fp in item["chunkFps"]})
             out.append({
                 "repoName": grp,
@@ -2107,63 +2093,44 @@ class IndexStore:
                 "same_chunk_fp": len(chunk_fps) == 1,
                 "chunkFps": chunk_fps,
                 "estimates": {
-                    "droppedChunks": est_chunks,
-                    "droppedVectors": est_vectors,
-                    "droppedBlobs": est_blobs,
-                    "freedBytes": int(est_blobs * avg_blob),
-                    "freedMb": round(est_blobs * avg_blob / 1024 / 1024, 2),
+                    "droppedChunks": 0, "droppedVectors": 0, "droppedBlobs": 0,
+                    "freedBytes": 0, "freedMb": 0.0,
                 },
             })
         out.sort(key=lambda g: (-max(x["chunks"] for x in g["lineages"]), g["repoName"]))
         return {"groups": out, "generatedAt": int(time.time())}
 
-    def lineage_hard_clean(self, min_age_days=7, force=False):
-        """观察期物理清理：删 merged_into 已置、且 merged_at 超过 min_age_days 的血统行。
+    def cleanup_lineages(self, min_age_days=0, force=False):
+        """清理空血统（没有任何作用域的血统行）。
 
-        只删 lineages 行与其残留数据（merge 正常不应有残留，防御性兜底）；
-        不动 repos/chunks/vectors_v2——它们在 merge 时已归到目标血统名下。
-        force=True 无视观察期。返回 {removed: [...], removedCount}。
+        v2 没有 merged_into 墓碑，所以"观察期物理清理"整段消失；剩余价值是删掉
+        `register_scope()` 早期按 repoId 兜底创建、后来从未挂上作用域的空血统。
+        `min_age_days` 给定时只删创建时间早于该天数的空血统；`force=True` 无视年龄。
         """
-        min_age_days = int(min_age_days or 7)
+        min_age_days = int(min_age_days or 0)
         cutoff = int(time.time()) - min_age_days * 86400
         removed = []
         with self.lock:
-            if force:
-                rows = self.db.execute(
-                    "select id from lineages where merged_into is not null"
-                ).fetchall()
-            else:
-                rows = self.db.execute(
-                    "select id from lineages where merged_into is not null"
-                    " and coalesce(merged_at, 0) <= ?",
-                    (cutoff,),
-                ).fetchall()
+            sql = ("select l.id from lineages l where not exists"
+                   " (select 1 from scopes s where s.lineage_id = l.id)")
+            rows = self.db.execute(sql).fetchall()
             for r in rows:
-                lid = r["id"]
-                # 防御兜底：merge 后不应再有挂在该血统上的行，有则一并清
-                self.db.execute("delete from chunks where lineage_id = ?", (lid,))
-                self.db.execute("delete from blobs where lineage_id = ?", (lid,))
-                self.db.execute("delete from vectors where lineage_id = ?", (lid,))
+                lid = int(r["id"])
+                if not force and min_age_days > 0:
+                    row = self.db.execute(
+                        "select created_at from lineages where id = ?", (lid,)
+                    ).fetchone()
+                    if row and int(row["created_at"] or 0) > cutoff:
+                        continue
                 self.db.execute("delete from lineages where id = ?", (lid,))
                 removed.append(lid)
             self.db.commit()
-            self._invalidate()
+            if removed:
+                self._invalidate()
         return {"removed": removed, "removedCount": len(removed)}
 
     def overview(self):
-        with self.lock:
-            rows = self.db.execute(
-                "select r.namespace, r.lineage_id, r.repo_id, r.chunk_fp, r.revision, r.tag,"
-                " (select count(*) from chunks c where c.namespace = r.namespace) as chunks"
-                " from repos r order by r.updated_at desc limit 50"
-            ).fetchall()
-        out = []
-        for r in rows:
-            item = dict(r)
-            item.update(self.counts(r["namespace"]))
-            item.update(self.lineage_bytes(r["lineage_id"]))
-            out.append(item)
-        return out
+        return self.scope_overview(limit=50)
 
     def close(self):
         with self.lock:
@@ -2171,15 +2138,53 @@ class IndexStore:
 
 
 # ---------------------------------------------------------------- 经验资产（memories）
-# 契约见 docs/memories.md：经验（"在什么仓库/镜头下、何时、做什么、为什么"）是独立于
-# 代码块的资产，生命周期与作用域快照无关（scope 删除不应连带删经验），因此表挂在
-# IndexStore 同一个 SQLite 文件里（一套 WAL/备份/迁移机制），但由 MemoryStore 自己管理。
+# 契约见 docs/schema-v2.md §2：
+#   · id 是 INTEGER PRIMARY KEY，对外 `exp-%06d`（format_memory_id / parse_memory_id）；
+#   · 幂等键是 fingerprint = sha1(category|workflow|lens|what)；
+#   · 状态只有 active / retired；冲突是独立表 memory_conflicts（一等公民）；
+#   · 证据是 excerpts(sha256 唯一) + memory_excerpts 多对多；
+#   · memories_fts 由触发器维护，不再手工双写。
 
-MEMORY_STATUSES = ("active", "retired", "conflicting")
-_MEMORY_ID_RE = re.compile(r"^exp-\d{6}$")
+MEMORY_STATUSES = ("active", "retired")
+CONFLICT_STATUSES = ("open", "keep_a", "keep_b", "keep_both", "merged")
+MEMORY_EVENTS = ("created", "updated", "hit", "adopted", "conflicted", "resolved", "retired", "restored")
+MEMORY_ID_PREFIX = "exp-"
+_MEMORY_ID_RE = re.compile(r"^exp-\d{1,9}$", re.IGNORECASE)
 _MEMORY_MAX_TEXT = 8000          # 单字段字符上限（what/when_expr/why 与代码块正文同量级）
+_EXCERPT_MAX_TEXT = 2048         # 证据片段上限（docs/schema-v2.md §2：≤2KB）
 MEMORY_LIST_MAX_LIMIT = 200      # 列表分页上限
 MEMORY_SEARCH_MAX_TOPK = 20      # search top_k 上限
+
+
+def format_memory_id(seq):
+    """整数主键 → 对外 `exp-000123`（6 位补零，超过 6 位自然加宽）。"""
+    return f"{MEMORY_ID_PREFIX}{int(seq):06d}"
+
+
+def parse_memory_id(value):
+    """对外 id / 整数 → 整数主键。非法抛 ValueError（端点层转 404/400）。"""
+    if isinstance(value, bool):
+        raise ValueError(f"bad memory id: {value!r}")
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError(f"bad memory id: {value}")
+        return value
+    s = str(value or "").strip()
+    if not s:
+        raise ValueError("empty memory id")
+    if _MEMORY_ID_RE.match(s):
+        return int(s[len(MEMORY_ID_PREFIX):])
+    if _DIGITS_RE.match(s) and int(s) > 0:
+        return int(s)
+    raise ValueError(f"bad memory id: {s}")
+
+
+def memory_fingerprint(category, workflow, lens, what):
+    """幂等键：sha1(category|workflow|lens|what)；workflow 缺失按空串参与。"""
+    raw = "|".join([
+        str(category or ""), str(workflow or ""), str(lens or ""), str(what or ""),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def _mem_clean_text(value, field):
@@ -2189,17 +2194,12 @@ def _mem_clean_text(value, field):
     return text[:_MEMORY_MAX_TEXT]
 
 
-class MemoryStore:
-    """memories / memories_fts / memories_vec 的读写与混合检索。
+def _json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
-    - id：`exp-` + 6 位十进制自增（首个 exp-000001），达到 999999 后继续加位数
-      （exp-1000000），测试与服务都不会因此失败；
-    - FTS：memories_fts(what, when_expr, why)，trigram 分词 → 中文连续段/英文子串
-      都按「原文包含」匹配；查询侧由 `_fts_match_expr` 统一加引号防注入；
-    - 向量：memories_vec(mid, dim, v) 同步写（经验量小，不走 governor），
-      检索时全量读出暴力点积（L2 归一化后 = cosine），条目多后可换索引结构；
-    - 融合：与代码检索同法的 RRF（k=20，server.RRF_K），`rrf = 1/(20+rank)` 按名次相加。
-    """
+
+class MemoryStore:
+    """memories / memory_vectors / excerpts / memory_excerpts / memory_conflicts / memory_events。"""
 
     def __init__(self, db):
         # db 可以是现成连接（测试直连 store.db 用）或库文件路径。
@@ -2208,14 +2208,15 @@ class MemoryStore:
         # "cannot start a transaction within a transaction" → HTTP 500（admin 并发实测触发）。
         # 独立连接后并发由 SQLite 文件锁 + timeout 兜底，表级操作仍受 self.lock 串行。
         if isinstance(db, str):
-            self.db = sqlite3.connect(db, check_same_thread=False, timeout=30)
-            # IndexStore 的连接带 row_factory=Row，这里必须对齐——
-            # 类内大量 row["列名"] 取值，默认 tuple 工厂会直接 TypeError（并发烟测实测）。
-            self.db.row_factory = sqlite3.Row
+            self.db = _connect(db)
             self._owns_conn = True
         else:
             self.db = db  # 与调用方共用连接（由各方法加锁）
             self._owns_conn = False
+            try:
+                self.db.execute("pragma foreign_keys = on")
+            except Exception:  # noqa: BLE001
+                pass
         self.lock = threading.RLock()
 
     def close(self):
@@ -2223,76 +2224,156 @@ class MemoryStore:
         if self._owns_conn:
             try:
                 self.db.close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
-    # ------------------------------------------------------------ id / 行工具
-    def _next_id(self):
-        # 单线程调用方已持 self.lock；max(len(id)) 取最大数字后缀（含跨位数）。
-        row = self.db.execute(
-            "select id from memories where length(id) = (select max(length(id)) from memories)"
-            " order by cast(substr(id, 5) as integer) desc limit 1"
-        ).fetchone()
-        seq = int(row["id"][4:]) + 1 if row else 1
-        return f"exp-{seq:06d}"
-
+    # ------------------------------------------------------------ 行工具
     @staticmethod
-    def _row_to_memory(row, with_stats=True):
-        try:
-            evidence = json.loads(row["evidence"]) if row["evidence"] else []
-        except (TypeError, ValueError):
-            evidence = []
-        if not isinstance(evidence, list):
-            evidence = []
-        try:
-            trigger_words = json.loads(row["trigger_words"]) if row["trigger_words"] else None
-        except (TypeError, ValueError, IndexError):
-            trigger_words = None
-        if not isinstance(trigger_words, list):
-            trigger_words = None
+    def _row_to_memory(row, with_stats=True, evidence=None):
+        keys = row.keys()
         item = {
-            "id": row["id"],
-            "repo": row["repo"],
+            "id": format_memory_id(row["id"]),
+            "category": row["category"],
+            "categoryLabel": CATEGORY_LABELS.get(row["category"], row["category"]),
             "lens": row["lens"],
+            "lensLabel": LENS_LABELS.get(row["lens"], row["lens"]),
+            "workflow": row["workflow"] if "workflow" in keys else None,
+            "repo": row["repo"] if "repo" in keys else None,
             "what": row["what"],
             "when_expr": row["when_expr"] or "",
             "why": row["why"] or "",
-            "evidence": evidence,
+            "evidence": list(evidence or []),
             "status": row["status"],
-            "source": row["source"] or "pipeline",
+            "source": row["source"] or "",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
-        if "against_id" in row.keys() and row["against_id"]:
-            item["against_id"] = row["against_id"]
-        if trigger_words is not None:
-            item["trigger_words"] = trigger_words
+        if "audit" in keys and row["audit"]:
+            try:
+                item["audit"] = json.loads(row["audit"])
+            except (TypeError, ValueError):
+                item["audit"] = None
         if with_stats:
             item.update({
-                "stats_hits": int(row["stats_hits"] or 0),
-                "stats_adopted": int(row["stats_adopted"] or 0),
+                "stats_hits": int(row["hits"] or 0),
+                "stats_adopted": int(row["adopted"] or 0),
                 "last_hit_at": row["last_hit_at"],
             })
         return item
 
+    def _evidence_for(self, memory_ids):
+        """批量取证据（避免 list/get 的 N+1）：{int_id: [excerpt dict]}。"""
+        ids = [int(x) for x in memory_ids]
+        if not ids:
+            return {}
+        q = ",".join("?" * len(ids))
+        rows = self.db.execute(
+            f"select me.memory_id, e.id, e.sha256, e.text, e.kind, e.archive_ref,"
+            f" e.captured_at, e.expires_at from memory_excerpts me"
+            f" join excerpts e on e.id = me.excerpt_id where me.memory_id in ({q})"
+            f" order by e.id",
+            ids,
+        ).fetchall()
+        out = {i: [] for i in ids}
+        for r in rows:
+            out[int(r["memory_id"])].append({
+                "sha256": r["sha256"],
+                "text": r["text"],
+                "kind": r["kind"],
+                "archive_ref": r["archive_ref"],
+                "captured_at": int(r["captured_at"]),
+                "expires_at": r["expires_at"],
+            })
+        return out
+
+    def _hydrate(self, rows, with_stats=True):
+        evidence = self._evidence_for([r["id"] for r in rows])
+        return [self._row_to_memory(r, with_stats, evidence.get(int(r["id"]))) for r in rows]
+
     def get(self, memory_id, with_stats=True):
-        # RLock：读也上锁——HTTP 多线程共享一条连接，无锁读会与写事务交错（并发实测 500）
+        mid = parse_memory_id(memory_id)
         with self.lock:
-            row = self.db.execute("select * from memories where id = ?", (memory_id,)).fetchone()
-            return self._row_to_memory(row, with_stats) if row else None
+            row = self.db.execute("select * from memories where id = ?", (mid,)).fetchone()
+            if not row:
+                return None
+            evidence = self._evidence_for([mid]).get(mid, [])
+        return self._row_to_memory(row, with_stats, evidence)
+
+    # ------------------------------------------------------------ 证据（CAS）
+    def _sha256(self, text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _put_excerpt(self, item, now):
+        """一条 evidence → excerpts 行（sha256 CAS），返回 excerpt_id。"""
+        if isinstance(item, str):
+            item = {"text": item}
+        if not isinstance(item, dict):
+            raise ValueError("evidence item must be a string or an object")
+        raw_text = item.get("text", item.get("quote"))
+        if raw_text is None:
+            pointer = item.get("archive_ref") or item.get("issue") or item.get("mr")
+            if not pointer:
+                raise ValueError("evidence item must carry text / archive_ref / issue / mr")
+            raw_text = str(pointer)
+        text = str(raw_text).strip()[:_EXCERPT_MAX_TEXT]
+        if not text:
+            raise ValueError("evidence text required")
+        sha = item.get("sha256")
+        if not isinstance(sha, str) or not re.match(r"^[0-9a-f]{64}$", sha.strip().lower()):
+            sha = self._sha256(text)
+        else:
+            sha = sha.strip().lower()
+        kind = str(item.get("kind") or "quote").strip()[:16] or "quote"
+        archive_ref = item.get("archive_ref")
+        archive_ref = str(archive_ref).strip()[:200] if archive_ref else None
+        cur = self.db.execute(
+            "insert or ignore into excerpts(sha256, text, kind, archive_ref, captured_at)"
+            " values (?,?,?,?,?)",
+            (sha, text, kind, archive_ref, now),
+        )
+        if not int(cur.rowcount or 0):
+            row = self.db.execute("select id from excerpts where sha256 = ?", (sha,)).fetchone()
+            return int(row["id"]), False
+        return int(cur.lastrowid), True
+
+    def _link_evidence(self, memory_id, evidence):
+        """重建一条经验的证据关联（幂等：同 sha256 只存一份，重复引用同一行）。
+
+        `evidence` 为 None **或空数组**时不改动现有证据 —— API 的幂等 upsert 默认不传
+        evidence，若把空数组当"清空"会一提交就抹掉已有证据（实测踩到）。
+        """
+        if evidence is None or evidence == []:
+            return 0
+        if not isinstance(evidence, list):
+            raise ValueError("evidence must be an array of {text|archive_ref|issue|mr}")
+        now = int(time.time())
+        self.db.execute("delete from memory_excerpts where memory_id = ?", (int(memory_id),))
+        linked = 0
+        for item in evidence:
+            eid, _new = self._put_excerpt(item, now)
+            self.db.execute(
+                "insert or ignore into memory_excerpts(memory_id, excerpt_id) values (?,?)",
+                (int(memory_id), int(eid)),
+            )
+            linked += 1
+        return linked
 
     # ------------------------------------------------------------ 事件时间线
     def record_event(self, memory_id, event, detail=None, at=None):
         """写一条 memory_events（best-effort：失败不拖垮主流程，返回是否成功）。
 
-        event ∈ created | updated | hit | adopted | conflicted | resolved | retired。
+        event ∈ created | updated | hit | adopted | conflicted | resolved | retired | restored。
         """
         try:
-            with self.lock:  # 调用方多为已持锁（RLock 可重入）；旁路直调也安全
+            mid = parse_memory_id(memory_id)
+        except ValueError:
+            return False
+        try:
+            with self.lock:
                 self.db.execute(
                     "insert into memory_events(memory_id, at, event, detail) values (?,?,?,?)",
-                    (memory_id, int(at if at is not None else time.time()), str(event or "")[:32],
-                     json.dumps(detail, ensure_ascii=False) if detail is not None else None),
+                    (mid, int(at if at is not None else time.time()), str(event or "")[:32],
+                     _json_dumps(detail) if detail is not None else None),
                 )
                 self.db.commit()
             return True
@@ -2300,198 +2381,319 @@ class MemoryStore:
             return False
 
     def timeline(self, memory_id):
-        """组装条目事件时间线（时间倒序）。
+        """条目事件时间线（时间倒序）。**不合成**：没有事件就是空数组（v2 无存量）。
 
-        真实事件来自 memory_events；存量数据没有事件时用 created_at / updated_at /
-        stats_* 推一条合成 timeline（synthesized 标注），保证老条目 timeline 不为空。
         返回 None 表示条目不存在。
         """
+        try:
+            mid = parse_memory_id(memory_id)
+        except ValueError:
+            return None
         with self.lock:
-            row = self.db.execute("select * from memories where id = ?", (memory_id,)).fetchone()
-            if not row:
+            if not self.db.execute("select 1 from memories where id = ?", (mid,)).fetchone():
                 return None
-            events = []
-            for r in self.db.execute(
+            rows = self.db.execute(
                 "select at, event, detail from memory_events where memory_id = ?"
-                " order by at desc, id desc", (memory_id,)
-            ).fetchall():
-                try:
-                    detail = json.loads(r["detail"]) if r["detail"] else None
-                except (TypeError, ValueError):
-                    detail = None
-                item = {"event": r["event"], "at": int(r["at"])}
-                if detail is not None:
-                    item["detail"] = detail
-                events.append(item)
-        if not events:
-            # 合成：created（必）+ adopted（若有采纳）+ hit（last_hit_at，若有）
-            synthesized = []
-            if row["created_at"]:
-                synthesized.append({"event": "created", "at": int(row["created_at"]),
-                                    "detail": {"synthesized": True}})
-            adopted = int(row["stats_adopted"] or 0)
-            if adopted:
-                synthesized.append({"event": "adopted",
-                                    "at": int(row["last_hit_at"] or row["updated_at"]),
-                                    "detail": {"count": adopted, "synthesized": True}})
-            elif row["last_hit_at"]:
-                synthesized.append({"event": "hit", "at": int(row["last_hit_at"]),
-                                    "detail": {"synthesized": True}})
-            events = sorted(synthesized, key=lambda e: -e["at"])
+                " order by at desc, id desc", (mid,)
+            ).fetchall()
+        events = []
+        for r in rows:
+            try:
+                detail = json.loads(r["detail"]) if r["detail"] else None
+            except (TypeError, ValueError):
+                detail = None
+            item = {"event": r["event"], "at": int(r["at"])}
+            if detail is not None:
+                item["detail"] = detail
+            events.append(item)
         return events
 
     # ------------------------------------------------------------ upsert
-    def upsert(self, repo, lens, what, when_expr, why, evidence, source, status):
-        """创建或更新一条经验（幂等：重复提交同一条返回 action=updated，不产生新行）。
+    def upsert(self, repo, lens, what, when_expr, why, evidence, source, status,
+               category=None, workflow=None, audit=None, exp_job_id=None):
+        """创建或更新一条经验（幂等键 = fingerprint；重复提交返回 action=updated）。
 
-        返回 (payload, action)。向量嵌入在 server 层做（需要 embedder 会话）。
+        参数保持 API 层既有顺序（repo/lens/what/when_expr/why/evidence/source/status），
+        v2 追加 category/workflow/audit/exp_job_id。
+        返回 ({"id": "exp-000123", "fingerprint": "..."}, "created"|"updated")。
         """
-        repo = str(repo or "").strip()
         lens = str(lens or "").strip()
-        if not repo or not lens:
-            raise ValueError("repo required" if not repo else "lens required")
+        if lens not in LENS_LABELS:
+            raise ValueError("lens must be one of jargon / index / logic")
+        category = str(category or "business").strip()
+        if category not in CATEGORIES:
+            raise ValueError(f"category must be one of {' / '.join(CATEGORIES)}（process 不入库）")
+        workflow = None if workflow in (None, "") else str(workflow).strip()[:64]
+        repo = None if repo in (None, "") else str(repo).strip()[:200]
         what = _mem_clean_text(what, "what")
         when_expr = str(when_expr or "").strip()[:_MEMORY_MAX_TEXT]
         why = str(why or "").strip()[:_MEMORY_MAX_TEXT]
-        if not isinstance(evidence, list):
-            raise ValueError("evidence must be an array of {archive_ref|issue|mr}")
-        for ev in evidence:
-            if not isinstance(ev, dict) or not any(
-                str(ev.get(k) or "").strip() for k in ("archive_ref", "issue", "mr")
-            ):
-                raise ValueError("evidence item must carry archive_ref / issue / mr")
-        source = str(source or "").strip() or "pipeline"
+        source = str(source or "").strip()[:64] or "manual"
+        if status in (None, ""):
+            status = "active"
         if status not in MEMORY_STATUSES:
-            raise ValueError("status must be one of active / retired / conflicting")
+            raise ValueError("status must be one of active / retired")
+        if audit is not None and not isinstance(audit, (dict, str)):
+            raise ValueError("audit must be a JSON object")
+        fp = memory_fingerprint(category, workflow, lens, what)
+        audit_json = None
+        if audit is not None:
+            audit_json = audit if isinstance(audit, str) else _json_dumps(audit)
+            audit_json = audit_json[:60000]
+        job_id = None
+        if exp_job_id is not None:
+            try:
+                job_id = int(exp_job_id)
+            except (TypeError, ValueError):
+                job_id = None
         now = int(time.time())
         with self.lock:
-            existing = self.db.execute(
-                "select id from memories where repo = ? and lens = ? and what = ?",
-                (repo, lens, what),
+            if job_id is not None and not self.db.execute(
+                "select 1 from exp_jobs where id = ?", (job_id,)
+            ).fetchone():
+                job_id = None  # 外键兜底：未知 job 就当没给
+            row = self.db.execute(
+                "select id from memories where fingerprint = ?", (fp,)
             ).fetchone()
-            if existing:
-                mid_id, is_new = existing["id"], False
+            if row:
+                mid, is_new = int(row["id"]), False
                 self.db.execute(
-                    "update memories set when_expr = ?, why = ?, evidence = ?, source = ?,"
-                    " status = ?, updated_at = ? where id = ?",
-                    (when_expr, why, json.dumps(evidence, ensure_ascii=False), source, status, now, mid_id),
+                    "update memories set category = ?, lens = ?, workflow = ?, repo = ?,"
+                    " what = ?, when_expr = ?, why = ?, status = ?, source = ?, audit = coalesce(?, audit),"
+                    " exp_job_id = coalesce(?, exp_job_id), updated_at = ? where id = ?",
+                    (category, lens, workflow, repo, what, when_expr, why, status, source,
+                     audit_json, job_id, now, mid),
                 )
             else:
-                mid_id, is_new = self._next_id(), True
-                self.db.execute(
-                    "insert into memories(id, repo, lens, what, when_expr, why, evidence, status,"
-                    " source, stats_hits, stats_adopted, last_hit_at, created_at, updated_at)"
-                    " values (?,?,?,?,?,?,?,?,?,0,0,null,?,?)",
-                    (mid_id, repo, lens, what, when_expr, why,
-                     json.dumps(evidence, ensure_ascii=False), status, source, now, now),
+                cur = self.db.execute(
+                    "insert into memories(fingerprint, category, lens, workflow, repo, what,"
+                    " when_expr, why, status, source, audit, exp_job_id, hits, adopted,"
+                    " last_hit_at, created_at, updated_at)"
+                    " values (?,?,?,?,?,?,?,?,?,?,?,?,0,0,null,?,?)",
+                    (fp, category, lens, workflow, repo, what, when_expr, why, status, source,
+                     audit_json, job_id, now, now),
                 )
-                mid = self._rowid(mid_id)
-                self.db.execute(
-                    "insert into memories_fts(rowid, what, when_expr, why) values (?,?,?,?)",
-                    (mid, what, when_expr, why),
-                )
+                mid, is_new = int(cur.lastrowid), True
+            self._link_evidence(mid, evidence)
             self.db.commit()
-        # 时间线旁路：created/updated 各留一行（失败不影响主流程）
-        self.record_event(mid_id, "created" if is_new else "updated",
-                          {"repo": repo, "lens": lens, "status": status})
-        return {"id": mid_id}, ("created" if is_new else "updated")
+        self.record_event(mid, "created" if is_new else "updated",
+                          {"repo": repo, "lens": lens, "category": category,
+                           "workflow": workflow, "status": status})
+        return {"id": format_memory_id(mid), "fingerprint": fp}, ("created" if is_new else "updated")
 
-    def _rowid(self, memory_id):
-        return int(self.db.execute(
-            "select rowid from memories where id = ?", (memory_id,)
-        ).fetchone()[0])
-
+    # ------------------------------------------------------------ 向量
     def put_vector(self, memory_id, vec, dim):
-        """同步嵌入向量（float32 blob）。经验量小：每次 upsert 一条，直接写。"""
+        """同步嵌入向量（float32 blob，写入 memory_vectors 1:1 表）。"""
+        mid = parse_memory_id(memory_id)
         v = np.asarray(vec, dtype=np.float32).reshape(-1)
         now = int(time.time())
         with self.lock:
-            mid = self._rowid(memory_id)
+            if not self.db.execute("select 1 from memories where id = ?", (mid,)).fetchone():
+                raise ValueError(f"unknown memory: {memory_id}")
             self.db.execute(
-                "insert into memories_vec(mid, dim, v, updated_at) values (?,?,?,?)"
-                " on conflict(mid) do update set dim = excluded.dim, v = excluded.v,"
-                " updated_at = excluded.updated_at",
-                (mid, int(dim), v.tobytes(order="C"), now),
+                "insert into memory_vectors(memory_id, tag, dim, vec, updated_at) values (?,?,?,?,?)"
+                " on conflict(memory_id) do update set tag = excluded.tag, dim = excluded.dim,"
+                " vec = excluded.vec, updated_at = excluded.updated_at",
+                (mid, "", int(dim), v.tobytes(order="C"), now),
             )
             self.db.commit()
 
+    # ------------------------------------------------------------ 状态 / 命中
     def set_status(self, memory_id, status):
-        """软删（retired）/ 恢复（active）/ 标记冲突（conflicting）的统一入口。"""
+        """retired（下线）/ active（恢复）的统一入口。"""
         if status not in MEMORY_STATUSES:
-            raise ValueError("status must be one of active / retired / conflicting")
+            raise ValueError("status must be one of active / retired")
+        mid = parse_memory_id(memory_id)
         with self.lock:
             cur = self.db.execute(
                 "update memories set status = ?, updated_at = ? where id = ?",
-                (status, int(time.time()), memory_id),
+                (status, int(time.time()), mid),
             )
             self.db.commit()
-            ok = cur.rowcount > 0
+            ok = int(cur.rowcount or 0) > 0
         if ok:
-            # 时间线旁路：retired/conflicted 记本名；resolve 回 active 记 resolved
-            self.record_event(memory_id, status if status != "active" else "resolved",
+            self.record_event(mid, "retired" if status == "retired" else "restored",
                               {"status": status})
         return ok
 
     def record_hit(self, memory_id, adopted=False):
+        mid = parse_memory_id(memory_id)
         with self.lock:
             cur = self.db.execute(
-                "update memories set stats_hits = stats_hits + 1,"
-                " stats_adopted = stats_adopted + ?, last_hit_at = ? where id = ?",
-                (1 if adopted else 0, int(time.time()), memory_id),
+                "update memories set hits = hits + 1, adopted = adopted + ?,"
+                " last_hit_at = ? where id = ?",
+                (1 if adopted else 0, int(time.time()), mid),
             )
             self.db.commit()
-            if cur.rowcount == 0:
+            if not int(cur.rowcount or 0):
                 return None
             row = self.db.execute(
-                "select stats_hits, stats_adopted from memories where id = ?", (memory_id,)
+                "select hits, adopted from memories where id = ?", (mid,)
             ).fetchone()
-        self.record_event(memory_id, "adopted" if adopted else "hit",
-                          {"stats_hits": int(row["stats_hits"])})
-        return {"stats_hits": int(row["stats_hits"]), "stats_adopted": int(row["stats_adopted"])}
+            hits, adopted_n = int(row["hits"]), int(row["adopted"])
+        self.record_event(mid, "adopted" if adopted else "hit", {"stats_hits": hits})
+        return {"stats_hits": hits, "stats_adopted": adopted_n}
 
+    # ------------------------------------------------------------ 冲突（一等公民）
     def link_conflict(self, conflicting_id, origin_id, trigger_words=None):
-        """冲突配对双写：把 conflicting 条目与原条目互相指（against_id），并记触发词对。
+        """在 memory_conflicts 里登记一对冲突（双向唯一），双方各记一条 conflicted 事件。
 
-        - trigger_words 存在 conflicting 条目行上（json 列），原条目不存（它可能已是
-          active 的正常经验，配对信息由 conflicting 侧携带）；
-        - 双方各写一条 conflicted 事件进 memory_events；
-        - 返回 (ok, against)：against 是原条目摘要（conflicting 视角的对手）。
+        返回 (ok, against)：against 是对手条目摘要（调用方视角的"既有条目"）。
         """
-        if conflicting_id == origin_id:
+        try:
+            a = parse_memory_id(conflicting_id)
+            b = parse_memory_id(origin_id)
+        except ValueError:
+            return False, None
+        if a == b:
             return False, None
         trigger_json = None
         if isinstance(trigger_words, (list, tuple)) and trigger_words:
-            trigger_json = json.dumps([str(t)[:64] for t in trigger_words[:16]], ensure_ascii=False)
+            trigger_json = _json_dumps([str(t)[:64] for t in trigger_words[:16]])
+        now = int(time.time())
         with self.lock:
-            origin = self.db.execute(
-                "select * from memories where id = ?", (origin_id,)
-            ).fetchone()
-            if not origin:
+            origin = self.db.execute("select * from memories where id = ?", (b,)).fetchone()
+            if not origin or not self.db.execute(
+                "select 1 from memories where id = ?", (a,)
+            ).fetchone():
                 return False, None
-            now = int(time.time())
+            # UNIQUE(memory_a, memory_b) → 一对冲突只存一行（方向 = 新候选在前）。
+            # 反方向已存在（同一对曾被反向登记）就不重复插入，避免收件箱出现两条。
+            reverse = self.db.execute(
+                "select 1 from memory_conflicts where memory_a = ? and memory_b = ?", (b, a)
+            ).fetchone()
+            if not reverse:
+                self.db.execute(
+                    "insert or ignore into memory_conflicts(memory_a, memory_b, trigger_words,"
+                    " status, created_at) values (?,?,?,'open',?)",
+                    (a, b, trigger_json, now),
+                )
+            self.db.commit()
+            evidence = self._evidence_for([b]).get(b, [])
+            against = self._row_to_memory(origin, with_stats=False, evidence=evidence)
+        self.record_event(a, "conflicted", {"against": format_memory_id(b),
+                                            "trigger_words": trigger_words or []})
+        self.record_event(b, "conflicted", {"against": format_memory_id(a), "peer": True})
+        return True, against
+
+    def conflicts(self, limit=100, offset=0, status="open"):
+        """冲突队列：**open** 的冲突（收件箱「待裁决 N」）。
+
+        item 形状（保持控制台契约）：memory_a 侧字段平铺在顶层（含 id/what/when_expr/
+        why/lens/category/repo/evidence），`against` 是 memory_b 侧摘要，
+        另有 conflictId / status / trigger_words / created_at。
+        """
+        cond = "" if status in (None, "", "all") else " where c.status = ?"
+        args = [] if not cond else [str(status)]
+        with self.lock:
+            total = int(self.db.execute(
+                "select count(*) from memory_conflicts c" + cond, args
+            ).fetchone()[0])
+            rows = self.db.execute(
+                "select c.id as conflict_id, c.memory_a, c.memory_b, c.trigger_words,"
+                " c.status as conflict_status, c.resolution, c.resolved_by, c.resolved_at,"
+                " c.created_at as conflict_created_at"
+                " from memory_conflicts c" + cond +
+                " order by c.created_at desc, c.id desc limit ? offset ?",
+                [*args, int(limit), int(offset)],
+            ).fetchall()
+            ids = []
+            for r in rows:
+                ids.extend([int(r["memory_a"]), int(r["memory_b"])])
+            q = ",".join("?" * len(ids)) or "null"
+            mem_rows = {
+                int(m["id"]): m
+                for m in self.db.execute(
+                    f"select * from memories where id in ({q})", ids
+                ).fetchall()
+            } if ids else {}
+            evidence = self._evidence_for(list(mem_rows)) if mem_rows else {}
+        items = []
+        for r in rows:
+            a = mem_rows.get(int(r["memory_a"]))
+            b = mem_rows.get(int(r["memory_b"]))
+            if not a or not b:
+                continue
+            try:
+                tw = json.loads(r["trigger_words"]) if r["trigger_words"] else []
+            except (TypeError, ValueError):
+                tw = []
+            if not isinstance(tw, list):
+                tw = []
+            item = self._row_to_memory(a, with_stats=False, evidence=evidence.get(int(r["memory_a"])))
+            item.update({
+                "conflictId": int(r["conflict_id"]),
+                "conflictStatus": r["conflict_status"],
+                "status": r["conflict_status"],  # 冲突态在冲突行上，不在 memories.status
+                "trigger_words": tw,
+                "created_at": int(r["conflict_created_at"]),
+                "against_id": format_memory_id(r["memory_b"]),
+                "against": {
+                    k: v for k, v in
+                    self._row_to_memory(b, with_stats=False,
+                                        evidence=evidence.get(int(r["memory_b"]))).items()
+                    if k in ("id", "what", "when_expr", "why", "lens", "category", "repo", "evidence")
+                },
+            })
+            if r["resolution"]:
+                item["resolution"] = r["resolution"]
+            if r["resolved_by"]:
+                item["resolved_by"] = r["resolved_by"]
+            items.append(item)
+        return {"items": items, "total": total}
+
+    def resolve_conflict(self, conflict_id, status, resolution=None, resolved_by=None):
+        """裁决一条冲突：open|keep_a|keep_b|keep_both|merged（留痕 resolution）。"""
+        if status not in CONFLICT_STATUSES:
+            raise ValueError(f"status must be one of {' / '.join(CONFLICT_STATUSES)}")
+        cid = int(conflict_id)
+        now = int(time.time())
+        with self.lock:
+            row = self.db.execute(
+                "select memory_a, memory_b from memory_conflicts where id = ?", (cid,)
+            ).fetchone()
+            if not row:
+                return None
             self.db.execute(
-                "update memories set against_id = ?, trigger_words = ?, updated_at = ?"
-                " where id = ?",
-                (origin_id, trigger_json, now, conflicting_id),
-            )
-            self.db.execute(
-                "update memories set against_id = ?, updated_at = ? where id = ?",
-                (conflicting_id, now, origin_id),
+                "update memory_conflicts set status = ?, resolution = ?, resolved_by = ?,"
+                " resolved_at = ? where id = ?",
+                (status, None if resolution is None else str(resolution)[:2000],
+                 None if resolved_by is None else str(resolved_by)[:64], now, cid),
             )
             self.db.commit()
-            row = self.db.execute(
-                "select * from memories where id = ?", (conflicting_id,)
-            ).fetchone()
-            against = self._row_to_memory(origin, with_stats=False) if row else None
-        self.record_event(conflicting_id, "conflicted",
-                          {"against": origin_id, "trigger_words": trigger_words or []})
-        self.record_event(origin_id, "conflicted",
-                          {"against": conflicting_id, "peer": True})
-        return True, against
+            a, b = int(row["memory_a"]), int(row["memory_b"])
+        for mid in (a, b):
+            self.record_event(mid, "resolved", {"conflictId": cid, "status": status,
+                                                "resolution": resolution})
+        return {"conflictId": cid, "status": status}
+
+    def resolve_for_memory(self, memory_id, resolution):
+        """把一条经验参与的所有 open 冲突标记为已裁决（/resolve 端点用）。"""
+        mid = parse_memory_id(memory_id)
+        if resolution == "both":
+            status = "keep_both"
+            reason = "都保留"
+        elif resolution == "retired":
+            status = "keep_b"
+            reason = "保留对手"
+        else:
+            status = "keep_a"
+            reason = "保留本条"
+        with self.lock:
+            rows = self.db.execute(
+                "select id from memory_conflicts where status = 'open'"
+                " and (memory_a = ? or memory_b = ?)", (mid, mid)
+            ).fetchall()
+        out = []
+        for r in rows:
+            res = self.resolve_conflict(int(r["id"]), status, reason, "api")
+            if res:
+                out.append(res)
+        return out
 
     # ------------------------------------------------------------ 查询
     def list(self, repo=None, lens=None, status=None, q=None, limit=50, offset=0,
-             stale_days=None):
+             stale_days=None, category=None, workflow=None):
         """过滤 + 分页；stale_days 给定时只看 active 且超过 N 天未命中（或从未命中）。
 
         stale 语义（治理可见性）：`last_hit_at IS NULL OR last_hit_at < now - N*86400`，
@@ -2500,13 +2702,19 @@ class MemoryStore:
         where, params = [], []
         if repo:
             where.append("repo = ?")
-            params.append(repo)
+            params.append(str(repo))
         if lens:
             where.append("lens = ?")
-            params.append(lens)
+            params.append(str(lens))
+        if category:
+            where.append("category = ?")
+            params.append(str(category))
+        if workflow:
+            where.append("workflow = ?")
+            params.append(str(workflow))
         if status:
             where.append("status = ?")
-            params.append(status)
+            params.append(str(status))
         if q:
             where.append("(what like ? or when_expr like ? or why like ?)")
             params.extend([f"%{q}%"] * 3)
@@ -2515,129 +2723,15 @@ class MemoryStore:
             params.append(int(time.time()) - int(stale_days) * 86400)
         cond = (" where " + " and ".join(where)) if where else ""
         with self.lock:
-            total = self.db.execute(
+            total = int(self.db.execute(
                 "select count(*) from memories" + cond, params
-            ).fetchone()[0]
+            ).fetchone()[0])
             rows = self.db.execute(
                 "select * from memories" + cond + " order by created_at desc, id desc limit ? offset ?",
                 params + [int(limit), int(offset)],
             ).fetchall()
-        return {"items": [self._row_to_memory(r) for r in rows], "total": int(total)}
-
-    def conflicting(self, limit=100, offset=0):
-        """conflicting 队列，join 出 against（配对的原条目全文）与 trigger_words。"""
-        with self.lock:
-            total = self.db.execute(
-                "select count(*) from memories where status = 'conflicting'"
-            ).fetchone()[0]
-            rows = self.db.execute(
-                "select * from memories where status = 'conflicting'"
-                " order by updated_at desc limit ? offset ?",
-                (int(limit), int(offset)),
-            ).fetchall()
-            items = []
-            for r in rows:
-                item = self._row_to_memory(r)
-                against_id = r["against_id"] if "against_id" in r.keys() else None
-                if against_id:
-                    origin = self.db.execute(
-                        "select * from memories where id = ?", (against_id,)
-                    ).fetchone()
-                    if origin:
-                        item["against"] = {
-                            k: self._row_to_memory(origin, with_stats=False)[k]
-                            for k in ("id", "what", "when_expr", "why")
-                        }
-                items.append(item)
-        return {"items": items, "total": int(total)}
-
-    # ------------------------------------------------------------ 跑批留痕（pipeline_runs）
-    def record_run(self, payload):
-        """POST /v1/admin/pipeline-runs：落一行跑批记录。run_id 重复时以最新为准（覆盖）。"""
-        run_id = str(payload.get("run_id") or "").strip()
-        if not run_id:
-            raise ValueError("run_id required")
-        started_at = payload.get("started_at")
-        finished_at = payload.get("finished_at")
-        now = int(time.time())
-        try:
-            started_at = now if started_at in (None, "") else int(started_at)
-            finished_at = now if finished_at in (None, "") else int(finished_at)
-        except (TypeError, ValueError):
-            raise ValueError("started_at/finished_at must be unix seconds")
-        actions = payload.get("actions")
-        if not isinstance(actions, dict):
-            actions = {}
-        details = payload.get("details")
-        if not isinstance(details, (dict, list)):
-            details = None
-
-        def _n(key):
-            try:
-                return max(0, int(payload.get(key) or 0))
-            except (TypeError, ValueError):
-                return 0
-
-        with self.lock:
-            self.db.execute(
-                "insert into pipeline_runs(run_id, started_at, finished_at, engine, dry_run,"
-                " candidates, review_passed, review_blocked, dedup_kept, dedup_merged,"
-                " actions, details) values (?,?,?,?,?,?,?,?,?,?,?,?)"
-                " on conflict(run_id) do update set"
-                " started_at=excluded.started_at, finished_at=excluded.finished_at,"
-                " engine=excluded.engine, dry_run=excluded.dry_run,"
-                " candidates=excluded.candidates, review_passed=excluded.review_passed,"
-                " review_blocked=excluded.review_blocked, dedup_kept=excluded.dedup_kept,"
-                " dedup_merged=excluded.dedup_merged, actions=excluded.actions,"
-                " details=excluded.details",
-                (run_id, started_at, finished_at,
-                 str(payload.get("engine") or "")[:64], 1 if payload.get("dry_run") else 0,
-                 _n("candidates"), _n("review_passed"), _n("review_blocked"),
-                 _n("dedup_kept"), _n("dedup_merged"),
-                 json.dumps(actions, ensure_ascii=False)[:60000],
-                 json.dumps(details, ensure_ascii=False)[:60000] if details is not None else None),
-            )
-            self.db.commit()
-            row = self.db.execute(
-                "select * from pipeline_runs where run_id = ?", (run_id,)
-            ).fetchone()
-        return self._row_to_run(row)
-
-    @staticmethod
-    def _row_to_run(row):
-        try:
-            actions = json.loads(row["actions"]) if row["actions"] else {}
-        except (TypeError, ValueError):
-            actions = {}
-        try:
-            details = json.loads(row["details"]) if row["details"] else None
-        except (TypeError, ValueError):
-            details = None
-        return {
-            "id": int(row["id"]),
-            "run_id": row["run_id"],
-            "started_at": int(row["started_at"]),
-            "finished_at": int(row["finished_at"]),
-            "engine": row["engine"],
-            "dry_run": bool(row["dry_run"]),
-            "candidates": int(row["candidates"]),
-            "review_passed": int(row["review_passed"]),
-            "review_blocked": int(row["review_blocked"]),
-            "dedup_kept": int(row["dedup_kept"]),
-            "dedup_merged": int(row["dedup_merged"]),
-            "actions": actions,
-            "details": details,
-        }
-
-    def list_runs(self, limit=20, offset=0):
-        """GET /v1/admin/pipeline-runs：按 started_at 倒序。"""
-        with self.lock:
-            total = self.db.execute("select count(*) from pipeline_runs").fetchone()[0]
-            rows = self.db.execute(
-                "select * from pipeline_runs order by started_at desc, id desc limit ? offset ?",
-                (int(limit), int(offset)),
-            ).fetchall()
-        return {"items": [self._row_to_run(r) for r in rows], "total": int(total)}
+            items = self._hydrate(rows)
+        return {"items": items, "total": total}
 
     # ------------------------------------------------------------ 混合检索
     @staticmethod
@@ -2649,132 +2743,480 @@ class MemoryStore:
         tokens = [t for t in (x.strip() for x in re.split(r"\s+", str(q or ""))) if t]
         return " ".join(f'"{t}"' for t in tokens) or None
 
-    def search_fts(self, match_expr, repo=None, lens=None, status="active", limit=None):
+    def search_fts(self, match_expr, repo=None, lens=None, status="active", limit=None,
+                   category=None, workflow=None):
         """FTS5 通道：按名次返回 [(id, bm25)]。短语化表达式保证安全。
 
-        status=None 时不过滤状态（检索语义：active+conflicting，conflicting 由
-        search 层加 conflictWarning 标注——Memanto 模型：冲突双方保持可召回）。
-        status=True（哨兵）→ active+conflicting；False/其它字符串按原语义单状态。
+        status=True（哨兵）→ 只召回 active（retired 不可见）。
         """
         sql = (
-            "select m.id, rank from memories m join memories_fts f on f.rowid = m.rowid"
+            "select m.id, rank from memories_fts f join memories m on m.id = f.rowid"
             " where memories_fts match ?"
         )
         params = [match_expr]
         if status is True:
-            # 哨兵 True：检索口径（active + conflicting，retired 仍不可见）
-            sql += " and m.status in ('active','conflicting')"
+            sql += " and m.status = 'active'"
         elif status:
             sql += " and m.status = ?"
             params.append(status)
         if repo:
             sql += " and m.repo = ?"
-            params.append(repo)
+            params.append(str(repo))
         if lens:
             sql += " and m.lens = ?"
-            params.append(lens)
+            params.append(str(lens))
+        if category:
+            sql += " and m.category = ?"
+            params.append(str(category))
+        if workflow:
+            sql += " and m.workflow = ?"
+            params.append(str(workflow))
         sql += " order by rank limit ?"
         params.append(int(limit) if limit else 1000)
-        return [(r["id"], float(r["rank"])) for r in self.db.execute(sql, params)]
+        return [(int(r["id"]), float(r["rank"])) for r in self.db.execute(sql, params)]
 
-    def _vec_matrix(self, repo=None, lens=None, status="active", dim=None):
+    def _vec_matrix(self, repo=None, lens=None, status="active", dim=None,
+                    category=None, workflow=None):
         """读出 (ids, matrix)：经验量小，直接全量载入暴力点积。
 
-        dim 给定时只取同维向量（模型热切换后库内可能混维，异维行直接跳过，
-        vstack 才不会崩；查询侧由 search 传当前 embedder 的维度）。
+        dim 给定时只取同维向量（模型热切换后库内可能混维，异维行直接跳过）。
         """
         sql = (
-            "select m.id, mv.dim, mv.v from memories m join memories_vec mv on mv.mid = m.rowid"
-            " where mv.dim > 0"
+            "select m.id, mv.dim, mv.vec from memories m join memory_vectors mv"
+            " on mv.memory_id = m.id where mv.dim > 0"
         )
         params = []
         if status is True:
-            sql += " and m.status in ('active','conflicting')"
+            sql += " and m.status = 'active'"
         elif status:
             sql += " and m.status = ?"
             params.append(status)
         if repo:
             sql += " and m.repo = ?"
-            params.append(repo)
+            params.append(str(repo))
         if lens:
             sql += " and m.lens = ?"
-            params.append(lens)
+            params.append(str(lens))
+        if category:
+            sql += " and m.category = ?"
+            params.append(str(category))
+        if workflow:
+            sql += " and m.workflow = ?"
+            params.append(str(workflow))
         ids, vecs = [], []
         for r in self.db.execute(sql, params):
-            v = np.frombuffer(r["v"], dtype=np.float32)
+            v = np.frombuffer(r["vec"], dtype=np.float32)
             if v.shape[0] != int(r["dim"]):
-                continue  # 维度异常（写入残留）：跳过，不拖垮检索
+                continue
             if dim is not None and v.shape[0] != int(dim):
                 continue
-            ids.append(r["id"])
+            ids.append(int(r["id"]))
             vecs.append(v)
         matrix = np.vstack(vecs).astype(np.float32) if vecs else np.zeros((0, 1), dtype=np.float32)
         return ids, matrix
 
-    def search(self, q, qvec=None, repo=None, lens=None, top_k=5, rrf_k=20, status=True):
+    def search(self, q, qvec=None, repo=None, lens=None, top_k=5, rrf_k=20, status="active",
+               category=None, workflow=None):
         """FTS5 + 向量 RRF 融合检索。
 
+        - v2 语义：只召回 **active**（retired 永不出现）；参与开放冲突的条目照样召回，
+          并带 `conflictWarning: True`（Memanto 模型：冲突未决仍可召回）；
         - qvec 为 None（embedder 不可用）→ 纯 FTS；FTS 无命中且向量可用 → 纯向量；
         - RRF 与代码检索同法：`rrf += 1/(rrf_k + rank)`，rank 从 1 起；
-        - 排序键 (-rrf, source_rank)：FTS 与向量都命中的条目排前面（这正是 RRF 的目的），
-          同分时按原始向量相似度（有则 bm25，无则 -inf）稳定排序；
-        - status 默认 True（哨兵）= 检索口径：active + conflicting **都参与召回**
-          （Memanto 模型：冲突未决双方保持可召回，由 server 层给 conflicting 命中加
-          conflictWarning 标注）；retired 永不出现。传 'active' 等字符串回到单状态口径。
-        返回 (hits, channels)：channels 是各通道命中数（诊断/测试用）。
+        - 返回 (hits, channels)，channels 是各通道命中数（诊断/测试用）。
         """
-        # 整个检索持锁：FTS 读 + 向量矩阵读 + 行补全是一个完整读事务面，
-        # 与并发写（hit/upsert）在同一条连接上交错会互相干扰（并发实测 500）。
         with self.lock:
-            return self._search_locked(q, qvec, repo, lens, top_k, rrf_k, status)
+            return self._search_locked(q, qvec, repo, lens, top_k, rrf_k, status,
+                                       category, workflow)
 
-    def _search_locked(self, q, qvec, repo, lens, top_k, rrf_k, status):
+    def _search_locked(self, q, qvec, repo, lens, top_k, rrf_k, status, category, workflow):
         match_expr = self._fts_match_expr(q)
-        fts_hits = self.search_fts(match_expr, repo, lens, status, limit=1000) if match_expr else []
-        vec_hits, dim_note = [], None
+        fts_hits = (self.search_fts(match_expr, repo, lens, status, limit=1000,
+                                    category=category, workflow=workflow)
+                    if match_expr else [])
+        vec_hits = []
         if qvec is not None:
-            q = np.asarray(qvec, dtype=np.float32).reshape(-1)
-            ids, matrix = self._vec_matrix(repo, lens, status, dim=int(q.shape[0]))
+            qv = np.asarray(qvec, dtype=np.float32).reshape(-1)
+            ids, matrix = self._vec_matrix(repo, lens, status, dim=int(qv.shape[0]),
+                                           category=category, workflow=workflow)
             if matrix.shape[0]:
-                scores = matrix @ q
+                scores = matrix @ qv
                 order = np.argsort(-scores)[:1000]
-                vec_hits = [(ids[int(i)], float(scores[int(i)])) for i in order if scores[int(i)] > 0]
+                vec_hits = [(ids[int(i)], float(scores[int(i)]))
+                            for i in order if scores[int(i)] > 0]
         merged = {}
-        for rank, (mid_id, _score) in enumerate(fts_hits, 1):
-            merged[mid_id] = {"rrf": 1.0 / (rrf_k + rank), "vec": None}
-        for rank, (mid_id, score) in enumerate(vec_hits, 1):
-            cur = merged.get(mid_id)
+        for rank, (mid, _score) in enumerate(fts_hits, 1):
+            merged[mid] = {"rrf": 1.0 / (rrf_k + rank), "vec": None}
+        for rank, (mid, score) in enumerate(vec_hits, 1):
+            cur = merged.get(mid)
             contribution = 1.0 / (rrf_k + rank)
             if cur is None:
-                merged[mid_id] = {"rrf": contribution, "vec": score}
+                merged[mid] = {"rrf": contribution, "vec": score}
             else:
                 cur["rrf"] += contribution
                 cur["vec"] = score
         if not merged:
-            return [], {"fts": len(fts_hits), "vector": len(vec_hits), "note": dim_note}
-        ranked_ids = [mid_id for mid_id, _ in sorted(
-            merged.items(), key=lambda kv: (-kv[1]["rrf"], -(kv[1]["vec"] if kv[1]["vec"] is not None else float("-inf")), kv[0])
+            return [], {"fts": len(fts_hits), "vector": len(vec_hits), "note": None}
+        ranked_ids = [mid for mid, _ in sorted(
+            merged.items(),
+            key=lambda kv: (-kv[1]["rrf"],
+                            -(kv[1]["vec"] if kv[1]["vec"] is not None else float("-inf")),
+                            kv[0]),
         )][: int(top_k)]
         rows = self.db.execute(
-            "select * from memories where id in (%s)" % ",".join("?" * len(ranked_ids)), ranked_ids
+            "select * from memories where id in (%s)" % ",".join("?" * len(ranked_ids)),
+            ranked_ids,
         ).fetchall()
-        by_id = {r["id"]: self._row_to_memory(r, with_stats=False) for r in rows}
+        conflict_ids = {
+            int(r["memory_a"]) for r in self.db.execute(
+                "select memory_a from memory_conflicts where status = 'open' and memory_a in (%s)"
+                % ",".join("?" * len(ranked_ids)), ranked_ids
+            ).fetchall()
+        } | {
+            int(r["memory_b"]) for r in self.db.execute(
+                "select memory_b from memory_conflicts where status = 'open' and memory_b in (%s)"
+                % ",".join("?" * len(ranked_ids)), ranked_ids
+            ).fetchall()
+        }
+        by_id = {int(r["id"]): r for r in rows}
+        evidence = self._evidence_for(list(by_id)) if by_id else {}
         hits = []
-        for mid_id in ranked_ids:
-            m = by_id.get(mid_id)
-            if m:
-                m["score"] = round(merged[mid_id]["rrf"], 6)
-                hits.append(m)
-        return hits, {"fts": len(fts_hits), "vector": len(vec_hits), "note": dim_note}
+        for mid in ranked_ids:
+            row = by_id.get(mid)
+            if not row:
+                continue
+            item = self._row_to_memory(row, with_stats=False, evidence=evidence.get(mid))
+            item["score"] = round(merged[mid]["rrf"], 6)
+            if mid in conflict_ids:
+                item["conflictWarning"] = True
+            hits.append(item)
+        return hits, {"fts": len(fts_hits), "vector": len(vec_hits), "note": None}
 
     def stats(self):
         with self.lock:
             row = self.db.execute(
-                "select count(*) as total, coalesce(sum(stats_hits), 0) as hits,"
-                " coalesce(sum(stats_adopted), 0) as adopted from memories"
+                "select count(*) as total, coalesce(sum(hits), 0) as hits,"
+                " coalesce(sum(adopted), 0) as adopted,"
+                " sum(case when status = 'active' then 1 else 0 end) as active,"
+                " sum(case when status = 'retired' then 1 else 0 end) as retired"
+                " from memories"
             ).fetchone()
+            conflicts_open = int(self.db.execute(
+                "select count(*) from memory_conflicts where status = 'open'"
+            ).fetchone()[0])
+
+            by_cat = self.db.execute(
+                "select category, count(*) as n from memories group by category order by n desc"
+            ).fetchall()
+            by_lens = self.db.execute(
+                "select lens, count(*) as n from memories group by lens order by n desc"
+            ).fetchall()
+            by_wf = self.db.execute(
+                "select coalesce(workflow, '') as workflow, count(*) as n from memories"
+                " group by 1 order by n desc"
+            ).fetchall()
+            stale = int(self.db.execute(
+                "select count(*) from memories where status = 'active'"
+                " and (last_hit_at is null or last_hit_at < ?)",
+                (int(time.time()) - 90 * 86400,),
+            ).fetchone()[0])
+            excerpts = int(self.db.execute("select count(*) from excerpts").fetchone()[0])
+            jobs = int(self.db.execute("select count(*) from exp_jobs").fetchone()[0])
         return {
             "total": int(row["total"] or 0),
             "hits": int(row["hits"] or 0),
             "adopted": int(row["adopted"] or 0),
+            "active": int(row["active"] or 0),
+            "retired": int(row["retired"] or 0),
+            "conflictsOpen": conflicts_open,
+            "stale": stale,
+            "excerpts": excerpts,
+            "jobs": jobs,
+            "byCategory": [
+                {"category": r["category"],
+                 "label": CATEGORY_LABELS.get(r["category"], r["category"]),
+                 "count": int(r["n"])} for r in by_cat
+            ],
+            "byLens": [
+                {"lens": r["lens"], "label": LENS_LABELS.get(r["lens"], r["lens"]),
+                 "count": int(r["n"])} for r in by_lens
+            ],
+            "byWorkflow": [
+                {"workflow": r["workflow"], "count": int(r["n"])} for r in by_wf
+            ],
+        }
+
+
+# ---------------------------------------------------------------- 任务与统计（exp_jobs / api_calls）
+JOB_STATUSES = ("queued", "running", "done", "failed", "skipped")
+JOB_MODES = ("server", "client")
+API_GROUPS = ("search", "sync", "bodies", "memories", "admin", "exp")
+
+
+class JobsStore:
+    """exp_jobs（每次抽取一段一条）+ api_calls（调用统计，重启不掉）。
+
+    与 MemoryStore 同一套连接策略（路径 → 自持连接；连接对象 → 共享）。
+    """
+
+    def __init__(self, db):
+        if isinstance(db, str):
+            self.db = _connect(db)
+            self._owns_conn = True
+        else:
+            self.db = db
+            self._owns_conn = False
+            try:
+                self.db.execute("pragma foreign_keys = on")
+            except Exception:  # noqa: BLE001
+                pass
+        self.lock = threading.RLock()
+
+    def close(self):
+        if self._owns_conn:
+            try:
+                self.db.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _row_to_job(row):
+        def _j(value):
+            if not value:
+                return None
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _i(key):
+            return int(row[key] or 0)
+
+        return {
+            "id": int(row["id"]),
+            "session_id": row["session_id"],
+            "segment_no": row["segment_no"],
+            "workflow": row["workflow"],
+            "mode": row["mode"],
+            "status": row["status"],
+            "model": row["model"],
+            "prompt_version": row["prompt_version"],
+            "tokens_in": row["tokens_in"],
+            "tokens_out": row["tokens_out"],
+            "ms": row["ms"],
+            "candidates": _i("candidates"),
+            "blocked": _i("blocked"),
+            "created_n": _i("created_n"),
+            "updated_n": _i("updated_n"),
+            "skipped_n": _i("skipped_n"),
+            "contradicted_n": _i("contradicted_n"),
+            "reasons": _j(row["reasons"]),
+            "error": row["error"],
+            "created_at": int(row["created_at"]),
+            "finished_at": row["finished_at"],
+        }
+
+    def record(self, payload):
+        """登记一条抽取任务（幂等：同 (session_id, segment_no) 视为同一段 → 覆盖更新）。"""
+        if not isinstance(payload, dict):
+            raise ValueError("job payload must be an object")
+        mode = str(payload.get("mode") or "server").strip()
+        if mode not in JOB_MODES:
+            raise ValueError("mode must be server or client")
+        status = str(payload.get("status") or "queued").strip()
+        if status not in JOB_STATUSES:
+            raise ValueError(f"status must be one of {' / '.join(JOB_STATUSES)}")
+        session_id = payload.get("session_id")
+        session_id = None if session_id in (None, "") else str(session_id)[:200]
+        segment_no = payload.get("segment_no")
+        if segment_no in (None, ""):
+            segment_no = None
+        else:
+            try:
+                segment_no = int(segment_no)
+            except (TypeError, ValueError):
+                raise ValueError("segment_no must be an integer")
+
+        def _n(key):
+            try:
+                return int(payload.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        def _opt_int(key):
+            value = payload.get(key)
+            if value in (None, ""):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        reasons = payload.get("reasons")
+        if reasons is not None and not isinstance(reasons, (dict, list)):
+            reasons = None
+        now = int(time.time())
+        created_at = _opt_int("created_at") or now
+        finished_at = _opt_int("finished_at")
+        if finished_at is None and status in ("done", "failed", "skipped"):
+            finished_at = now
+        error = payload.get("error")
+        with self.lock:
+            existing = None
+            if session_id is not None and segment_no is not None:
+                existing = self.db.execute(
+                    "select id from exp_jobs where session_id = ? and segment_no = ?",
+                    (session_id, segment_no),
+                ).fetchone()
+            if existing:
+                jid = int(existing["id"])
+                self.db.execute(
+                    "update exp_jobs set workflow = ?, mode = ?, status = ?, model = ?,"
+                    " prompt_version = ?, tokens_in = ?, tokens_out = ?, ms = ?, candidates = ?,"
+                    " blocked = ?, created_n = ?, updated_n = ?, skipped_n = ?, contradicted_n = ?,"
+                    " reasons = ?, error = ?, finished_at = ? where id = ?",
+                    (payload.get("workflow"), mode, status, payload.get("model"),
+                     payload.get("prompt_version"), _opt_int("tokens_in"), _opt_int("tokens_out"),
+                     _opt_int("ms"), _n("candidates"), _n("blocked"), _n("created_n"),
+                     _n("updated_n"), _n("skipped_n"), _n("contradicted_n"),
+                     _json_dumps(reasons) if reasons is not None else None,
+                     None if error in (None, "") else str(error)[:2000], finished_at, jid),
+                )
+            else:
+                cur = self.db.execute(
+                    "insert into exp_jobs(session_id, segment_no, workflow, mode, status, model,"
+                    " prompt_version, tokens_in, tokens_out, ms, candidates, blocked, created_n,"
+                    " updated_n, skipped_n, contradicted_n, reasons, error, created_at, finished_at)"
+                    " values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (session_id, segment_no, payload.get("workflow"), mode, status,
+                     payload.get("model"), payload.get("prompt_version"),
+                     _opt_int("tokens_in"), _opt_int("tokens_out"), _opt_int("ms"),
+                     _n("candidates"), _n("blocked"), _n("created_n"), _n("updated_n"),
+                     _n("skipped_n"), _n("contradicted_n"),
+                     _json_dumps(reasons) if reasons is not None else None,
+                     None if error in (None, "") else str(error)[:2000], created_at, finished_at),
+                )
+                jid = int(cur.lastrowid)
+            self.db.commit()
+            row = self.db.execute("select * from exp_jobs where id = ?", (jid,)).fetchone()
+        return self._row_to_job(row)
+
+    def get(self, job_id):
+        with self.lock:
+            row = self.db.execute("select * from exp_jobs where id = ?", (int(job_id),)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def finish(self, job_id, **fields):
+        """收尾一条任务（status/finished_at/统计字段）。返回更新后的行或 None。"""
+        jid = int(job_id)
+        allowed = ("status", "tokens_in", "tokens_out", "ms", "candidates", "blocked",
+                   "created_n", "updated_n", "skipped_n", "contradicted_n", "reasons", "error")
+        sets, args = [], []
+        for key in allowed:
+            if key not in fields:
+                continue
+            value = fields[key]
+            if key in ("reasons",) and isinstance(value, (dict, list)):
+                value = _json_dumps(value)
+            if key == "status":
+                if str(value) not in JOB_STATUSES:
+                    raise ValueError(f"status must be one of {' / '.join(JOB_STATUSES)}")
+                value = str(value)
+            sets.append(f"{key} = ?")
+            args.append(value)
+        if not sets:
+            return self.get(jid)
+        sets.append("finished_at = coalesce(?, finished_at)")
+        args.append(int(fields.get("finished_at") or time.time()))
+        with self.lock:
+            self.db.execute(f"update exp_jobs set {', '.join(sets)} where id = ?", [*args, jid])
+            self.db.commit()
+        return self.get(jid)
+
+    def list_jobs(self, limit=20, offset=0, status=None, session_id=None, workflow=None):
+        where, args = [], []
+        if status:
+            where.append("status = ?")
+            args.append(str(status))
+        if session_id:
+            where.append("session_id = ?")
+            args.append(str(session_id))
+        if workflow:
+            where.append("workflow = ?")
+            args.append(str(workflow))
+        cond = (" where " + " and ".join(where)) if where else ""
+        with self.lock:
+            total = int(self.db.execute("select count(*) from exp_jobs" + cond, args).fetchone()[0])
+            rows = self.db.execute(
+                "select * from exp_jobs" + cond + " order by created_at desc, id desc limit ? offset ?",
+                [*args, int(limit), int(offset)],
+            ).fetchall()
+        return {"items": [self._row_to_job(r) for r in rows], "total": total}
+
+    def job_stats(self):
+        with self.lock:
+            rows = self.db.execute(
+                "select status, count(*) as n, coalesce(sum(candidates),0) as candidates,"
+                " coalesce(sum(created_n),0) as created_n, coalesce(sum(updated_n),0) as updated_n,"
+                " coalesce(sum(blocked),0) as blocked, coalesce(sum(contradicted_n),0) as contradicted"
+                " from exp_jobs group by status"
+            ).fetchall()
+            last = self.db.execute(
+                "select * from exp_jobs order by created_at desc, id desc limit 1"
+            ).fetchone()
+        by_status = {k: 0 for k in JOB_STATUSES}
+        totals = {"candidates": 0, "created": 0, "updated": 0, "blocked": 0, "contradicted": 0}
+        for r in rows:
+            key = r["status"] or "queued"
+            by_status[key] = by_status.get(key, 0) + int(r["n"])
+            totals["candidates"] += int(r["candidates"] or 0)
+            totals["created"] += int(r["created_n"] or 0)
+            totals["updated"] += int(r["updated_n"] or 0)
+            totals["blocked"] += int(r["blocked"] or 0)
+            totals["contradicted"] += int(r["contradicted"] or 0)
+        return {
+            "byStatus": by_status,
+            "total": sum(by_status.values()),
+            "totals": totals,
+            "last": self._row_to_job(last) if last else None,
+        }
+
+    # ------------------------------------------------------------ 调用统计
+    def api_call(self, group_, key_id=None, ms=None, status=None, err=None, at=None):
+        """记一条 API 调用（group ∈ search|sync|bodies|memories|admin|exp）。"""
+        group_ = str(group_ or "").strip()
+        if group_ not in API_GROUPS:
+            raise ValueError(f"group must be one of {' / '.join(API_GROUPS)}")
+        with self.lock:
+            self.db.execute(
+                "insert into api_calls(at, group_, key_id, ms, status, err) values (?,?,?,?,?,?)",
+                (int(at if at is not None else time.time()), group_,
+                 None if key_id in (None, "") else str(key_id)[:64],
+                 None if ms is None else int(ms),
+                 None if status is None else int(status),
+                 None if err in (None, "") else str(err)[:500]),
+            )
+            self.db.commit()
+
+    def api_stats(self, days=7):
+        """按 group 聚合调用统计（admin 趋势图数据源）。"""
+        since = int(time.time()) - int(days or 7) * 86400
+        with self.lock:
+            rows = self.db.execute(
+                "select group_, count(*) as n, coalesce(avg(ms),0) as avg_ms,"
+                " sum(case when status >= 400 then 1 else 0 end) as errors"
+                " from api_calls where at >= ? group by group_ order by n desc",
+                (since,),
+            ).fetchall()
+            total = int(self.db.execute(
+                "select count(*) from api_calls where at >= ?", (since,)
+            ).fetchone()[0])
+        return {
+            "days": int(days or 7),
+            "total": total,
+            "groups": [
+                {"group": r["group_"], "count": int(r["n"]),
+                 "avgMs": round(float(r["avg_ms"] or 0), 2), "errors": int(r["errors"] or 0)}
+                for r in rows
+            ],
         }

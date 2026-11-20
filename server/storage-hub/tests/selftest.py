@@ -279,7 +279,14 @@ def main():
         "remove": [],
     }
     st, o1 = sync(NS2, other)
-    check("另一血统里 h1 也算缺（不跨血统共享）", o1.get("missing") == ["h1"], o1.get("missing"))
+    # WHY：v2 的 blobs/vectors 是**全局内容寻址**（(tag,hash) 唯一），同内容在另一血统里
+    # 天然已有向量 → 不再算缺。旧断言"不跨血统共享"是 v1 按血统存向量的行为。
+    check("v2 内容寻址：另一血统的同内容不再算缺（向量全局共享）",
+          o1.get("missing") == [], o1.get("missing"))
+    check("全局只有一份 (tag,hash) 向量行（不按血统重复存）",
+          int(server.store.db.execute(
+              "select count(*) as n from vectors where tag = ? and hash = 'h1'",
+              (server.state["info"]["tag"],)).fetchone()["n"]) == 1)
     lid2 = req("GET", f"/v1/namespaces/{nsq(NS2)}/status")[1]["lineage"]
     check("两个血统 id 不同", lid != lid2)
     st, ad = req("POST", f"/v1/lineages/{lid2}/adopt", {"from": lid, "hashes": ["h1"]})
@@ -307,6 +314,10 @@ def main():
     print("\n[13] gzip 请求体")
     NS3 = istore.canonical_namespace("gz", "fp1", "main", "default")
     m3pay = manifest(files, "g1"); m3pay["repoId"] = "gz"; m3pay["namespace"] = NS3
+    # WHY：v2 的 scopes_ident 唯一索引把 (lineage, kind, ref, root, chunk_fp) 当作用域身份，
+    # 同一 URL 下再造第二个 repoId 属于非法输入（真实插件 repoId=sha1(originUrl) 不可能撞）。
+    # 本用例只验证 gzip 传输，给 gz 一个独立 URL。
+    m3pay["url"] = "https://git.example.com/team/gz.git"
     st, g3 = req("POST", "/v1/namespaces/sync", m3pay, gz=True)
     check("gzip 同步成功", st == 200 and g3.get("chunks") == sum(len(v) for v in files.values()), (st, g3))
 
@@ -477,13 +488,15 @@ def main():
     wait_vectors(NS_WB, 2)
     lid3 = req("GET", f"/v1/namespaces/{nsq(NS_WB)}/status")[1]["lineage"]
 
+    # WHY：v2 的 blobs(hash) / vectors(tag,hash) 没有 lineage_id 列（内容寻址、全局唯一），
+    # 存在性只能按 hash 查；跨作用域共享由 GC 判定（下一条断言）。
     def blob_exists(h):
         return server.store.db.execute(
-            "select 1 from blobs where lineage_id = ? and hash = ?", (lid3, h)).fetchone() is not None
+            "select 1 from blobs where hash = ?", (h,)).fetchone() is not None
 
     def vector_exists(h):
         return server.store.db.execute(
-            "select 1 from vectors where lineage_id = ? and hash = ?", (lid3, h)).fetchone() is not None
+            "select 1 from vectors where hash = ?", (h,)).fetchone() is not None
 
     check("共享内容已入库", blob_exists("hshared") and vector_exists("hshared"))
     st, dl = req("DELETE", f"/v1/scopes/{nsq(NS_WA)}")
@@ -554,48 +567,87 @@ def main():
     check("删除后不再出现在分页里",
           all(x["namespace"] != NS_PR for x in req("GET", "/v1/scopes?limit=200")[1].get("scopes", [])))
 
-    print("\n[22] 旧 DB 启动即幂等迁移")
+    print("\n[22] v2 启动校验：旧库一律拒绝（不写任何迁移代码）")
     old_db = os.path.join(TMP, "legacy-db", "index.db")
     os.makedirs(os.path.dirname(old_db), exist_ok=True)
     conn = sqlite3.connect(old_db)
     conn.executescript("""
     create table lineages (id text primary key, url_norm text, created_at integer not null, last_seen integer not null);
     create table repos (
-      namespace text primary key,
-      lineage_id text not null,
-      repo_id text not null,
-      chunk_fp text not null,
-      revision integer not null default 0,
-      tag text,
-      repo_state text,
-      repo_state_chunks integer,
-      updated_at integer not null
-    );
+      namespace text primary key, lineage_id text not null, repo_id text not null,
+      chunk_fp text not null, revision integer not null default 0, tag text,
+      repo_state text, repo_state_chunks integer, updated_at integer not null);
     """)
     conn.execute("insert into lineages values ('L1', 'u', 1000, 1000)")
-    conn.execute("insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
-                 " repo_state_chunks, updated_at) values ('old@fp', 'L1', 'old', 'fp', 3, null, null, 0, 1000)")
-    conn.execute("insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, tag, repo_state,"
-                 " repo_state_chunks, updated_at) values ('keep@fp#main:default', 'L1', 'keep', 'fp', 3, null, null, 0, 1000)")
-    conn.commit()
-    conn.close()
-    m1 = istore.IndexStore(old_db)
-    check("老库启动时旧格式作用域被清理（不再兼容）", m1.repo("old@fp") is None)
-    check("旧库里残留的旧格式 chunks 一并删除",
-          int(m1.db.execute("select count(*) as n from chunks where namespace = 'old@fp'").fetchone()["n"]) == 0)
-    row = m1.repo("keep@fp#main:default")
-    check("canonical 行保留并补 main 默认值",
-          row is not None and row["scope_kind"] == "main" and row["created_at"] == 1000, row)
-    check("created_at 回填 updated_at", row["created_at"] == 1000, row.get("created_at"))
-    simhash_cols = {"simhash_path", "simhash_content", "simhash_algo", "simhash_files", "simhash_at"}
-    check("老库幂等补上 simhash 5 列（值保持 null）",
-          simhash_cols <= set(row) and all(row[c] is None for c in simhash_cols), row)
-    check("simhash 5 列已落进 repos schema",
-          simhash_cols <= {r["name"] for r in m1.db.execute("pragma table_info(repos)").fetchall()})
-    m1.close()
-    m2 = istore.IndexStore(old_db)
-    check("二次启动迁移幂等", m2.repo("keep@fp#main:default")["created_at"] == 1000)
-    m2.close()
+    conn.execute("insert into repos(namespace, lineage_id, repo_id, chunk_fp, revision, updated_at)"
+                 " values ('old@fp', 'L1', 'old', 'fp', 3, 1000)")
+    conn.commit(); conn.close()
+    # WHY：v1 的 [22] 验证"启动即幂等迁移"；v2 冻结决策是**不写兼容代码**，
+    # 旧库必须直接拒绝启动。这条断言是验收项 4（旧库拒绝启动有专项测试）。
+    legacy_err = None
+    try:
+        istore.IndexStore(old_db)
+    except RuntimeError as e:
+        legacy_err = str(e)
+    check("旧库（无 meta 表）→ RuntimeError", legacy_err is not None, legacy_err)
+    check("错误信息含「重置重建」并指向 docs/schema-v2.md §5",
+          bool(legacy_err) and "重置重建" in legacy_err and "schema-v2.md" in legacy_err, legacy_err)
+
+    badv_db = os.path.join(TMP, "legacy-db", "v1.db")
+    conn = sqlite3.connect(badv_db)
+    conn.execute("create table meta (key text primary key, value text not null)")
+    conn.execute("insert into meta values ('schema_version', '1')")
+    conn.commit(); conn.close()
+    verr = None
+    try:
+        istore.IndexStore(badv_db)
+    except RuntimeError as e:
+        verr = str(e)
+    check("meta.schema_version != '2' → RuntimeError（半迁移库也不放行）",
+          verr is not None and "重置重建" in verr, verr)
+
+    fresh_db = os.path.join(TMP, "fresh-db", "index.db")
+    os.makedirs(os.path.dirname(fresh_db), exist_ok=True)
+    f1 = istore.IndexStore(fresh_db)
+    tables = {r["name"] for r in f1.db.execute(
+        "select name from sqlite_master where type = 'table'").fetchall()}
+    check("空库按 v2 DDL 建表（代码资产 5 + 经验 6 + 任务 3 + meta + 2 FTS）",
+          {"meta", "lineages", "scopes", "chunks", "blobs", "vectors", "memories",
+           "memory_vectors", "excerpts", "memory_excerpts", "memory_conflicts",
+           "memory_events", "exp_jobs", "api_calls"} <= tables
+          and {"memories_fts", "chunks_fts"} <= tables, sorted(tables))
+    check("meta 三键齐备（schema_version / chunk_schema / embed_tag）",
+          f1.meta_get("schema_version") == "2" and f1.meta_get("chunk_schema") == "v2"
+          and f1.meta_get("embed_tag") is not None,
+          [tuple(r) for r in f1.db.execute("select key, value from meta").fetchall()])
+    check("每个连接 foreign_keys=ON（cascade 的前提）",
+          int(f1.db.execute("pragma foreign_keys").fetchone()[0]) == 1)
+    strict_rejected = 0
+    for sql, args in (
+        ("insert into blobs(hash, body, created_at) values (?,?,?)", ("h-strict", b"x", "not-int")),
+        ("insert into chunks(scope_id, path, start_line, end_line, hash) values (?,?,?,?,?)",
+         ("x", "p", 1, 2, "h")),
+    ):
+        try:
+            f1.db.execute(sql, args)
+        except sqlite3.IntegrityError:
+            strict_rejected += 1
+        finally:
+            f1.db.rollback()
+    # WHY：v1 库最大的隐患是 '123' 与 123 混存；v2 用 STRICT 表把这件事变成硬错误。
+    check("STRICT 表拒绝隐式类型（INTEGER 列存字符串 / TEXT 主键传整数）",
+          strict_rejected == 2, f"rejected={strict_rejected}/2")
+    vec_fk_rejected = False
+    try:
+        f1.db.execute("insert into vectors(tag, hash, dim, vec, updated_at)"
+                      " values ('t', 'no-such-blob', 4, x'00', 1)")
+    except sqlite3.IntegrityError:
+        vec_fk_rejected = True
+    check("vectors.hash 外键指向 blobs（没有正文就不许有向量）", vec_fk_rejected)
+    f1.close()
+    f2 = istore.IndexStore(fresh_db)
+    check("二次启动幂等（不重复建表、版本仍为 2）", f2.meta_get("schema_version") == "2")
+    f2.close()
 
     print("\n[23] sync 显式 tag=null → 服务端补默认 tag（review-service 旧 payload 回归）")
     NS_NULL = istore.canonical_namespace("nulltag", "fp1", "branch", "feat/n")
@@ -740,9 +792,15 @@ def main():
     page = req_raw("/admin")[1]
     check("后台包含「检索测试」与「向量标签」卡片",
           "检索测试" in page and "向量标签" in page)
-    row = server.store.repo(NS_NULL)
+    row = server.store.scope(NS_NULL)
     vec = server.embedder.embed(["old model probe"])[0]
-    server.store.put_vectors(row["lineage_id"], "old-model-tag", [("hash-old-tag", vec)])
+    # WHY：v2 的 vectors.hash 外键指向 blobs(hash)，没有正文就不许有向量
+    # （v1 允许"有向量没正文"，那正是检索拿到空文本的根因）。
+    server.store.db.execute(
+        "insert or ignore into blobs(hash, body, created_at) values (?,?,?)",
+        ("hash-old-tag", b"old tag probe body", int(time.time())))
+    server.store.db.commit()
+    server.store.put_vectors("old-model-tag", [("hash-old-tag", vec)])
     st, health = req("GET", "/health")
     tag_rows = {t["tag"]: t for t in health.get("tags", [])}
     check("/health.tags 同时列出当前模型与旧 tag",
@@ -1092,7 +1150,7 @@ def main():
     st, body = req("POST", "/v1/admin/reset-index", {"confirm": "RESET"})
     deleted = (body or {}).get("deleted") or {}
     check("confirm=RESET → 200 且删除统计 > 0",
-          st == 200 and deleted.get("chunks", 0) > 0 and deleted.get("repos", 0) > 0, (st, deleted))
+          st == 200 and deleted.get("chunks", 0) > 0 and deleted.get("scopes", 0) > 0, (st, deleted))
     st, after = req("GET", "/v1/scopes")
     check("清空后作用域列表为空", st == 200 and (after or {}).get("scopes") == [], st)
     st, hp = req("GET", "/health")
@@ -1158,8 +1216,8 @@ def main():
                                         "ca-1", A_SHARED + [A_ONLY], "cand.java",
                                         simhash=SIM_OBJ, no_embed=False))
     check("候选仓库 full sync + simhash → 200", st == 200, (st, rca))
-    row_ca = server.store.repo(NS_CA)
-    check("repos 存 simhash（小写 16 位 / 算法 / 文件数 / 时间）",
+    row_ca = server.store.scope(NS_CA)
+    check("scopes 存 simhash（小写 16 位 / 算法 / 文件数 / 时间）",
           row_ca["simhash_path"] == SIM_PATH and row_ca["simhash_content"] == SIM_CONTENT
           and row_ca["simhash_algo"] == "1" and row_ca["simhash_files"] == 9
           and isinstance(row_ca["simhash_at"], int), row_ca)
@@ -1169,9 +1227,14 @@ def main():
     stv = wait_vectors(NS_CA, len(A_SHARED) + 1)
     check("候选仓库块全部嵌入（adopt 的前提）", stv.get("vectors") == 9, stv.get("vectors"))
     stale_vec = server.embedder.embed(["stale-tag-probe"])[0]
-    server.store.put_vectors(row_ca["lineage_id"], "stale-model-tag", [(STALE, stale_vec)])
-    check("候选血统另有 stale tag 向量（用于验证 tag 过滤）",
-          server.store.vector_count(row_ca["lineage_id"], "stale-model-tag") == 1)
+    # v2：vectors(tag, hash) 单表、无血统成员表 → 签名不再需要 lineage
+    server.store.put_vectors("stale-model-tag", [(STALE, stale_vec)])
+    # WHY：v2 的 vectors 是全局内容寻址表，没有"血统成员行"；stale tag 向量存在性
+    # 直接查 (tag, hash) 主键（旧断言查的是成员表行数）。
+    check("另有 stale tag 向量（用于验证 tag 过滤）",
+          int(server.store.db.execute(
+              "select count(*) as n from vectors where tag = 'stale-model-tag' and hash = ?",
+              (STALE,)).fetchone()["n"]) == 1)
 
     # ---- 目标仓库：10 块里 8 块与候选同内容（overlap 恰好 0.80）
     st, rtb = sync(NS_TB, _sim_manifest("simtarg01", "sim-target", "https://git.example.com/team/sim-target.git",
@@ -1188,40 +1251,55 @@ def main():
     check("missing 只剩目标独有的 2 块（adopt 后算 _missing）",
           sorted(rtb.get("missing") or []) == sorted([STALE, B_NEW]), rtb.get("missing"))
 
-    row_tb = server.store.repo(NS_TB)
+    row_tb = server.store.scope(NS_TB)
     db = server.store.db
-    target_chunks = int(db.execute("select count(*) as n from chunks where namespace = ?",
-                                   (NS_TB,)).fetchone()["n"])
+    # WHY：v2 的 chunks 用 scope_id，blobs/vectors 没有 lineage_id → 一律按
+    # "该血统的作用域引用到的 hash 集合"（可达性）来查，语义等价于旧实现的血统归属。
+    SID_TB = int(row_tb["id"])
+    TGT_HASHES = "select c.hash from chunks c join scopes s on s.id = c.scope_id where s.lineage_id = ?"
+    target_chunks = int(db.execute("select count(*) as n from chunks where scope_id = ?",
+                                   (SID_TB,)).fetchone()["n"])
     target_paths = sorted(r["path"] for r in db.execute(
-        "select distinct path from chunks where namespace = ?", (NS_TB,)).fetchall())
+        "select distinct path from chunks where scope_id = ?", (SID_TB,)).fetchall())
     check("不复制候选 chunks / path：目标块数与路径不变",
           target_chunks == 10 and target_paths == ["target.java"], (target_chunks, target_paths))
     target_vecs = {r["hash"] for r in db.execute(
-        "select hash from vectors where lineage_id = ?", (row_tb["lineage_id"],)).fetchall()}
-    target_tags = {r["tag"] for r in db.execute(
-        "select distinct tag from vectors where lineage_id = ?", (row_tb["lineage_id"],)).fetchall()}
+        f"select hash from vectors where tag = ? and hash in ({TGT_HASHES})",
+        (TAG_NOW, row_tb["lineage_id"])).fetchall()}
+    target_all_tags = {r["tag"] for r in db.execute(
+        f"select distinct tag from vectors where hash in ({TGT_HASHES})",
+        (row_tb["lineage_id"],)).fetchall()}
     target_blobs = {r["hash"] for r in db.execute(
-        "select hash from blobs where lineage_id = ?", (row_tb["lineage_id"],)).fetchall()}
-    check("只复制精确 hash：共享 8 块在、候选独有 / stale-only / 目标新增都不在",
+        f"select hash from blobs where hash in ({TGT_HASHES})",
+        (row_tb["lineage_id"],)).fetchall()}
+    check("只命中精确 hash：共享 8 块有当前 tag 向量、候选独有 / stale-only / 目标新增都没有",
           set(A_SHARED) <= target_vecs and A_ONLY not in target_vecs
           and STALE not in target_vecs and B_NEW not in target_vecs, sorted(target_vecs))
-    check("只复制当前 tag：目标血统只有当前 tag 向量",
-          target_tags == {TAG_NOW}, target_tags)
-    check("blob 与 vector 一起复制（不含候选独有 / stale / 目标新增）",
-          target_blobs == set(A_SHARED), sorted(target_blobs))
-    check("目标 repos 也保存了 simhash", row_tb["simhash_path"] == SIM_PATH, row_tb.get("simhash_path"))
+    check("目标当前 tag 覆盖恰好 8/10（v2：共享内容直接复用，不复制行）",
+          len(target_vecs) == 8, sorted(target_vecs))
+    check("非当前 tag 的向量仍可查但不算当前 tag 覆盖（stale tag 不参与）",
+          "stale-model-tag" in target_all_tags and len(target_vecs) == 8, sorted(target_all_tags))
+    # 目标 chunks 引用 A_SHARED + STALE + B_NEW；STALE 正文已由候选上传（全局唯一），
+    # A_ONLY 只属于候选、B_NEW 根本没上传过 → 可达 blob 集合正是 A_SHARED ∪ {STALE}。
+    check("blob 只对目标引用的 hash 可见（不含候选独有 / 未上传的目标新增）",
+          target_blobs == set(A_SHARED) | {STALE}, sorted(target_blobs))
+    check("目标 scopes 也保存了 simhash", row_tb["simhash_path"] == SIM_PATH, row_tb.get("simhash_path"))
 
     ov = server.store.adopt_overlap(NS_TB, row_ca["lineage_id"], TAG_NOW)
     check("overlap = 目标 chunks ∩ 候选当前 tag vectors = 8/10",
           ov.get("targetHashes") == 10 and ov.get("targetChunks") == 10
           and ov.get("matched") == 8 and ov.get("overlap") == 0.8, ov)
+    before_rows = int(db.execute("select count(*) as n from vectors").fetchone()["n"])
     again = server.store.adopt_hashes(row_ca["lineage_id"], row_tb["lineage_id"], A_SHARED, TAG_NOW,
                                       namespace=NS_TB)
-    check("adopt_hashes 幂等（重复调用不重复插入）",
-          again.get("blobs") == 0 and again.get("vectors") == 0 and again.get("hashes") == 8, again)
+    # WHY：v2 内容全局共享，"复制"退化为"核对可复用"，所以返回的是可复用条数（8）
+    # 而不是新插入条数（v1 语义）；幂等性用"全库向量行数不变"来断言。
+    check("adopt_hashes 幂等（可复用 8 条，且不新增任何向量行）",
+          again.get("blobs") == 8 and again.get("vectors") == 8 and again.get("hashes") == 8
+          and int(db.execute("select count(*) as n from vectors").fetchone()["n"]) == before_rows, again)
     orphan = server.store.adopt_hashes(row_ca["lineage_id"], row_tb["lineage_id"], [A_ONLY], TAG_NOW,
                                        namespace=NS_TB)
-    check("目标 chunks 没有的候选 hash 不复制",
+    check("目标 chunks 没有的候选 hash 不算可复用",
           orphan.get("hashes") == 0 and orphan.get("vectors") == 0, orphan)
 
     # ---- 候选查询：相似 / 无关 / tag / 排除 / 非冷启动
@@ -1241,9 +1319,12 @@ def main():
           server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, "other-model-tag") == [])
     check("tag 为空不乱匹配 → 空候选",
           server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, "") == [])
-    check("目标血统已有当前 tag 向量 → 不再返回候选（非冷启动）",
-          server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, TAG_NOW,
-                                        target_namespace=NS_TB) == [])
+    # WHY：v2 共享内容后"目标已有向量"是常态，冷启动闸门改为"没有任何缺失块"。
+    # NS_CA（候选自己）9 块全部嵌入 → 无缺失 → 非冷启动，不返回候选。
+    check("目标作用域无缺失块（非冷启动）→ 不再返回候选",
+          server.store.pending_count(NS_CA, TAG_NOW) == 0
+          and server.store.similar_lineages(SIM_PATH_IN, SIM_CONTENT_IN, None, TAG_NOW,
+                                           target_namespace=NS_CA) == [])
 
     # ---- 诊断接口 GET /v1/lineages/similar
     qs = urllib.parse.urlencode({"path": SIM_PATH_IN, "content": SIM_CONTENT_IN, "tag": TAG_NOW, "limit": 5})
@@ -1270,7 +1351,7 @@ def main():
     st, rbad = sync(NS_BAD, _sim_manifest("simbad01", "sim-bad", "https://git.example.com/team/sim-bad.git",
                                           "bad-1", ["bad1"], "bad.java",
                                           simhash={"v": 1, "path": "z" * 17, "content": "0" * 16, "files": 1}))
-    row_bad = server.store.repo(NS_BAD)
+    row_bad = server.store.scope(NS_BAD)
     check("非法 simhash 值：sync 仍 200", st == 200, (st, rbad))
     check("非法 simhash 不落库（保持 null）",
           row_bad["simhash_path"] is None and row_bad["simhash_at"] is None, row_bad)
@@ -1279,15 +1360,17 @@ def main():
                                            simhash={"v": 1, "path": "'; drop table repos; --",
                                                     "content": "0" * 16, "files": 1}))
     check("注入串 simhash：sync 200 且仍不落库",
-          st == 200 and server.store.repo(NS_BAD)["simhash_path"] is None, (st, rbad2))
+          st == 200 and server.store.scope(NS_BAD)["simhash_path"] is None, (st, rbad2))
 
     # ---- overlap 门槛 / 无关 simhash
     NS_LOW = istore.canonical_namespace("simlow01", "fp1", "main", "default")
     st, rlow = sync(NS_LOW, _sim_manifest("simlow01", "sim-low", "https://git.example.com/team/sim-low.git",
                                           "low-1", A_SHARED[:5] + ["low1", "low2", "low3", "low4", "low5"],
                                           "low.java", simhash=SIM_OBJ, adopt=True, reuse="auto"))
-    check("overlap 5/10 低于 0.80 → 不 adopt，missing 保持全量",
-          st == 200 and "adopted" not in rlow and len(rlow.get("missing") or []) == 10, (st, rlow))
+    # WHY：v2 全局共享后，10 块里 5 块共享内容已有向量 → missing 只剩目标独有 5 块；
+    # overlap 仍然低于 0.80 门槛，所以依旧不 adopt。
+    check("overlap 5/10 低于 0.80 → 不 adopt；missing 只剩目标独有 5 块",
+          st == 200 and "adopted" not in rlow and len(rlow.get("missing") or []) == 5, (st, rlow))
     NS_FAR = istore.canonical_namespace("simfar01", "fp1", "main", "default")
     far_obj = {"v": 1, "path": "0" * 16, "content": "0" * 16, "files": 1}
     st, rfar = sync(NS_FAR, _sim_manifest("simfar01", "sim-far", "https://git.example.com/team/sim-far.git",
@@ -1339,9 +1422,11 @@ def main():
               st == 200 and sorted(rfail.get("missing") or []) == ["fl1", "fl2"], rfail)
         check("adopt 失败被记录在 adoptError（不抛 500）", bool(rfail.get("adoptError")),
               rfail.get("adoptError"))
-        row_fail = server.store.repo(istore.canonical_namespace("simfl01", "fp1", "main", "default"))
-        fail_chunks = int(db.execute("select count(*) as n from chunks where namespace = ?",
-                                     (istore.canonical_namespace("simfl01", "fp1", "main", "default"),)).fetchone()["n"])
+        row_fail = server.store.scope(istore.canonical_namespace("simfl01", "fp1", "main", "default"))
+        fail_chunks = int(db.execute(
+            "select count(*) as n from chunks where scope_id ="
+            " (select id from scopes where namespace = ?)",
+            (istore.canonical_namespace("simfl01", "fp1", "main", "default"),)).fetchone()["n"])
         check("adopt 失败回滚后目标 chunks 完好", row_fail is not None and fail_chunks == 2,
               (row_fail is not None, fail_chunks))
     finally:
@@ -1351,13 +1436,13 @@ def main():
     NS_OLD = istore.canonical_namespace("simold01", "fp1", "main", "default")
     st, rold = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
                                           "old-1", ["old1"], "old.java"))
-    row_old = server.store.repo(NS_OLD)
+    row_old = server.store.scope(NS_OLD)
     check("旧客户端不带 simhash → repos 保持 null（sync 仍 200）",
           st == 200 and row_old["simhash_path"] is None and row_old["simhash_at"] is None, row_old)
     st, _ = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
                                        "old-2", ["old1"], "old.java",
                                        simhash={"v": 1, "path": "1" * 16, "content": "2" * 16, "files": 7}))
-    row_old = server.store.repo(NS_OLD)
+    row_old = server.store.scope(NS_OLD)
     first_simhash_at = row_old["simhash_at"]
     check("后来带 simhash 的 sync 会补上（含 files）",
           row_old["simhash_path"] == "1" * 16 and row_old["simhash_content"] == "2" * 16
@@ -1365,7 +1450,7 @@ def main():
     st, _ = sync(NS_OLD, _sim_manifest("simold01", "sim-old", "https://git.example.com/team/sim-old.git",
                                        "old-3", ["old1"], "old.java",
                                        simhash={"v": 2, "path": "3" * 16, "content": "4" * 16, "files": 8}))
-    row_old = server.store.repo(NS_OLD)
+    row_old = server.store.scope(NS_OLD)
     check("再次 sync 覆盖 simhash（含算法版本 / 时间戳）",
           row_old["simhash_path"] == "3" * 16 and row_old["simhash_algo"] == "2"
           and row_old["simhash_files"] == 8 and row_old["simhash_at"] >= first_simhash_at, row_old)
@@ -1376,11 +1461,12 @@ def main():
         bad_set = True
     check("set_simhash 非法值抛 ValueError（明确失败，不静默写坏）", bad_set)
 
-    # ---- legacy adopt 端点保持兼容（老调用不带 tag，按 hash 复制候选全部 tag）
+    # ---- POST /v1/lineages/{id}/adopt：v2 内容全局共享 → 语义变成"核对可复用"
     st, legacy_adopt = req("POST", f"/v1/lineages/{row_tb['lineage_id']}/adopt",
                            {"from": row_ca["lineage_id"], "hashes": [A_ONLY]})
-    check("旧 POST /v1/lineages/{id}/adopt 仍兼容（按 hash 复制）",
-          st == 200 and legacy_adopt.get("vectors") == 1, (st, legacy_adopt))
+    check("POST /v1/lineages/{id}/adopt 返回可复用内容数（v2 无字节复制）",
+          st == 200 and legacy_adopt.get("blobs") == 1 and legacy_adopt.get("vectors") == 1,
+          (st, legacy_adopt))
 
     srv.shutdown()
     print(f"\n通过 {PASS}，失败 {FAIL}")

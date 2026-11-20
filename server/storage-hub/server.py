@@ -41,7 +41,7 @@
     POST /v1/lineages/{id}/adopt   {from, hashes?} 显式跨血统借用（管理员指定来源）
     GET  /v1/lineages/similar?path=&content=&tag=&limit=  simhash 候选（只返回元信息，不返回正文）
     GET  /v1/admin/lineages/duplicates  重复血统检测（同 repoName 多血统 / 同 chunkFp，返回建议合并对与估算）
-    POST /v1/admin/lineages/merge       {from:[...], into} 血统合并（事务；merged_into 观察期 7 天，见 docs/lineages.md）
+    POST /v1/admin/lineages/merge       {from:[...], into} 血统合并（事务；v2 直接改挂 scopes.lineage_id，无墓碑）
     POST /v1/admin/lineages/hard-clean  {minAgeDays?, force?} 观察期到期血统的物理清理
     GET  /v1/scopes?limit=&offset=&q=  作用域分页清单（kind/ref/文件/占用）
     POST /v1/scopes/resolve        {repoId, chunkFp, kind, ref, commit?} -> {namespace, exists, revision?}
@@ -1016,7 +1016,7 @@ ADMIN_HTML = r"""<!doctype html>
         <div class="grid">
           <div><b>同 chunkFp</b>：同仓库内容裂成多个血统（多 repoId / 重复同步），合并收益最大；建议保留块数最大的血统，其余行 [合并到 ↑]。</div>
           <div><b>不同 chunkFp</b>：同名仓库但内容指纹不同（如 bug-analysis 场景），合并需人工确认，点合并会再弹确认。</div>
-          <div><b>合并语义</b>：旧血统软标记 merged_into（观察期 7 天），namespaces 不动、客户端照常同步；观察期到期后可物理清理。</div>
+          <div><b>合并语义</b>：把源血统的作用域改挂到目标血统（namespace 不动，客户端无需重新同步），源血统空了即物理删除；块正文与向量按内容全局唯一，合并无需搬运。</div>
         </div>
       </details>
     </section>
@@ -3545,8 +3545,8 @@ def reset_index(confirm: str):
         try:
             with store.lock:
                 deleted = {}
-                # vectors_v2 与旧成员表一起清（CAS 后负载在 v2，reset 必须两端都清干净）
-                for table in ("chunks", "vectors", "vectors_v2", "blobs", "repos", "lineages"):
+                # v2 表清单：chunks → blobs(级联 vectors) → scopes → lineages
+                for table in ("chunks", "vectors", "blobs", "scopes", "lineages"):
                     cur = store.db.execute(f"delete from {table}")
                     deleted[table] = int(cur.rowcount or 0)
                 store.db.commit()
@@ -3682,6 +3682,7 @@ class FakeEmbedder:
 state = {"ready": False, "err": None, "info": {}, "rerank_ready": False, "rerank_err": None, "rerank_info": {}}
 store = None
 memories_store = None  # index_store.MemoryStore；与 store 同库，build() 里一起建
+jobs_store = None      # index_store.JobsStore（exp_jobs / api_calls），build() 里一起建
 knn = None
 governor = None
 embedder = None
@@ -3696,7 +3697,7 @@ def _load(name):
 
 
 def build():
-    global store, memories_store, knn, governor, embedder, reranker
+    global store, memories_store, jobs_store, knn, governor, embedder, reranker
     if FAKE_EMBED:
         # 自测路径：完全不碰 onnxruntime / 模型文件
         embedder = FakeEmbedder()
@@ -3732,7 +3733,9 @@ def build():
             log("rerank unavailable: " + state["rerank_err"])
 
     store = index_store.IndexStore(DB_PATH)
-    memories_store = index_store.MemoryStore(DB_PATH)  # 经验资产：独立连接（避免与 IndexStore 事务交错；表同库，见 index_store.SCHEMA）
+    memories_store = index_store.MemoryStore(DB_PATH)  # 经验资产：独立连接（避免与 IndexStore 事务交错；表同库）
+    jobs_store = index_store.JobsStore(DB_PATH)  # exp_jobs / api_calls：独立连接
+    store.set_embed_tag(info["tag"])  # meta.embed_tag：当前模型 tag（诊断/迁移核对用）
     knn = _load("knn").KnnCache(store, KNN_MAX_BYTES)
     governor = _load("governor").EmbedGovernor(
         store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log,
@@ -3771,7 +3774,7 @@ def _warmup():
     # tag_stats()/total_bytes() 要扫全表；不预热的话"重启后第一次打开控制台"要等 5~10s。
     try:
         t0 = _t.time()
-        for _r in store.db.execute("select namespace from repos").fetchall():
+        for _r in store.db.execute("select namespace from scopes").fetchall():
             try:
                 store.counts(_r["namespace"])
             except Exception:  # noqa: BLE001
@@ -3791,8 +3794,8 @@ def _warmup():
         log(f"warmup: model discovery 失败（忽略）{type(e).__name__}: {e}")
     try:
         row = store.db.execute(
-            "select r.namespace, r.tag, (select count(*) from chunks c where c.namespace = r.namespace) as n"
-            " from repos r order by n desc limit 1"
+            "select s.namespace, s.tag, (select count(*) from chunks c where c.scope_id = s.id) as n"
+            " from scopes s order by n desc limit 1"
         ).fetchone()
         if row and row["n"] and row["tag"]:
             t0 = _t.time()
@@ -3838,7 +3841,7 @@ def _namespaces_from_request(raw, single):
 def _hit_scope(repo):
     if not repo:
         return {"kind": "main", "ref": None, "root": None}
-    return {"kind": repo["scope_kind"] or "main", "ref": repo["scope_ref"], "root": repo.get("root_rel")}
+    return {"kind": repo["kind"] or "main", "ref": repo["ref"], "root": repo.get("root_rel")}
 
 
 def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=None):
@@ -3853,7 +3856,7 @@ def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=No
     by_scope = []
     usable = []
     for ns, weight in entries:
-        repo = store.repo(ns)
+        repo = store.scope(ns)
         if not repo:
             by_scope.append({"namespace": ns, "error": "unknown-namespace"})
             continue
@@ -3865,7 +3868,7 @@ def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=No
         usable.append({"namespace": ns, "weight": weight, "repo": repo, "tag": use_tag})
     if not usable:
         if single:
-            repo = store.repo(entries[0][0])
+            repo = store.scope(entries[0][0])
             if repo is None:
                 return {"error": "unknown-namespace", "namespace": entries[0][0]}, 404
             return {"hits": [], "reason": "该命名空间还没有模型标签（先同步一次）", "ms": {},
@@ -3943,14 +3946,8 @@ def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=No
     rerank_ms = 0.0
     if rerank_candidates and reranker is not None and len(ranked) > 1:
         pool = ranked[: int(rerank_candidates)]
-        # 正文按 lineage 批量取（多作用域可能跨血统）
-        groups = {}
-        for h in pool:
-            repo = store.repo(h["namespace"]) or usable[0]["repo"]
-            groups.setdefault(repo["lineage_id"], []).append(h["hash"])
-        bodies = {}
-        for lineage, hashes_in in groups.items():
-            bodies.update(store.bodies(lineage, hashes_in))
+        # v2：blobs 是全局内容寻址表 → 一次按 hash 批量取，不再按血统分组
+        bodies = store.bodies([h["hash"] for h in pool])
         t2 = time.time()
         try:
             with MODEL_LOCK:
@@ -3987,7 +3984,7 @@ def search(namespaces, query, k=10, tag=None, rerank_candidates=0, embed_text=No
 
 
 def repo_status(namespace):
-    repo = store.repo(namespace)
+    repo = store.scope(namespace)
     if not repo:
         return {"error": "unknown-namespace"}, 404
     out = {
@@ -4000,8 +3997,8 @@ def repo_status(namespace):
         "tag": repo["tag"],
         "repoState": repo["repo_state"],
         "scope": {
-            "kind": repo["scope_kind"] or "main",
-            "ref": repo["scope_ref"],
+            "kind": repo["kind"] or "main",
+            "ref": repo["ref"],
             "root": repo.get("root_rel"),
             "commit": repo["commit_sha"],
             "createdAt": repo["created_at"],
@@ -4025,13 +4022,14 @@ def bodies_payload(namespace, hashes_param="", max_bytes_param=""):
       非 64 位 hex 的项进 `rejected`（不查库）；
     - max_bytes: 默认 `BODIES_MAX_BYTES_DEFAULT`，非法值回落默认，clamp 到 [1, `BODIES_MAX_BYTES_LIMIT`]；
     - 按请求顺序装正文，超出字节预算的块进 `truncated`（**不返回半截正文**）；
-    - 内容按血统共享：blobs 里没有的 hash 如实进 `missing`（跨血统同名 hash 不算命中）。
+    - 内容**全局内容寻址**（v2）：blobs 里没有的 hash 如实进 `missing`；
+      `lineage_id` 仅用于响应里标注该 namespace 属于哪个血统。
 
     返回 (payload, http_code)。契约见 docs/bodies.md。
     """
     if not store:
         return {"error": "not ready", "detail": state["err"]}, 503
-    repo = store.repo(namespace)
+    repo = store.scope(namespace)
     if not repo:
         return {"error": "unknown-namespace"}, 404
     t0 = time.time()
@@ -4058,7 +4056,7 @@ def bodies_payload(namespace, hashes_param="", max_bytes_param=""):
     except (TypeError, ValueError):
         max_bytes = BODIES_MAX_BYTES_DEFAULT
     max_bytes = max(1, min(max_bytes, BODIES_MAX_BYTES_LIMIT))
-    found = store.bodies(repo["lineage_id"], hashes) if hashes else {}
+    found = store.bodies(hashes) if hashes else {}
     bodies, missing, truncated = [], [], []
     used = 0
     for h in hashes:
@@ -4100,6 +4098,12 @@ def _memory_store():
     return memories_store, None
 
 
+def _jobs_store():
+    if not jobs_store:
+        return None, ({"error": "not ready", "detail": state["err"]}, 503)
+    return jobs_store, None
+
+
 def _memory_embed(text):
     """同步嵌入一条经验正文（非 query 侧：不加 QUERY_PREFIX）。
 
@@ -4128,6 +4132,8 @@ def memory_upsert_payload(req):
         result, action = ms.upsert(
             req.get("repo"), req.get("lens"), req.get("what"), req.get("when_expr"),
             req.get("why"), evidence, req.get("source"), req.get("status") or "active",
+            category=req.get("category"), workflow=req.get("workflow"),
+            audit=req.get("audit"), exp_job_id=req.get("exp_job_id"),
         )
     except ValueError as e:
         return {"error": "bad-memory", "detail": str(e)}, 400
@@ -4155,7 +4161,10 @@ def memory_get_payload(memory_id):
     ms, err = _memory_store()
     if err:
         return err
-    item = ms.get(memory_id)
+    try:
+        item = ms.get(memory_id)
+    except ValueError:  # id 不是 exp-NNNNNN / 整数 → 与"不存在"同口径 404
+        return {"error": "unknown-memory"}, 404
     if not item:
         return {"error": "unknown-memory"}, 404
     # 治理可见性：事件时间线（倒序；存量数据合成 created/last-hit，标 synthesized）
@@ -4166,7 +4175,7 @@ def memory_get_payload(memory_id):
 
 
 def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, offset=None,
-                        stale_days=None):
+                        stale_days=None, category=None, workflow=None):
     """GET /v1/memories：过滤 + 分页（limit clamp [1,200]，offset >= 0）。
 
     stale_days（正整数）：只看 active 且 last_hit_at 早于 N 天前（或从未命中）的陈旧条目。
@@ -4184,7 +4193,8 @@ def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, o
         return {"error": "bad-pagination", "detail": "stale_days must be >= 0"}, 400
     limit = max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT))
     offset = max(0, offset)
-    return ms.list(repo, lens, status, q, limit, offset, stale_days=stale), 200
+    return ms.list(repo, lens, status, q, limit, offset, stale_days=stale,
+                   category=category or None, workflow=workflow or None), 200
 
 
 def memory_search_payload(req):
@@ -4207,10 +4217,16 @@ def memory_search_payload(req):
     qvec, why_no_vec = _memory_embed_query(query)
     # 检索口径（Memanto 模型）：active + conflicting 都参与召回；conflicting 命中
     # 带 conflictWarning:true 标注（调用方自行决定是否采纳/提示用户），retired 不出。
-    hits, channels = ms.search(query, qvec, req.get("repo") or None, req.get("lens") or None, top_k)
+    hits, channels = ms.search(
+        query, qvec, req.get("repo") or None, req.get("lens") or None, top_k,
+        category=req.get("category") or None, workflow=req.get("workflow") or None,
+    )
     out = {
-        "hits": [{k: h[k] for k in ("id", "what", "when_expr", "why", "lens", "repo", "score")}
-                 | ({"conflictWarning": True} if h.get("status") == "conflicting" else {})
+        # v2：只召回 active；参与开放冲突的条目仍可召回，带 conflictWarning 标注。
+        # 新增 category/lensLabel/categoryLabel（前端直接用中文标签）。
+        "hits": [{k: h[k] for k in ("id", "what", "when_expr", "why", "lens", "repo", "score",
+                                    "category", "lensLabel", "categoryLabel")}
+                 | ({"conflictWarning": True} if h.get("conflictWarning") else {})
                  for h in hits],
         "ms": round((time.time() - t0) * 1000, 1),
     }
@@ -4238,7 +4254,10 @@ def memory_hit_payload(memory_id, req):
     ms, err = _memory_store()
     if err:
         return err
-    stats = ms.record_hit(memory_id, bool(req.get("adopted")))
+    try:
+        stats = ms.record_hit(memory_id, bool(req.get("adopted")))
+    except ValueError:
+        return {"error": "unknown-memory"}, 404
     if stats is None:
         return {"error": "unknown-memory"}, 404
     return stats, 200
@@ -4249,7 +4268,10 @@ def memory_delete_payload(memory_id):
     ms, err = _memory_store()
     if err:
         return err
-    if not ms.set_status(memory_id, "retired"):
+    try:
+        if not ms.set_status(memory_id, "retired"):
+            return {"error": "unknown-memory"}, 404
+    except ValueError:
         return {"error": "unknown-memory"}, 404
     return {"id": memory_id, "status": "retired"}, 200
 
@@ -4264,7 +4286,7 @@ def memory_conflicts_payload(limit=None, offset=None):
         offset = 0 if offset is None else int(offset)
     except (TypeError, ValueError):
         return {"error": "bad-pagination"}, 400
-    return ms.conflicting(max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT)), max(0, offset)), 200
+    return ms.conflicts(max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT)), max(0, offset)), 200
 
 
 def memory_resolve_payload(memory_id, req):
@@ -4273,11 +4295,19 @@ def memory_resolve_payload(memory_id, req):
     if err:
         return err
     status = str(req.get("status") or "").strip()
-    if status not in ("active", "retired"):
-        return {"error": "bad-status", "detail": "status must be active or retired"}, 400
-    if not ms.set_status(memory_id, status):
+    # both = 都保留（冲突裁决的一种）：不动 memories.status，只把开放冲突标 keep_both
+    if status not in ("active", "retired", "both"):
+        return {"error": "bad-status", "detail": "status must be active / retired / both"}, 400
+    try:
+        if not ms.set_status(memory_id, "active" if status == "both" else status):
+            return {"error": "unknown-memory"}, 404
+    except ValueError:
         return {"error": "unknown-memory"}, 404
-    return {"id": memory_id, "status": status}, 200
+    resolved = ms.resolve_for_memory(memory_id, status)
+    out = {"id": memory_id, "status": "active" if status == "both" else status}
+    if resolved:
+        out["resolvedConflicts"] = resolved
+    return out, 200
 
 
 def memory_link_conflict_payload(req):
@@ -4306,28 +4336,29 @@ def memory_link_conflict_payload(req):
     return out, 200
 
 
-PIPELINE_RUN_MAX_LIMIT = 100     # pipeline-runs 列表分页上限
+PIPELINE_RUN_MAX_LIMIT = 100     # pipeline-runs(=exp_jobs) 列表分页上限
 
 
 def pipeline_run_report_payload(req):
-    """POST /v1/admin/pipeline-runs：管道跑批上报（留痕）。
+    """POST /v1/admin/pipeline-runs：抽取任务上报（落 `exp_jobs`，每次会话段落一条）。
 
-    body: {run_id, started_at, finished_at, engine, dry_run, candidates,
-           review_passed, review_blocked, dedup_kept, dedup_merged, actions:{...},
-           details:{...}}；run_id 重复时覆盖（重放幂等）。
+    body（v2 字段）: {session_id, segment_no, workflow, mode, status, model,
+                      prompt_version, tokens_in, tokens_out, ms, candidates, blocked,
+                      created_n, updated_n, skipped_n, contradicted_n, reasons, error}
+    同 (session_id, segment_no) 重复上报 = 覆盖更新（重放幂等）。
     """
-    ms, err = _memory_store()
+    js, err = _jobs_store()
     if err:
         return err
     try:
-        return ms.record_run(req), 200
+        return js.record(req), 200
     except ValueError as e:
         return {"error": "bad-run", "detail": str(e)}, 400
 
 
 def pipeline_runs_list_payload(limit=None, offset=None):
-    """GET /v1/admin/pipeline-runs?limit=N：跑批列表，按 started_at 倒序。"""
-    ms, err = _memory_store()
+    """GET /v1/admin/pipeline-runs?limit=N：抽取任务列表，按 created_at 倒序。"""
+    js, err = _jobs_store()
     if err:
         return err
     try:
@@ -4335,7 +4366,15 @@ def pipeline_runs_list_payload(limit=None, offset=None):
         offset = 0 if offset is None else int(offset)
     except (TypeError, ValueError):
         return {"error": "bad-pagination"}, 400
-    return ms.list_runs(max(1, min(limit, PIPELINE_RUN_MAX_LIMIT)), max(0, offset)), 200
+    return js.list_jobs(max(1, min(limit, PIPELINE_RUN_MAX_LIMIT)), max(0, offset)), 200
+
+
+def exp_jobs_stats_payload():
+    """GET /v1/admin/exp/jobs/stats：抽取任务漏斗（治理流水时间线数据源）。"""
+    js, err = _jobs_store()
+    if err:
+        return err
+    return js.job_stats(), 200
 
 
 def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc", limit=50, offset=0):
@@ -4424,7 +4463,7 @@ def _scope_from_sync(req, ns=None):
         raise index_store.ScopeFormatError(
             "missing-scope", "new /v1/namespaces/sync 必须带 scope（或显式 namespace）"
         )
-    existing = store.repo(ns) if ns else None
+    existing = store.scope(ns) if ns else None
     repo_id = req.get("repoId") or (existing or {}).get("repo_id")
     chunk_fp = req.get("chunkFp") or (existing or {}).get("chunk_fp")
     if not repo_id or not chunk_fp:
@@ -4932,7 +4971,8 @@ class Handler(BaseHTTPRequestHandler):
 
             payload, code = memory_list_payload(
                 _q1("repo"), _q1("lens"), _q1("status"), _q1("q"), _q1("limit"),
-                _q1("offset"), _q1("stale_days"),
+                _q1("offset"), _q1("stale_days"), category=_q1("category"),
+                workflow=_q1("workflow"),
             )
             return self._send(code, payload)
         if path.startswith("/v1/memories/"):
@@ -5229,7 +5269,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
                 if not self._repo_allowed(effective_ns):
                     return self._send(404, {"error": "not-found"})
-                repo = store.repo(effective_ns)
+                repo = store.scope(effective_ns)
                 return self._send(200, {
                     "namespace": effective_ns,
                     "exists": repo is not None,
@@ -5261,7 +5301,7 @@ class Handler(BaseHTTPRequestHandler):
                         f"vectors={a.get('vectors')} overlap={a.get('overlap')} sim={a.get('similarity')}")
                 elif payload.get("adoptError"):
                     log(f"adopt failed (sync 继续): {effective_ns}: {payload['adoptError']}")
-                repo = store.repo(effective_ns)
+                repo = store.scope(effective_ns)
                 try:
                     if scope_meta is not None:
                         store.register_scope(
@@ -5307,7 +5347,7 @@ class Handler(BaseHTTPRequestHandler):
                         governor.kick(ns)
                     return self._send(200, r)
                 if action == "vectors":
-                    repo = store.repo(ns)
+                    repo = store.scope(ns)
                     if not repo:
                         return self._send(404, {"error": "unknown-namespace"})
                     tag = req.get("tag") or repo["tag"] or state["info"].get("tag")
@@ -5321,7 +5361,7 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         pairs.append((item["hash"], vec))
                     if pairs:
-                        store.put_vectors(repo["lineage_id"], tag, pairs)
+                        store.put_vectors(tag, pairs)
                         knn.invalidate(ns)
                     cap = ensure_capacity(repo["lineage_id"])
                     if cap:
@@ -5403,7 +5443,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "bad-scope", "reason": e.reason, "detail": str(e)})
                 if not self._repo_allowed(ns):
                     return self._send(404, {"error": "not-found"})
-                repo = store.repo(ns)
+                repo = store.scope(ns)
                 out = {"namespace": ns, "exists": repo is not None}
                 if repo:
                     out["revision"] = repo["revision"]
@@ -5571,8 +5611,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(400, {"error": "lineage required"})
                     return self._send(200, store.gc(lineage))
                 elif action == "lineages/merge":
-                    # 血统合并（T-261120-dedup）：body {from: [repoId|lineageId|ns,...], into: "..."}
-                    # 单事务 BEGIN IMMEDIATE；旧血统软标记 merged_into 观察期 7 天。
+                    # 血统合并：body {from: [repoId|lineageId|ns,...], into: "..."}
+                    # v2 不留墓碑：作用域直接改挂 lineage_id，源血统行物理删除。
                     from_tokens = req.get("from")
                     into_token = req.get("into")
                     if not isinstance(from_tokens, list) or not from_tokens:
@@ -5594,13 +5634,13 @@ class Handler(BaseHTTPRequestHandler):
                         knn.invalidate()  # 血统归一：受影响 namespace 的矩阵缓存全部失效
                     return self._send(200, result)
                 elif action == "lineages/hard-clean":
-                    # 观察期物理清理：merged_into 置位且 merged_at 超过 minAgeDays（默认 7 天）
-                    # 的血统行物理删除。force=true 无视观察期（只给清理脚本用）。
+                    # v2 没有 merged_into 墓碑 → "观察期物理清理"消失；这里改为清理
+                    # **空血统**（没有任何作用域）的维护入口，路径与响应字段保持不变。
                     try:
-                        min_age_days = int(req.get("minAgeDays", 7))
+                        min_age_days = int(req.get("minAgeDays", 0))
                     except (TypeError, ValueError):
-                        min_age_days = 7
-                    result = store.lineage_hard_clean(
+                        min_age_days = 0
+                    result = store.cleanup_lineages(
                         min_age_days=min_age_days, force=bool(req.get("force"))
                     )
                     if result["removedCount"] and knn:

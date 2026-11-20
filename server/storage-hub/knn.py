@@ -31,14 +31,14 @@ class KnnCache:
             entry = self._cache.get(key)
         if entry is not None:
             nbytes, revision, hashes, mat, meta = entry
-            repo = self.store.repo(namespace)
-            if repo and int(repo["revision"]) == revision and (repo["tag"] or "") == (tag or ""):
+            scope = self.store.scope(namespace)
+            if scope and int(scope["revision"]) == revision and (scope["tag"] or "") == (tag or ""):
                 with self._lock:
                     self._cache.move_to_end(key)
                     self.hits += 1
                 return hashes, mat, meta
         hashes, mat, meta = self.store.matrix(namespace, tag)
-        revision = int((self.store.repo(namespace) or {}).get("revision", 0))
+        revision = int((self.store.scope(namespace) or {}).get("revision", 0))
         nbytes = int(mat.nbytes)
         with self._lock:
             self.misses += 1

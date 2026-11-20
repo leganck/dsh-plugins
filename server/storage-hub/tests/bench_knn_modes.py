@@ -75,22 +75,23 @@ def load_vectors():
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     row = con.execute(
-        "select r.namespace, r.lineage_id, r.tag, (select count(*) from chunks c where c.namespace = r.namespace) as n"
-        " from repos r order by n desc limit 1"
+        "select s.namespace, s.lineage_id, s.tag,"
+        " (select count(*) from chunks c where c.scope_id = s.id) as n"
+        " from scopes s order by n desc limit 1"
     ).fetchone()
     ns, lineage, tag, n = row["namespace"], row["lineage_id"], row["tag"], row["n"]
     rows = con.execute(
-        # CAS（T-261120-dedup）：向量负载在 vectors_v2（(tag,hash) 全局唯一）；
-        # 旧 vectors 表是成员表，v 列已清空，不能再当负载读。
-        "select c.hash, v.v, v.dim from chunks c join vectors_v2 v"
-        " on v.tag = ? and v.hash = c.hash where c.namespace = ?",
+        # v2：向量单表 vectors(tag, hash)（内容寻址，全局唯一）
+        "select c.hash, v.vec, v.dim from chunks c join vectors v"
+        " on v.tag = ? and v.hash = c.hash"
+        " where c.scope_id = (select id from scopes where namespace = ?)",
         (tag, ns),
     ).fetchall()
     dim = rows[0]["dim"]
     hashes = [r["hash"] for r in rows]
     mat = np.empty((len(rows), dim), dtype=np.float32)
     for i, r in enumerate(rows):
-        mat[i] = np.frombuffer(r["v"], dtype=np.float32, count=r["dim"])
+        mat[i] = np.frombuffer(r["vec"], dtype=np.float32, count=r["dim"])
     return ns, lineage, tag, hashes, mat
 
 

@@ -223,10 +223,10 @@ class EmbedGovernor:
             "spaces": st,
         }
         if namespace:
-            repo = self.store.repo(namespace)
-            if repo:
+            scope = self.store.scope(namespace)
+            if scope:
                 out.update(self.store.counts(namespace))
-                pending = self.store.pending_count(namespace, repo["tag"])
+                pending = self.store.pending_count(namespace, scope["tag"])
                 out["pending"] = pending
                 speed = out["speed"]
                 if speed <= 0:
@@ -301,11 +301,11 @@ class EmbedGovernor:
         return uniq_texts, _balanced_groups(order, self.batch), owner
 
     def _tick(self, namespace):
-        repo = self.store.repo(namespace)
-        if not repo:
+        scope = self.store.scope(namespace)
+        if not scope:
             self._drop(namespace)
             return
-        tag = repo["tag"]
+        tag = scope["tag"]
         if not tag:
             # 还不知道模型标签：等客户端带 tag 的同步（同步里会写 tag）
             self._drop(namespace)
@@ -334,7 +334,7 @@ class EmbedGovernor:
                 pairs.append((items[i]["hash"], vecs[k]))
         if not pairs:
             return
-        self.store.put_vectors(repo["lineage_id"], tag, pairs)
+        self.store.put_vectors(tag, pairs)
         self.knn.invalidate(namespace)
         t_end = self.clock()
         st = self._state.setdefault(namespace, {"embeddedTotal": 0})
