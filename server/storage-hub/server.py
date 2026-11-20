@@ -4057,8 +4057,51 @@ def build():
     governor.start()
     log(f"index store ready: db={DB_PATH} rate={EMBED_RATE}/s batch={EMBED_BATCH}"
         f" window={EMBED_WINDOW} dedupe={EMBED_DEDUPE} knnMax={KNN_MAX_BYTES}B")
+    # 换模型（tag 变化）/ 重启后的自愈：把「当前 tag 下缺向量」的 scope 重新入队。
+    # 队列只由 sync 的 missing 触发，而模型换了以后客户端会说"远端已最新"，不再报 missing，
+    # 于是向量永远补不回来（2026-11-21 实测：切 int8 后 19k 块 pending、队列空转 0 块/s）。
+    threading.Thread(target=_reconcile_embeddings, name="reconcile-embed", daemon=True).start()
     if WARMUP:
         threading.Thread(target=_warmup, name="warmup", daemon=True).start()
+
+
+def _reconcile_embeddings(verbose=True):
+    """把「当前模型 tag 下缺向量」的 scope 重新入队（换模型/重启后的自愈动作）。
+
+    返回 {"kicked": [...], "pending": N}；出错只记日志，绝不影响启动。
+    """
+    out = {"kicked": [], "pending": 0, "retagged": 0}
+    try:
+        info = state.get("info") or {}
+        tag = info.get("tag") or getattr(embedder, "tag", "") or ""
+        # 关键：换模型后 scopes.tag 仍是旧 tag，governor 按旧 tag 算 pending=0 → 永远不嵌。
+        # 先 retag（与 admin 热切换同一条路径），再入队。
+        try:
+            out["retagged"] = int(store.set_all_tags(tag)) if tag else 0
+        except Exception as exc:  # noqa: BLE001
+            log(f"reconcile retag failed: {type(exc).__name__}: {exc}")
+        rows = store.scope_overview(limit=100000) or []  # 返回 list（不是 {"items": ...}）
+        for row in rows:
+            ns = row.get("namespace")
+            if not ns:
+                continue
+            try:
+                pending = store.pending_count(ns, tag)
+            except Exception:  # noqa: BLE001 —— 单个 scope 出错不影响其它
+                continue
+            if pending <= 0:
+                continue
+            out["pending"] += pending
+            governor.kick(ns)
+            out["kicked"].append(ns)
+        if verbose and out["kicked"]:
+            log(f"reconcile: retag {out['retagged']} 个 scope；"
+                f"{len(out['kicked'])} 个 scope / {out['pending']} 块缺向量 → 已入队（tag={tag}）")
+        elif verbose:
+            log(f"reconcile: 无缺失（tag={tag}）")
+    except Exception as exc:  # noqa: BLE001
+        log(f"reconcile failed: {type(exc).__name__}: {exc}")
+    return out
 
 
 def _warmup():
@@ -6613,6 +6656,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, result)
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
+                if action == "embed/reconcile":
+                    res = _reconcile_embeddings(verbose=False)
+                    log(f"admin reconcile: {len(res['kicked'])} scope / {res['pending']} 块")
+                    return self._send(200, {"ok": True, **res})
                 if action == "settings/llm":
                     # PUT 的 POST 别名：同语义（局部更新，api_key 空串=不改）
                     payload, code = llm_settings_update_payload(req)
