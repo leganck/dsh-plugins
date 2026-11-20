@@ -32,7 +32,7 @@ from stage_a import (  # noqa: E402
 from stage_b_rules import Candidate, extract_rules, parse_digest  # noqa: E402
 from stage_b_llm import LLMConfigError, extract_llm  # noqa: E402
 from stage_c import (  # noqa: E402
-    decide_merge, dedup, review_candidate, run_governance,
+    _trigger_words, decide_merge, dedup, review_candidate, run_governance,
 )
 
 PASS = 0
@@ -435,6 +435,79 @@ def test_client_http():
         srv.shutdown()
 
 
+# ---------------- 8. 治理可见性：link-conflict / report_run / 触发词 ----------------
+
+def test_governance_visibility():
+    print("[governance visibility]")
+    # 触发词提取：禁令 vs 要求词对
+    hit_contra = {
+        "id": "exp-000001", "what": "可以直接 push origin 上游",
+        "when_expr": "推送 smartpos 上游被 403 拒绝时", "lens": "logic"}
+    tw = _trigger_words(make_cand(), hit_contra)
+    check("trigger_words: 反向判定提取出词对", len(tw) == 2, str(tw))
+    # decide_merge 的 contradict 决定携带 trigger_words
+    dec = decide_merge(make_cand(), [hit_contra])
+    check("merge: contradict 决定带 trigger_words", dec.action == "contradict"
+          and isinstance(dec.trigger_words, list) and len(dec.trigger_words) >= 1,
+          f"{dec.action} {dec.trigger_words}")
+    dec2 = decide_merge(make_cand(), [])
+    check("merge: create 决定 trigger_words 为空", dec2.action == "create"
+          and dec2.trigger_words == [], str(dec2.trigger_words))
+
+    # 执行链路：contradict 写 conflicting 后自动 link-conflict（stub 双向互指）
+    stub3 = StubIndexClient(existing=[dict(hit_contra, repo="web-erp", why="")])
+    rep = run_governance([make_cand()], client=stub3, dry_run=False)
+    contra_row = next((m for m in rep["merge"] if m["action"] == "contradict"), None)
+    check("governance: contradict 执行后 merge 行带 trigger_words",
+          contra_row is not None and len(contra_row.get("trigger_words") or []) >= 1,
+          str(contra_row and contra_row.get("trigger_words")))
+    link_calls = [c for c in stub3.calls if c[1] == "/v1/memories/link-conflict"]
+    check("governance: contradict 触发 link-conflict 调用", len(link_calls) == 1,
+          str(stub3.calls))
+    new_id = (contra_row.get("executed") or {}).get("id", "")
+    conf_item = next((i for i in stub3.existing if i["id"] == new_id), None)
+    origin_item = next((i for i in stub3.existing if i["id"] == "exp-000001"), None)
+    check("link-conflict: 双方 against_id 互指（stub 行内）",
+          bool(conf_item and origin_item) and conf_item.get("against_id") == "exp-000001"
+          and origin_item.get("against_id") == new_id,
+          f"conf={conf_item and conf_item.get('against_id')} "
+          f"origin={origin_item and origin_item.get('against_id')}")
+    check("link-conflict: trigger_words 存 conflicting 行",
+          bool(conf_item) and len(conf_item.get("trigger_words") or []) >= 1,
+          str(conf_item and conf_item.get("trigger_words")))
+
+    # dry-run：不执行 execute_merge → 也没有 link-conflict 写
+    stub4 = StubIndexClient(existing=[dict(hit_contra, repo="web-erp", why="")])
+    run_governance([make_cand()], client=stub4, dry_run=True)
+    check("dry-run: 无 link-conflict 写",
+          not any(c[1] == "/v1/memories/link-conflict" for c in stub4.calls),
+          str(stub4.calls))
+
+    # report_run：stub 记录调用；真 client 无凭据时可控报错
+    out = stub3.report_run({"run_id": "run-t1", "candidates": 3})
+    check("report_run(stub): 返回 recorded", out.get("recorded") is True
+          and any(c[1] == "/v1/admin/pipeline-runs" for c in stub3.calls), str(out))
+    import client as client_mod
+    saved_env = {k: os.environ.pop(k, None) for k in ("PIPE_ADMIN_USER", "PIPE_ADMIN_PASSWORD")}
+    try:
+        real = IndexClient(base_url="http://127.0.0.1:1", api_key="", retries=0)
+        try:
+            real.report_run({"run_id": "x"})
+            check("report_run: 无凭据抛 PipelineClientError（可控跳过）", False, "未抛")
+        except PipelineClientError as e:
+            check("report_run: 无凭据抛 PipelineClientError（可控跳过）",
+                  "PIPE_ADMIN_USER" in str(e), str(e))
+        os.environ["PIPE_ADMIN_USER"] = "admin"
+        os.environ["PIPE_ADMIN_PASSWORD"] = "pw"
+        check("admin_basic_auth: env 齐备时返回凭据对",
+              client_mod.admin_basic_auth() == ("admin", "pw"),
+              str(client_mod.admin_basic_auth()))
+    finally:
+        for k, v in saved_env.items():
+            if v is not None:
+                os.environ[k] = v
+
+
 def main() -> int:
     test_stage_a()
     test_stage_b_rules()
@@ -443,6 +516,8 @@ def main() -> int:
     test_stage_c_dedup()
     test_stage_c_merge()
     test_client_http()
+    test_governance_visibility()
+
     print(f"\n== {PASS} passed, {FAIL} failed ==")
     return 1 if FAIL else 0
 

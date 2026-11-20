@@ -9,12 +9,16 @@
 默认 --archive-dir = ~/.dsh/archive。--dry-run 只出判定不写服务端（默认也不发起
 任何网络请求；加 --explore 才在 dry-run 下做只读源码探索 /v1/search）。
 --llm 需 PIPE_LLM_URL/PIPE_LLM_KEY/PIPE_LLM_MODEL，缺省时优雅降级规则版（提示，不报错）。
+跑批留痕：非 dry-run 结束时向 POST /v1/admin/pipeline-runs 上报本次运行
+（候选/拦截/合并/四判计数 + 明细摘要；需 PIPE_ADMIN_USER/PIPE_ADMIN_PASSWORD env，
+缺失时跳过上报并打印说明——dry-run 一律不上报）。
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -112,7 +116,47 @@ def print_report(report: dict, verbose: bool) -> None:
                   f" origin={row['origin']}")
 
 
+def build_run_payload(report: dict, engine: str, dry_run: bool,
+                      run_id: str, started_at: float) -> dict:
+    """组装 pipeline-runs 上报 payload（计数来自 report['stats']，明细做摘要截断）。"""
+    st = report["stats"]
+    blocked = [{"what": trunc(r["what"], 80), "reasons": r["reasons"]}
+               for r in report.get("review", []) if not r["pass"]][:50]
+    conflicts = [{"what": trunc(m["what"], 80), "target": m["target"],
+                  "trigger_words": m.get("trigger_words") or []}
+                 for m in report.get("merge", []) if m["action"] == "contradict"][:50]
+    merged = [{"kept_idx": p[0], "dup_idx": p[1], "sim": p[2]}
+              for p in (report.get("dedup") or {}).get("pairs", [])][:50]
+    return {
+        "run_id": run_id,
+        "started_at": int(started_at),
+        "finished_at": int(time.time()),
+        "engine": engine,
+        "dry_run": dry_run,
+        "candidates": st.get("candidates_in", 0),
+        "review_passed": st.get("review_passed", 0),
+        "review_blocked": st.get("review_blocked", 0),
+        "dedup_kept": st.get("dedup_kept", 0),
+        "dedup_merged": st.get("dedup_merged", 0),
+        "actions": st.get("actions", {}),
+        "details": {"blocked": blocked, "merged": merged, "conflicts": conflicts},
+    }
+
+
+def report_run(client, payload: dict) -> bool:
+    """上报跑批留痕（best-effort）。返回是否成功；失败只打印，不挡退出码。"""
+    try:
+        out = client.report_run(payload)
+        rid = out.get("run_id") or payload.get("run_id", "")
+        print(f"\n已上报 run：{rid}（POST /v1/admin/pipeline-runs）")
+        return True
+    except Exception as e:  # noqa: BLE001 - 留痕失败不影响管道结果
+        print(f"\nrun 上报跳过：{e}")
+        return False
+
+
 def main(argv=None) -> int:
+    started_at = time.time()
     args = build_parser().parse_args(argv)
     print("== exp-pipeline ==")
     cands, engine, notes = gather_candidates(args)
@@ -136,7 +180,13 @@ def main(argv=None) -> int:
     report["engine"] = engine
     print_report(report, args.verbose)
     if args.dry_run:
-        print("\n(dry-run：未写服务端)")
+        print("\n(dry-run：未写服务端；run 不上报——去掉 --dry-run 后收尾打印"
+              "「已上报 run：<runId>（POST /v1/admin/pipeline-runs）」)")
+        return 0
+    # 跑批留痕（治理可见性）：候选/拦截明细/合并/四判计数进 pipeline_runs 表
+    run_id = f"run-{time.strftime('%Y%m%d-%H%M%S', time.localtime(started_at))}-{os.getpid()}"
+    payload = build_run_payload(report, engine, args.dry_run, run_id, started_at)
+    report_run(client, payload)
     return 0
 
 

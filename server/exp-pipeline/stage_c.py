@@ -141,6 +141,7 @@ class MergeDecision:
     action: str            # create | update | skip | contradict
     target_id: str = ""    # update/skip/contradict 的目标条目 id
     reason: str = ""
+    trigger_words: list[str] = field(default_factory=list)  # contradict 的触发词对
 
 
 def _is_contradiction(cand: Candidate, hit: dict) -> bool:
@@ -166,12 +167,38 @@ def _is_contradiction(cand: Candidate, hit: dict) -> bool:
     return False
 
 
+def _trigger_words(cand: Candidate, hit: dict) -> list[str]:
+    """提取触发反向判定的词对（供 link-conflict / conflicts 队列展示）。
+
+    按判定顺序：禁令 vs 要求词 → CONTRA_PAIRS 正则命中词。取两侧各自第一个命中词。
+    """
+    a_text = cand.what + " " + cand.when_expr
+    b_text = hit.get("what", "") + " " + hit.get("when_expr", "")
+    a_forbid = FORBID_RE.search(a_text)
+    a_require = REQUIRE_RE.search(a_text)
+    b_forbid = FORBID_RE.search(b_text)
+    b_require = REQUIRE_RE.search(b_text)
+    if (a_forbid and b_require) or (a_require and b_forbid):
+        if a_forbid and b_require:
+            return [a_forbid.group(0), b_require.group(0)]
+        return [a_require.group(0), b_forbid.group(0)]  # type: ignore[union-attr]
+    for rx_a, rx_b in CONTRA_PAIRS:
+        m_a, m_b = rx_a.search(a_text), rx_b.search(b_text)
+        if m_a and m_b:
+            return [m_a.group(0), m_b.group(0)]
+        m_a2, m_b2 = rx_b.search(a_text), rx_a.search(b_text)
+        if m_a2 and m_b2:
+            return [m_a2.group(0), m_b2.group(0)]
+    return []
+
+
 def decide_merge(cand: Candidate, hits: list[dict]) -> MergeDecision:
     """Merge 四判（纯函数，可测）。hits = /v1/memories/search 的命中条目。"""
     for hit in hits:
         if _is_contradiction(cand, hit):
             return MergeDecision("contradict", hit.get("id", ""),
-                                 f"与 {hit.get('id')} 反向（同主题，指令方向相反）")
+                                  f"与 {hit.get('id')} 反向（同主题，指令方向相反）",
+                                  _trigger_words(cand, hit))
     best_sim, best_hit = 0.0, None
     for hit in hits:
         s = text_similarity(norm(cand.what) + " " + norm(cand.when_expr),
@@ -207,14 +234,26 @@ def _same_target(cand: Candidate, hit: dict) -> bool:
 
 
 def execute_merge(decision: MergeDecision, cand: Candidate, client) -> dict:
-    """执行四判（非 dry-run 时调用）。返回服务端响应摘要。"""
+    """执行四判（非 dry-run 时调用）。返回服务端响应摘要。
+
+    contradict：写入候选（status=conflicting）后立即 link-conflict——
+    upsert 时不知道对手是谁，这里把双方 against_id 互指并记触发词对。
+    """
     if decision.action == "create":
         return client.memory_upsert(cand.to_payload() | {"status": "active"})
     if decision.action == "update":
         return client.memory_upsert(cand.to_payload())
     if decision.action == "contradict":
-        # 写入候选并标 conflicting，进人工队列（GET /v1/memories/conflicts）
-        return client.memory_upsert(cand.to_payload() | {"status": "conflicting"})
+        out = client.memory_upsert(cand.to_payload() | {"status": "conflicting"})
+        new_id = out.get("id", "") if isinstance(out, dict) else ""
+        if new_id and decision.target_id:
+            try:
+                client.memory_link_conflict(new_id, decision.target_id,
+                                            decision.trigger_words or None)
+            except Exception as e:  # noqa: BLE001 - 配对失败不回滚冲突写入（队列里仍可见）
+                out = dict(out) if isinstance(out, dict) else {"id": new_id}
+                out["linkError"] = str(e)
+        return out
     return {"action": "skip", "id": decision.target_id}
 
 
@@ -261,6 +300,7 @@ def run_governance(candidates: list[Candidate], client=None, dry_run: bool = Tru
             "lens": cand.lens, "repo": cand.repo, "what": cand.what,
             "when_expr": cand.when_expr, "origin": cand.origin,
             "evidence": cand.evidence, "executed": executed,
+            "trigger_words": dec.trigger_words,
         })
     report["stats"] = {
         "candidates_in": len(candidates),

@@ -40,6 +40,9 @@
     POST /v1/admin/pause | /resume | /rate | /gc
     POST /v1/lineages/{id}/adopt   {from, hashes?} 显式跨血统借用（管理员指定来源）
     GET  /v1/lineages/similar?path=&content=&tag=&limit=  simhash 候选（只返回元信息，不返回正文）
+    GET  /v1/admin/lineages/duplicates  重复血统检测（同 repoName 多血统 / 同 chunkFp，返回建议合并对与估算）
+    POST /v1/admin/lineages/merge       {from:[...], into} 血统合并（事务；merged_into 观察期 7 天，见 docs/lineages.md）
+    POST /v1/admin/lineages/hard-clean  {minAgeDays?, force?} 观察期到期血统的物理清理
     GET  /v1/scopes?limit=&offset=&q=  作用域分页清单（kind/ref/文件/占用）
     POST /v1/scopes/resolve        {repoId, chunkFp, kind, ref, commit?} -> {namespace, exists, revision?}
     DELETE /v1/scopes/{ns}         -> {deleted, chunks}
@@ -560,11 +563,6 @@ ADMIN_HTML = r"""<!doctype html>
   .drawer-kv .v { min-width:0; overflow-wrap:anywhere; white-space:pre-wrap; }
   .conflict-card { border:1px solid var(--warn); background:color-mix(in srgb, var(--warn-bg) 45%, var(--card)); }
   .conflict-card h2 { color:var(--warn); }
-  .conflict-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); margin:10px 0; }
-  .conflict-col { border:1px solid var(--line); border-radius:10px; padding:10px 12px; min-width:0; }
-  .conflict-col b.cap { display:block; font-size:11.5px; color:var(--muted); margin-bottom:6px; }
-  .conflict-col .what { font-weight:600; overflow-wrap:anywhere; }
-  .conflict-col .w2 { color:var(--muted); font-size:12px; margin-top:3px; overflow-wrap:anywhere; }
   main { max-width:1600px; margin:0 auto; }
   #banner { max-width:1600px; margin:12px auto 0; }
   @media (prefers-color-scheme: dark) {
@@ -598,6 +596,59 @@ ADMIN_HTML = r"""<!doctype html>
     .scope-toolbar input[type=search] { grid-column:1/-1; max-width:none !important; }
     .scope-pager { justify-content:flex-start; }
   }
+  /* v3 治理：inbox / 漏斗 / 对比 / receipt / 分组（少而精） */
+  .tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 5px;border-radius:999px;background:var(--bad);color:#fff;font-size:10.5px;font-weight:600;margin-left:5px;vertical-align:2px}
+  .health-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+  .ops-fold{border:1px solid var(--line);border-radius:14px;background:var(--card);padding:4px 16px 14px}
+  .ops-fold>summary{cursor:pointer;user-select:none;padding:10px 2px;color:var(--muted);font-size:12.5px;font-weight:600}
+  .ops-fold[open]>summary{border-bottom:1px solid var(--line);margin-bottom:12px}
+  .ops-grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:12px}
+  .inbox-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+  .inbox-card{border:1px solid var(--line);border-radius:11px;padding:10px 12px;cursor:pointer;background:var(--card)}
+  .inbox-card:hover{border-color:var(--muted)}
+  .inbox-card.active{border-color:var(--blue);box-shadow:inset 3px 0 0 var(--blue)}
+  .inbox-card .n{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}
+  .inbox-card .n.warn{color:var(--warn)}
+  .inbox-card .l{color:var(--muted);font-size:11.5px;margin-top:1px}
+  .funnel-row{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:7px 2px;border-bottom:1px dashed var(--line);font-size:12.5px}
+  .funnel-row:last-child{border-bottom:0}
+  .funnel-step{display:inline-flex;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums}
+  .funnel-step .arrow{color:var(--faint)}
+  .gov-run-detail{margin-top:4px;padding:8px 10px;border:1px dashed var(--line);border-radius:9px;font-size:12px;color:var(--muted)}
+  .cmp-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));margin:10px 0}
+  .cmp-col{border:1px solid var(--line);border-radius:11px;padding:11px 13px;min-width:0;background:var(--card)}
+  .cmp-col b.cap{display:block;font-size:11.5px;color:var(--muted);margin-bottom:6px}
+  .cmp-col .what{font-weight:600;overflow-wrap:anywhere}
+  .cmp-col .w2{color:var(--muted);font-size:12px;margin-top:3px;overflow-wrap:anywhere}
+  .cmp-col.is-old{border-style:dashed}
+  mark.tw-hl{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;border-radius:3px;padding:0 2px;font-weight:600}
+  .trig-chips{display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap}
+  .trig-pair{display:inline-flex;align-items:center;padding:1px 9px;border-radius:999px;border:1px dashed color-mix(in srgb,var(--warn) 55%,transparent);color:var(--warn);font-size:11.5px}
+  #receipt{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(12px);background:var(--card);color:var(--text);border:1px solid var(--line);box-shadow:0 10px 34px rgba(0,0,0,.22);padding:9px 14px;border-radius:11px;font-size:12.5px;opacity:0;pointer-events:none;transition:.2s;z-index:52;display:flex;align-items:center;gap:10px;max-width:min(92vw,640px)}
+  #receipt.show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+  #receipt .ok-dot{color:var(--ok);font-weight:700}
+  #receipt button.undo{padding:2px 10px;border-radius:999px;border:1px solid var(--warn);color:var(--warn);background:transparent;font-size:11.5px;white-space:nowrap}
+  .dup-group{border:1px solid var(--line);border-radius:11px;margin-bottom:10px;overflow:hidden}
+  .dup-group-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 13px;background:color-mix(in srgb,var(--bg) 60%,var(--card));font-size:12.5px}
+  .dup-group-head b{font-size:13px}
+  .dup-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 13px;border-top:1px solid var(--line);font-size:12px}
+  .dup-row .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mem-what-cell{max-width:420px;min-width:150px}
+  .mem-what-cell .idline{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:1px}
+  .tl-list{display:grid;gap:1px}
+  .tl-item{display:grid;grid-template-columns:10px 130px 1fr;gap:8px;align-items:baseline;font-size:12px;padding:3px 0}
+  .tl-item .rail{width:6px;height:6px;border-radius:50%;background:var(--faint);align-self:center}
+  .tl-item.ev-created .rail,.tl-item.ev-resolved .rail{background:var(--ok)}
+  .tl-item.ev-conflicted .rail{background:var(--warn)}
+  .tl-item.ev-retired .rail{background:var(--bad)}
+  .tl-item.ev-hit .rail,.tl-item.ev-adopted .rail{background:var(--blue)}
+  .tl-item .t{color:var(--faint);font-size:11px;font-family:var(--mono)}
+  .ev-path{cursor:pointer;border-bottom:1px dashed var(--faint)}
+  .ev-path:hover{color:var(--blue);border-bottom-color:var(--blue)}
+  .stale-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:999px;border:1px solid var(--warn);color:var(--warn);background:var(--warn-bg);font-size:11.5px;cursor:pointer}
+  .asset-action{margin-top:9px;padding-top:8px;border-top:1px dashed var(--line);font-size:12px;display:flex;gap:6px 14px;flex-wrap:wrap;align-items:baseline}
+  .asset-action .warn{color:var(--warn);font-weight:600}
+  @media (max-width:640px){.cmp-grid{grid-template-columns:1fr}.inbox-grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}#receipt{bottom:14px}.tl-item{grid-template-columns:10px 96px 1fr}}
 </style>
 </head>
 <body>
@@ -616,21 +667,17 @@ ADMIN_HTML = r"""<!doctype html>
 </header>
 <nav class="tabs">
   <button data-tab="overview" class="active">概览</button>
+  <button data-tab="memories">经验<span class="tab-badge" id="mem-tab-badge" style="display:none">0</span></button>
+  <button data-tab="scopes">代码资产</button>
+  <button data-tab="stats">统计</button>
   <button data-tab="models">模型</button>
   <button data-tab="keys">API Key</button>
-  <button data-tab="stats">统计</button>
-  <button data-tab="scopes">代码资产</button>
-  <button data-tab="memories">经验</button>
   <button data-tab="logs">日志</button>
 </nav>
 <div id="banner"></div>
 <main>
-  <!-- ============================ 概览 ============================ -->
+  <!-- ============ 概览（v3 驾驶舱：双资产大卡 + 一句话健康度 + 运维折叠区） ============ -->
   <section id="tab-overview" class="panel active">
-    <section class="card wide runtime-card">
-      <h2>运行时</h2>
-      <div class="kv" id="runtime"><div class="k">加载中…</div><div class="v"></div></div>
-    </section>
     <section class="card asset-card" id="asset-code-card" title="点击进入代码资产页">
       <h2>📦 代码资产 <span class="tail"><span id="asset-code-go" class="faint">管理 →</span></span></h2>
       <div id="asset-code"><div class="faint">加载中…</div></div>
@@ -640,31 +687,41 @@ ADMIN_HTML = r"""<!doctype html>
       <div id="asset-mem"><div class="faint">加载中…</div></div>
       <div class="red-dot" id="mem-conflict-dot" style="display:none"></div>
     </section>
-    <section class="card wide">
-      <h2>系统负载 <span class="tail faint" id="sys-at"></span></h2>
-      <div class="metric-grid" id="system"><div class="faint">加载中…</div></div>
-    </section>
-    <section class="card">
-      <h2>嵌入治理</h2>
-      <div class="kv" id="governor"><div class="k">加载中…</div><div class="v"></div></div>
-    </section>
-    <section class="card">
-      <h2>存储与限额</h2>
-      <div class="kv" id="limits"><div class="k">加载中…</div><div class="v"></div></div>
-    </section>
-    <section class="card">
-      <h2>向量标签 <span class="tail"><button id="btn-purge-tags" style="padding:2px 8px">清理旧 tag</button></span></h2>
-      <div class="kv" id="tags"><div class="k">加载中…</div><div class="v"></div></div>
-    </section>
-    <section class="card wide">
-      <h2>鉴权状态</h2>
-      <div class="kv" id="auth-kv"><div class="k">加载中…</div><div class="v"></div></div>
-      <div id="setup-box" style="display:none;margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
-        <div class="login-hint" style="margin-bottom:8px">还没有管理员密码。设置后控制台需要登录（也可继续用环境变量 ADMIN_PASSWORD）。</div>
-        <input id="setup-pwd" type="password" placeholder="设置管理员密码（至少 8 位）" style="min-width:260px">
-        <button class="primary" id="btn-setup">设置密码</button>
+    <div class="health-line wide" id="health-line"><span class="faint">健康度加载中…</span></div>
+    <details class="ops-fold wide" id="ops-details">
+      <summary>运维详情<span class="faint" style="font-weight:400;margin-left:8px">运行时 · 系统负载 · 嵌入治理 · 存储限额 · 向量标签 · 鉴权</span></summary>
+      <div class="ops-grid">
+        <section class="card wide runtime-card">
+          <h2>运行时</h2>
+          <div class="kv" id="runtime"><div class="k">加载中…</div><div class="v"></div></div>
+        </section>
+        <section class="card wide">
+          <h2>系统负载 <span class="tail faint" id="sys-at"></span></h2>
+          <div class="metric-grid" id="system"><div class="faint">加载中…</div></div>
+        </section>
+        <section class="card">
+          <h2>嵌入治理</h2>
+          <div class="kv" id="governor"><div class="k">加载中…</div><div class="v"></div></div>
+        </section>
+        <section class="card">
+          <h2>存储与限额</h2>
+          <div class="kv" id="limits"><div class="k">加载中…</div><div class="v"></div></div>
+        </section>
+        <section class="card">
+          <h2>向量标签 <span class="tail"><button id="btn-purge-tags" style="padding:2px 8px">清理旧 tag</button></span></h2>
+          <div class="kv" id="tags"><div class="k">加载中…</div><div class="v"></div></div>
+        </section>
+        <section class="card wide">
+          <h2>鉴权状态</h2>
+          <div class="kv" id="auth-kv"><div class="k">加载中…</div><div class="v"></div></div>
+          <div id="setup-box" style="display:none;margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
+            <div class="login-hint" style="margin-bottom:8px">还没有管理员密码。设置后控制台需要登录（也可继续用环境变量 ADMIN_PASSWORD）。</div>
+            <input id="setup-pwd" type="password" placeholder="设置管理员密码（至少 8 位）" style="min-width:260px">
+            <button class="primary" id="btn-setup">设置密码</button>
+          </div>
+        </section>
       </div>
-    </section>
+    </details>
   </section>
 
   <!-- ============================ 模型 ============================ -->
@@ -951,6 +1008,18 @@ ADMIN_HTML = r"""<!doctype html>
         </div>
       </details>
     </section>
+    <section class="card wide">
+      <h2>重复血统分组 <span class="tail"><button class="small" id="btn-dup-refresh">刷新分组</button></span></h2>
+      <div id="dup-groups"><div class="empty">加载中…</div></div>
+      <details class="help">
+        <summary>合并说明</summary>
+        <div class="grid">
+          <div><b>同 chunkFp</b>：同仓库内容裂成多个血统（多 repoId / 重复同步），合并收益最大；建议保留块数最大的血统，其余行 [合并到 ↑]。</div>
+          <div><b>不同 chunkFp</b>：同名仓库但内容指纹不同（如 bug-analysis 场景），合并需人工确认，点合并会再弹确认。</div>
+          <div><b>合并语义</b>：旧血统软标记 merged_into（观察期 7 天），namespaces 不动、客户端照常同步；观察期到期后可物理清理。</div>
+        </div>
+      </details>
+    </section>
     <section class="card wide" style="border-color:var(--bad)">
       <h2 style="color:var(--bad)">危险操作：清空所有作用域</h2>
       <div class="faint" style="font-size:12px;margin-bottom:10px">删除服务端全部作用域、块、向量与正文（API Key、调用统计、模型设置保留），随后 VACUUM 回收空间。清空后检索会暂时没有结果，客户端（插件 / review-service）下次同步会自动全量重建；本机已建索引的仓库可用重推脚本一次补齐。</div>
@@ -962,10 +1031,18 @@ ADMIN_HTML = r"""<!doctype html>
     </section>
   </section>
 
-  <!-- ============================ 经验 ============================ -->
+  <!-- ============================ 经验（v3：Inbox / 治理流水 / 四键裁决 / what 首列） ============================ -->
   <section id="tab-memories" class="panel">
     <section class="card wide">
-      <h2>冲突裁决 <span class="tail faint">contradict 不自动决断，走人工裁决（保留新/保留旧/都保留）</span></h2>
+      <h2>Review Inbox <span class="tail faint">待办收件箱 · 点击卡片过滤下方列表</span></h2>
+      <div class="inbox-grid" id="mem-inbox"><div class="faint">加载中…</div></div>
+    </section>
+    <section class="card wide">
+      <h2>治理流水 <span class="tail faint" id="gov-runs-at"></span></h2>
+      <div id="gov-runs"><div class="empty">加载中…</div></div>
+    </section>
+    <section class="card wide">
+      <h2>冲突裁决 <span class="tail faint">contradict 不自动决断，走人工四键：保留新 / 保留旧 / 都保留 / 融合</span></h2>
       <div id="mem-conflicts"><div class="empty">加载中…</div></div>
     </section>
     <section class="card wide">
@@ -980,6 +1057,7 @@ ADMIN_HTML = r"""<!doctype html>
           <option value="conflicting">conflicting</option>
           <option value="retired">retired</option>
         </select>
+        <span class="stale-chip" id="mem-stale-chip" style="display:none" title="当前列表只看 90 天未命中的 active 条目（stale_days=90）；点击退出">90 天未命中 ×</span>
         <button class="primary small" id="btn-mem-new">＋ 新建</button>
         <button class="small" id="btn-mem-import">⤒ 批量导入(JSON)</button>
         <input id="mem-import-file" type="file" accept="application/json,.json" style="display:none">
@@ -989,9 +1067,9 @@ ADMIN_HTML = r"""<!doctype html>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>id</th><th>lens</th><th>what</th><th>repo</th><th>状态</th>
+          <thead><tr><th>what（经验）</th><th>lens</th><th>repo</th><th>状态</th>
             <th class="num">命中/采纳</th><th style="width:190px;text-align:right">操作</th></tr></thead>
-          <tbody id="mem-rows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+          <tbody id="mem-rows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div class="scope-pager">
@@ -1006,8 +1084,9 @@ ADMIN_HTML = r"""<!doctype html>
       <details class="help">
         <summary>说明</summary>
         <div class="grid">
-          <div><b>检索测试</b>：在「代码资产」页的检索测试里切到「经验」即可对照试两类资产的召回（/v1/memories/search）。</div>
-          <div><b>待退役</b>：90 天未命中批量退役需要服务端新增 stale_days 参数，下一版本提供；当前可按 status=retired 过滤查看已退役条目。</div>
+          <div><b>检索测试</b>：在「代码资产」页的检索测试里切到「经验」即可对照试两类资产的召回（/v1/memories/search，active + conflicting 都参与召回，冲突命中带 ⚠️）。</div>
+          <div><b>待退役</b>：Inbox「待退役」卡按 stale_days=90 过滤（90 天未命中的 active 条目），选中后可逐条退役或撤销。</div>
+          <div><b>融合裁决</b>：冲突四键之一——人工写和解条目（POST 新 active + 双方 resolve retired），回执可撤销。</div>
         </div>
       </details>
     </section>
@@ -1036,6 +1115,17 @@ ADMIN_HTML = r"""<!doctype html>
   </section>
 </main>
 <div id="toast"></div>
+<div id="receipt"><span class="ok-dot">✓</span><span id="receipt-text"></span><button class="undo" id="receipt-undo" style="display:none">撤销</button></div>
+<div id="confirm-modal" class="modal-backdrop" aria-hidden="true">
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <h3 id="confirm-title">—</h3>
+    <div id="confirm-body" style="font-size:12.5px"></div>
+    <div class="modal-actions">
+      <button id="confirm-cancel">取消</button>
+      <button id="confirm-ok" class="primary">保存</button>
+    </div>
+  </div>
+</div>
 <div id="mem-drawer" class="mem-drawer" aria-hidden="true">
   <button class="close-x" id="mem-drawer-close" title="关闭">✕</button>
   <h3 id="mem-drawer-title" style="margin:0 0 12px;font-size:15px">—</h3>
@@ -1089,8 +1179,30 @@ async function api(path, opts = {}) {
 }
 const kv = (el, rows) => { el.innerHTML = rows.map(([k, v, title]) => '<div class="k">' + k + '</div><div class="v"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + v + '</div>').join(''); };
 
+// v3 治理：操作回执（可撤销）/ 确认弹层
+function toastReceipt(action, target, undoFn) {
+  const box = $('#receipt'); if (!box) return;
+  $('#receipt-text').innerHTML = '<b>' + escapeHtml(action) + '</b> · <span class="mono">' + escapeHtml(truncate(String(target === undefined ? '' : target), 72)) + '</span>';
+  const btn = $('#receipt-undo');
+  btn.style.display = undoFn ? '' : 'none';
+  btn.onclick = async () => { box.classList.remove('show'); try { await undoFn(); } catch (e) { toast('撤销失败：' + ((e && e.message) || e)); } };
+  box.classList.add('show');
+  clearTimeout(toastReceipt._t);
+  toastReceipt._t = setTimeout(() => box.classList.remove('show'), undoFn ? 8000 : 2200);
+}
+function showConfirm(title, bodyHtml, onOk) {
+  const modal = $('#confirm-modal');
+  $('#confirm-title').textContent = title;
+  $('#confirm-body').innerHTML = bodyHtml;
+  const done = () => { modal.classList.remove('show'); modal.setAttribute('aria-hidden', 'true'); };
+  $('#confirm-cancel').onclick = done;
+  $('#confirm-ok').onclick = async () => { if (await onOk() !== false) done(); };
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
 // ---------------- Tab 路由 ----------------
-const TABS = ['overview', 'models', 'keys', 'stats', 'scopes', 'memories', 'logs'];
+const TABS = ['overview', 'memories', 'scopes', 'stats', 'models', 'keys', 'logs'];
 function showTab(name) {
   if (!TABS.includes(name)) name = 'overview';
   $$('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
@@ -1099,8 +1211,8 @@ function showTab(name) {
   if (name === 'keys') loadKeys();
   if (name === 'stats') { loadStats(STATS_DAYS); startStatsTimer(); } else { stopStatsTimer(); }
   if (name === 'logs') loadLogs();
-  if (name === 'scopes') { loadScopes(); startScopesTimer(); } else { stopScopesTimer(); }
-  if (name === 'memories') loadMemories();
+  if (name === 'scopes') { loadScopes(); loadDupGroups(); startScopesTimer(); } else { stopScopesTimer(); }
+  if (name === 'memories') loadMemoriesChain();
   if (name === 'overview' || name === 'models') startRuntimeTimer(); else stopRuntimeTimer();
   if (name === 'overview' || name === 'scopes') refreshHealth();
   location.hash = name;
@@ -1158,6 +1270,7 @@ function renderOverview() {
     ['登录方式', '<span class="faint">登录页 → HttpOnly Cookie（12h）；也支持 HTTP Basic 与 admin 角色 Key</span>'],
   ]);
   $('#setup-box').style.display = auth.adminPasswordSet ? 'none' : 'block';
+  renderHealthLine();
 }
 let RUNTIME = null;
 let RUNTIME_TIMER = null;
@@ -1256,6 +1369,8 @@ let REFRESH_INFLIGHT = null;
 function overviewError(msg) {
   $('#ready').className = 'chip bad';
   $('#ready').innerHTML = '<span class="dot"></span>不可达';
+  const hl = $('#health-line');
+  if (hl) hl.innerHTML = '<span style="color:var(--bad);font-weight:600">✕ 概览不可达：' + escapeHtml(String(msg || '请求失败')) + '</span>';
   ['runtime', 'governor', 'limits', 'tags', 'auth-kv'].forEach((id) => {
     const el = $('#' + id);
     if (el) el.innerHTML = '<div class="k">加载失败</div><div class="v">' + escapeHtml(String(msg || '请求失败')) + '</div>';
@@ -1533,8 +1648,9 @@ async function searchTest() {
     out.innerHTML = '<div class="faint" style="margin-bottom:6px">' + head + '</div>'
       + ((d.hits || []).map((h) => '<div style="padding:4px 0;border-bottom:1px solid var(--line)">'
         + '<span class="mono">' + escapeHtml(h.id) + '</span> ' + lensChip(h.lens)
+        + (h.conflictWarning ? ' <span class="chip warn small" title="该条目处于 conflicting 状态（conflictWarning:true），采纳前先看经验页裁决">⚠ 冲突待裁决</span>' : '')
         + ' <span title="' + escapeHtml(h.what) + '">' + escapeHtml(truncate(h.what, 60)) + '</span> '
-        + '<span class="faint">score ' + h.score + '</span></div>').join('') || '<span class="faint">没有命中（经验检索只看 active 条目）</span>');
+        + '<span class="faint">score ' + h.score + '</span></div>').join('') || '<span class="faint">没有命中（active + conflicting 都参与召回，retired 不可见）</span>');
     return;
   }
   const ns = $('#test-ns').value;
@@ -1554,7 +1670,7 @@ function setTestAsset(name) {
   TEST_ASSET = name === 'memories' ? 'memories' : 'code';
   $$('#test-asset button').forEach((b) => b.classList.toggle('active', b.dataset.asset === TEST_ASSET));
   $('#test-asset-note').textContent = TEST_ASSET === 'memories'
-    ? '当前：经验（/v1/memories/search，只看 active）'
+    ? '当前：经验（/v1/memories/search，active + conflicting，冲突带 ⚠️）'
     : '当前：代码块（/v1/search，按作用域）';
   $('#test-ns').disabled = TEST_ASSET === 'memories';
 }
@@ -2590,6 +2706,8 @@ const MEM_STATUS_LABEL = { active: 'active✓', retired: 'retired', conflicting:
 let MEM = { rows: [], total: 0, offset: 0, limit: 50, q: '', lens: '', repo: '', status: 'active', inflight: null, searchTimer: null };
 let MEM_CONFLICTS = [];
 let MEM_STATS = null;
+let MEM_INBOX = { pending: 0, stale: 0, vecNote: '' };
+let MEM_STALE_MODE = false;
 function lensChip(lens) {
   const l = String(lens || '—');
   const cls = LENS_CLASS[l] || 'other';
@@ -2619,29 +2737,36 @@ function renderMemRows() {
   $('#mem-page').textContent = rows.length ? (Math.floor(MEM.offset / MEM.limit) + 1 + ' / ' + Math.max(1, Math.ceil(MEM.total / MEM.limit))) : '0 / 0';
   $('#mem-prev').disabled = MEM.offset <= 0;
   $('#mem-next').disabled = MEM.offset + rows.length >= MEM.total;
-  if (!rows.length) { $('#mem-rows').innerHTML = '<tr><td colspan="7" class="empty">没有匹配的经验条目</td></tr>'; return; }
+  if (!rows.length) { $('#mem-rows').innerHTML = '<tr><td colspan="6" class="empty">没有匹配的经验条目</td></tr>'; return; }
   $('#mem-rows').innerHTML = rows.map((x) => '<tr class="clickable-row" data-mem-id="' + escapeHtml(x.id) + '">'
-    + '<td class="mono" title="点击展开详情">' + escapeHtml(x.id) + '</td>'
+    + '<td class="mem-what-cell" title="点击展开详情"><b style="font-weight:600">' + escapeHtml(truncate(x.what, 80)) + '</b>'
+    + '<div class="idline mono">' + escapeHtml(x.id) + '</div></td>'
     + '<td>' + lensChip(x.lens) + '</td>'
-    + '<td title="' + escapeHtml(x.what) + '" style="max-width:320px;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(truncate(x.what, 80)) + '</td>'
     + '<td class="mono" style="font-size:11.5px">' + escapeHtml(x.repo || '—') + '</td>'
     + '<td>' + memStatusChip(x.status) + '</td>'
     + '<td class="num" title="最后命中 ' + absTime(x.last_hit_at) + '">' + fmtNum(x.stats_hits) + ' / ' + fmtNum(x.stats_adopted) + '</td>'
     + '<td class="scope-actions">'
     + '<button class="ghost small" data-mem-hit="' + escapeHtml(x.id) + '" title="命中 +1">hit+1</button>'
     + '<button class="ghost small" data-mem-edit="' + escapeHtml(x.id) + '">编辑</button>'
-    + '<button class="ghost small" data-mem-retire="' + escapeHtml(x.id) + '" title="软删（status=retired）">退役</button>'
+    + '<button class="ghost small" data-mem-retire="' + escapeHtml(x.id) + '" title="软删（status=retired，可再恢复）">退役</button>'
     + '</td></tr>').join('');
   $$('#mem-rows [data-mem-hit]').forEach((b) => { b.onclick = async (ev) => { ev.stopPropagation();
     const r = await api('/v1/memories/' + encodeURIComponent(b.dataset.memHit) + '/hit', { method: 'POST', body: '{}' });
-    toast(r.status === 200 ? '已记一次命中' : 'hit 失败（' + r.status + '）'); loadMemories(); }; });
+    if (r.status !== 200) { toast('hit 失败（' + r.status + '）'); return; }
+    toastReceipt('命中 +1', b.dataset.memHit, null); loadMemories(); }; });
   $$('#mem-rows [data-mem-edit]').forEach((b) => { b.onclick = (ev) => { ev.stopPropagation();
     const m = MEM.rows.find((x) => x.id === b.dataset.memEdit); if (m) openMemForm(m); }; });
   $$('#mem-rows [data-mem-retire]').forEach((b) => { b.onclick = async (ev) => { ev.stopPropagation();
     if (!confirm('退役该经验条目？（软删：status=retired，可再恢复）')) return;
     const r = await api('/v1/memories/' + encodeURIComponent(b.dataset.memRetire), { method: 'DELETE' });
     if (r.status !== 200) { toast('退役失败：' + r.status); return; }
-    toast('已退役'); loadMemories(); }; });
+    const tid = b.dataset.memRetire;
+    toastReceipt('退役', tid, async () => {
+      await api('/v1/memories/' + encodeURIComponent(tid) + '/resolve', { method: 'POST', body: JSON.stringify({ status: 'active' }) });
+      toast('已撤销退役：恢复 active');
+      loadMemories(); loadAssetCards();
+    });
+    loadMemories(); }; });
 }
 function renderMemFacets() {
   const lenses = new Map(), repos = new Map();
@@ -2666,37 +2791,123 @@ function renderMemStats() {
     statCard('总命中', fmtNum(hits), ''),
     statCard('采纳率', rate, '<span class="sub">' + fmtNum(adopted) + ' / ' + fmtNum(hits) + '</span>'),
     statCard('条目总数', fmtNum(Number(m.total || 0)), ''),
-    statCard('待退役', '<span class="faint" style="font-size:12px">下一版提供</span>', '<span class="sub">90 天未命中批量退役需后端 stale_days 参数</span>'),
+    statCard('待退役（90 天未命中）', fmtNum(MEM_INBOX.stale), '<span class="sub">Inbox「待退役」卡可一键过滤</span>'),
   ].join('');
+}
+// Review Inbox / 治理流水
+function renderInbox() {
+  const el = $('#mem-inbox'); if (!el) return;
+  const ib = MEM_INBOX, total = Number((MEM_STATS || {}).total || 0);
+  const vecSub = ib.vecNote ? truncate(ib.vecNote, 44) : '向量通道正常（逐条缺口以通道健康度近似）';
+  const cards = [
+    { id: 'inbox-pending', n: fmtNum(ib.pending), l: '待裁决（conflicting）', warn: ib.pending > 0, act: $('#mem-status-filter').value === 'conflicting' && !MEM_STALE_MODE, sub: ib.pending > 0 ? '点击过滤列表 →' : '没有待裁决 ✓' },
+    { id: 'inbox-stale', n: fmtNum(ib.stale), l: '待退役（90 天未命中）', warn: ib.stale > 0, act: MEM_STALE_MODE, sub: MEM_STALE_MODE ? '已过滤 · 点击退出' : '点击按 stale_days=90 过滤' },
+    { id: 'inbox-vec', n: ib.vecNote ? fmtNum(total) : '—', l: '待补向量（通道）', warn: !!ib.vecNote, act: false, sub: vecSub },
+  ];
+  el.innerHTML = cards.map((c) => '<div class="inbox-card' + (c.act ? ' active' : '') + '" id="' + c.id + '" title="' + escapeHtml(c.sub) + '">'
+    + '<div class="n' + (c.warn ? ' warn' : '') + '">' + c.n + '</div><div class="l">' + c.l + '</div>'
+    + '<div class="faint" style="font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(c.sub) + '</div></div>').join('');
+  $('#inbox-pending').onclick = () => {
+    MEM_STALE_MODE = false; $('#mem-stale-chip').style.display = 'none';
+    const sel = $('#mem-status-filter');
+    sel.value = sel.value === 'conflicting' ? 'active' : 'conflicting';
+    resetMemOffset();
+    if (MEM_INBOX.pending > 0) $('#mem-conflicts').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  $('#inbox-stale').onclick = toggleStaleMode;
+  $('#inbox-vec').onclick = () => { if (MEM_INBOX.vecNote) showTab('models'); };
+  const badge = $('#mem-tab-badge');
+  if (badge) { badge.style.display = ib.pending > 0 ? '' : 'none'; badge.textContent = ib.pending; }
+}
+function toggleStaleMode() {
+  MEM_STALE_MODE = !MEM_STALE_MODE;
+  $('#mem-stale-chip').style.display = MEM_STALE_MODE ? '' : 'none';
+  if (MEM_STALE_MODE) $('#mem-status-filter').value = 'active';
+  resetMemOffset();
+}
+async function loadInbox() {
+  const pr = await api('/v1/memories/search', { method: 'POST', body: JSON.stringify({ q: '__vec_probe__', top_k: 1 }) });
+  MEM_INBOX.vecNote = (pr.status === 200 && pr.body && pr.body.vectorNote) ? String(pr.body.vectorNote) : '';
+  renderInbox();
+}
+let GOV_RUNS = [];
+function renderGovRuns() {
+  const el = $('#gov-runs'); if (!el) return;
+  if (!(GOV_RUNS || []).length) { el.innerHTML = '<div class="empty">还没有跑批留痕 ✓（POST /v1/admin/pipeline-runs 上报后展示）</div>'; return; }
+  el.innerHTML = GOV_RUNS.map((r, i) => {
+    const acts = Object.entries(r.actions || {});
+    const actHtml = acts.length
+      ? acts.map(([k, v]) => '<span class="chip small' + (Number(v) > 0 && /contradict|block|error|conflict/i.test(k) ? ' warn' : '') + '">' + escapeHtml(k) + '=' + escapeHtml(String(v)) + '</span>').join(' ')
+      : '<span class="faint">无四判计数</span>';
+    return '<div class="funnel-row">'
+      + '<span class="faint" title="' + absTime(r.started_at) + '">' + rel(r.started_at) + '</span>'
+      + '<span class="chip small">' + escapeHtml(r.engine || 'pipeline') + (r.dry_run ? ' · dry' : '') + '</span>'
+      + '<span class="funnel-step">候选 <b>' + fmtNum(r.candidates) + '</b><span class="arrow">→</span></span>'
+      + '<span class="funnel-step">' + actHtml + '<span class="arrow">→</span></span>'
+      + '<span class="funnel-step">拦截 <b class="' + (r.review_blocked ? 'funnel-num warn' : 'funnel-num') + '">' + fmtNum(r.review_blocked) + '</b><span class="arrow">→</span></span>'
+      + '<span class="funnel-step">合并去重 <b class="funnel-num ok">' + fmtNum(r.dedup_merged) + '</b></span>'
+      + '<span class="spacer"></span><button class="ghost small" data-run-detail="' + i + '">明细 ▾</button></div>'
+      + '<div class="gov-run-detail" id="gov-run-detail-' + i + '" style="display:none">'
+      + '<div>review 通过 ' + fmtNum(r.review_passed) + ' · dedup 保留 ' + fmtNum(r.dedup_kept) + ' · 耗时 ' + Math.max(0, Number(r.finished_at || 0) - Number(r.started_at || 0)) + 's</div>'
+      + (r.details ? '<pre class="mono" style="margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;color:var(--muted)">' + escapeHtml(JSON.stringify(r.details, null, 1)) + '</pre>' : '<div class="faint" style="margin-top:4px">无明细（details 为空）</div>')
+      + '</div>';
+  }).join('');
+  $$('#gov-runs [data-run-detail]').forEach((b) => {
+    b.onclick = () => {
+      const d = $('#gov-run-detail-' + b.dataset.runDetail), open = d.style.display !== 'none';
+      d.style.display = open ? 'none' : 'block';
+      b.textContent = open ? '明细 ▾' : '明细 ▴';
+    };
+  });
+}
+async function loadGovRuns() {
+  const el = $('#gov-runs'); if (!el) return;
+  const r = await api('/v1/admin/pipeline-runs?limit=5');
+  if (r.status !== 200 || !r.body) { el.innerHTML = '<div class="empty">治理流水加载失败：' + r.status + '</div>'; return; }
+  GOV_RUNS = r.body.items || [];
+  $('#gov-runs-at').textContent = '最近 ' + GOV_RUNS.length + ' 次 · 共 ' + fmtNum(r.body.total || 0) + ' 次';
+  renderGovRuns();
+}
+function hlTrigger(text, words) {
+  let s = escapeHtml(String(text === undefined || text === null ? '' : text));
+  (words || []).forEach((w) => {
+    const t = escapeHtml(String(w || '')).trim();
+    if (t) s = s.split(t).join('<mark class="tw-hl">' + t + '</mark>');
+  });
+  return s;
 }
 function renderConflicts() {
   const el = $('#mem-conflicts');
   if (!(MEM_CONFLICTS || []).length) { el.innerHTML = '<div class="empty">没有待裁决的冲突 ✓</div>'; return; }
-  const ids = MEM_CONFLICTS.map((x) => x.id);
   el.innerHTML = MEM_CONFLICTS.map((c) => {
-    const old = (MEM.rows || []).find((x) => x.id !== c.id && x.status === 'conflicting');
-    const candHtml = (cap, m) => '<div class="conflict-col"><b class="cap">' + cap + ' · ' + escapeHtml((m || {}).id || '—') + '</b>'
-      + '<div class="what">' + escapeHtml((m || {}).what || '—') + '</div>'
-      + '<div class="w2">when: ' + escapeHtml((m || {}).when_expr || '—') + '</div>'
-      + '<div class="w2">why: ' + escapeHtml((m || {}).why || '—') + '</div>'
+    const old = c.against || (MEM.rows || []).find((x) => x.id === c.against_id) || null;
+    const tw = Array.isArray(c.trigger_words) ? c.trigger_words : [];
+    const cand = (cap, m, isOld) => '<div class="cmp-col' + (isOld ? ' is-old' : '') + '"><b class="cap">' + cap + ' · ' + escapeHtml((m || {}).id || '—') + '</b>'
+      + '<div class="what">' + hlTrigger((m || {}).what, tw) + '</div>'
+      + '<div class="w2">when: ' + hlTrigger((m || {}).when_expr, tw) + '</div>'
+      + '<div class="w2">why: ' + hlTrigger((m || {}).why, tw) + '</div>'
       + '<div class="w2">evidence: ' + escapeHtml(memEvidenceText((m || {}).evidence)) + '</div></div>';
     return '<div class="conflict-card" style="border-radius:10px;padding:12px 14px;margin-bottom:12px">'
-      + '<div style="display:flex;align-items:center;gap:8px"><b>⚠ ' + escapeHtml(c.what || '—') + '</b>'
+      + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>⚠ ' + hlTrigger(c.what, tw) + '</b>'
       + '<span class="chip warn">' + escapeHtml(c.lens || '') + '</span>'
-      + '<span class="faint mono" style="font-size:11px">' + escapeHtml(c.repo || '') + '</span></div>'
-      + '<div class="conflict-grid">'
-      + candHtml('新候选（conflicting）', c)
-      + candHtml('既有条目（同队列）', old)
-      + '</div>'
-      + '<div style="display:flex;gap:8px;flex-wrap:wrap" data-conflict-actions="' + escapeHtml(c.id) + '">'
-      + '<button class="primary small" data-mem-resolve="' + escapeHtml(c.id) + '" data-resolve-status="active">保留新（active）</button>'
-      + '<button class="small" data-mem-resolve-retire="' + escapeHtml(c.id) + '">保留旧（退役此条）</button>'
-      + '<button class="small" data-mem-keep-both="' + escapeHtml(c.id) + '">都保留</button>'
+      + '<span class="faint mono" style="font-size:11px">' + escapeHtml(c.repo || '') + '</span>'
+      + (tw.length ? '<span class="trig-chips">' + tw.map((w) => '<span class="trig-pair">' + escapeHtml(w) + '</span>').join('<span class="faint">vs</span>') + '</span>' : '')
+      + '</div><div class="cmp-grid">'
+      + cand('新候选（conflicting）', c, false)
+      + cand(old ? '既有条目（against）' : '既有条目（未配对）', old, true)
+      + '</div><div style="display:flex;gap:8px;flex-wrap:wrap">'
+      + '<button class="primary small" data-mem-resolve="' + escapeHtml(c.id) + '" title="新 active，旧退役">保留新（旧退役）</button>'
+      + '<button class="small" data-mem-resolve-retire="' + escapeHtml(c.id) + '" title="新退役，旧不动">保留旧（退役新）</button>'
+      + '<button class="small" data-mem-keep-both="' + escapeHtml(c.id) + '" title="新 active，旧不动">都保留</button>'
+      + '<button class="small" data-mem-fuse="' + escapeHtml(c.id) + '" style="border-color:var(--purple);color:var(--purple)" title="人工和解条目 + 双方 retired">融合…</button>'
       + '</div></div>';
-  }).join('') + '<div class="faint" style="font-size:11.5px">待裁决 id：' + ids.map(escapeHtml).join('、') + '</div>';
+  }).join('');
   $$('#mem-conflicts [data-mem-resolve]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memResolve, 'active'); });
   $$('#mem-conflicts [data-mem-resolve-retire]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memResolveRetire, 'retired'); });
-  $$('#mem-conflicts [data-mem-keep-both]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memKeepBoth, 'active', true); });
+  $$('#mem-conflicts [data-mem-keep-both]').forEach((b) => { b.onclick = () => resolveMemory(b.dataset.memKeepBoth, 'both'); });
+  $$('#mem-conflicts [data-mem-fuse]').forEach((b) => {
+    b.onclick = () => { const c = (MEM_CONFLICTS || []).find((x) => x.id === b.dataset.memFuse); if (c) openFusionForm(c); };
+  });
 }
 function memEvidenceText(ev) {
   if (!Array.isArray(ev) || !ev.length) return '—';
@@ -2707,33 +2918,106 @@ function memEvidenceText(ev) {
     return JSON.stringify(e);
   }).join('、');
 }
-async function resolveMemory(id, status, keepBoth) {
-  const r = await api('/v1/memories/' + encodeURIComponent(id) + '/resolve', { method: 'POST', body: JSON.stringify({ status }) });
-  if (r.status !== 200) { toast('resolve 失败：' + r.status); return; }
-  toast(keepBoth ? '已保留（都保留）' : (status === 'active' ? '已裁决：保留该条（active）' : '已裁决：退役该条（retired）'));
+async function resolveMemory(id, mode) {
+  // mode: 'active'=保留新（新 active+旧退役）| 'retired'=保留旧 | 'both'=都保留
+  const c = (MEM_CONFLICTS || []).find((x) => x.id === id) || null;
+  const againstId = (c && c.against && c.against.id) || (c && c.against_id) || null;
+  const setStatus = async (mid, st) => api('/v1/memories/' + encodeURIComponent(mid) + '/resolve', { method: 'POST', body: JSON.stringify({ status: st }) });
+  if (mode === 'retired') {
+    if ((await setStatus(id, 'retired')).status !== 200) { toast('resolve 失败'); return; }
+  } else {
+    if ((await setStatus(id, 'active')).status !== 200) { toast('resolve 失败'); return; }
+    if (mode === 'active' && againstId) {
+      if ((await api('/v1/memories/' + encodeURIComponent(againstId), { method: 'DELETE' })).status !== 200) toast('对手条目退役失败');
+    }
+  }
+  const label = mode === 'retired' ? '保留旧' : (mode === 'active' ? '保留新' : '都保留');
+  const undo = async () => {
+    if (mode === 'retired') await setStatus(id, 'active');
+    else if (mode === 'both') await api('/v1/memories/' + encodeURIComponent(id), { method: 'DELETE' });
+    else {
+      if (againstId) await setStatus(againstId, 'active');
+      await api('/v1/memories/' + encodeURIComponent(id), { method: 'DELETE' });
+    }
+    toast('已撤销：' + label);
+    loadMemories(); loadAssetCards();
+  };
+  toastReceipt('裁决·' + label, id + (againstId ? '（对手 ' + againstId + '）' : ''), undo);
   loadMemories();
 }
-function openMemDrawer(m) {
+function parseEvidenceText(s) {
+  return (s || '').split(/[,，]/).map((x) => {
+    x = x.trim();
+    if (x.startsWith('archive:')) return { archive_ref: x.slice(8).trim() };
+    if (x.startsWith('issue:')) return { issue: x.slice(6).trim() };
+    if (x.startsWith('mr:')) return { mr: x.slice(3).trim() };
+    return { archive_ref: x };
+  }).filter((e) => Object.values(e)[0]);
+}
+function openFusionForm(c) {
+  const a = c.against || {};
+  const evDefault = memEvidenceText([].concat(c.evidence || [], a.evidence || []));
+  const html = '<div style="display:grid;gap:8px">'
+    + '<div class="toolbar" style="margin:0"><label>repo <input id="fu-repo" style="min-width:180px" value="' + escapeHtml(c.repo || '') + '"></label>'
+    + '<label>lens <input id="fu-lens" style="min-width:140px" value="' + escapeHtml(c.lens || '') + '"></label></div>'
+    + '<label>what（和解条目·人工融合双方后的事实）<textarea id="fu-what" rows="4" style="width:100%;padding:6px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit">' + escapeHtml('【融合】' + truncate(c.what || '', 64)) + '</textarea></label>'
+    + '<label>when（适用时机）<input id="fu-when" value="' + escapeHtml(c.when_expr || '') + '"></label>'
+    + '<label>why（原因）<input id="fu-why" value="' + escapeHtml(c.why || '') + '"></label>'
+    + '<label>evidence（逗号分隔 archive:xxx / issue:XXX-1 / mr:!89）<input id="fu-ev" value="' + escapeHtml(evDefault) + '"></label>'
+    + '<div class="warn-item"><b>⚠</b><span>提交后新建 active 和解条目；' + escapeHtml(c.id) + (a.id ? ' / ' + escapeHtml(a.id) : '') + ' 两条将 resolve retired。</span></div></div>';
+  showConfirm('融合裁决 · ' + truncate(c.what || '', 24), html, async () => {
+    const get = (id2) => ($(id2).value || '').trim();
+    if (!get('#fu-what') || !get('#fu-repo') || !get('#fu-lens')) { toast('repo / lens / what 不能为空'); return false; }
+    const body = { repo: get('#fu-repo'), lens: get('#fu-lens'), what: get('#fu-what'),
+      when_expr: get('#fu-when'), why: get('#fu-why'), evidence: parseEvidenceText(get('#fu-ev')), source: 'fusion', status: 'active' };
+    const r = await api('/v1/memories', { method: 'POST', body: JSON.stringify(body) });
+    if (r.status !== 200) { toast('融合条目保存失败：' + ((r.body && r.body.error) || r.status)); return false; }
+    const newId = (r.body || {}).id || '?';
+    const targets = [c.id].concat(a.id ? [a.id] : []);
+    for (const tid of targets) await api('/v1/memories/' + encodeURIComponent(tid) + '/resolve', { method: 'POST', body: JSON.stringify({ status: 'retired' }) });
+    const undo = async () => {
+      await api('/v1/memories/' + encodeURIComponent(newId), { method: 'DELETE' });
+      for (const tid of targets) await api('/v1/memories/' + encodeURIComponent(tid) + '/resolve', { method: 'POST', body: JSON.stringify({ status: 'active' }) });
+      toast('已撤销融合：和解条目退役，原两条恢复 active');
+      loadMemories(); loadAssetCards();
+    };
+    toastReceipt('融合裁决', newId + ' ← ' + targets.join(' + '), undo);
+    loadMemories();
+    return true;
+  });
+}
+async function openMemDrawer(row) {
+  let m = row;
+  const r = await api('/v1/memories/' + encodeURIComponent(row.id));
+  if (r.status === 200 && r.body) m = Object.assign({}, row, r.body);
   const ev = Array.isArray(m.evidence) && m.evidence.length
-    ? m.evidence.map((e) => {
-        if (e.archive_ref) return '<div>🗄 archive：<span class="mono">' + escapeHtml(e.archive_ref) + '</span></div>';
-        if (e.issue) return '<div>🎫 issue：<span class="mono">' + escapeHtml(e.issue) + '</span></div>';
-        if (e.mr) return '<div>🔀 MR：<span class="mono">' + escapeHtml(e.mr) + '</span></div>';
-        return '<div class="mono faint">' + escapeHtml(JSON.stringify(e)) + '</div>';
-      }).join('') : '<div class="faint">—</div>';
+    ? m.evidence.map((e) => e.archive_ref
+      ? '<div>🗄 <span class="ev-path mono" data-ev-copy="' + escapeHtml(e.archive_ref) + '" title="来源轨迹·点击复制">' + escapeHtml(e.archive_ref) + '</span></div>'
+      : (e.issue ? '<div>🎫 issue：<span class="mono">' + escapeHtml(e.issue) + '</span></div>'
+        : (e.mr ? '<div>🔀 MR：<span class="mono">' + escapeHtml(e.mr) + '</span></div>'
+          : '<div class="mono faint">' + escapeHtml(JSON.stringify(e)) + '</div>'))).join('')
+    : '<div class="faint">—</div>';
+  const tl = Array.isArray(m.timeline) && m.timeline.length
+    ? '<div class="tl-list">' + m.timeline.map((t) => {
+        const syn = t.detail && t.detail.synthesized ? ' <span class="faint" title="存量条目：合成事件">(合成)</span>' : '';
+        const dtl = t.detail ? ' <span class="faint">' + escapeHtml(truncate(JSON.stringify(t.detail), 56)) + '</span>' : '';
+        return '<div class="tl-item ev-' + escapeHtml(t.event) + '"><span class="rail"></span><span class="t">' + absTime(t.at) + '</span>'
+          + '<span><b>' + escapeHtml(t.event) + '</b>' + syn + dtl + '</span></div>';
+      }).join('') + '</div>'
+    : '<div class="faint">—（无事件记录）</div>';
   $('#mem-drawer-title').innerHTML = escapeHtml(m.id) + ' ' + lensChip(m.lens) + ' ' + memStatusChip(m.status);
   $('#mem-drawer-body').innerHTML = [
-    ['what', escapeHtml(m.what || '—')],
-    ['when', escapeHtml(m.when_expr || '—')],
-    ['why', escapeHtml(m.why || '—')],
-    ['evidence', ev],
+    ['what', escapeHtml(m.what || '—')], ['when', escapeHtml(m.when_expr || '—')], ['why', escapeHtml(m.why || '—')],
+    ['evidence 来源轨迹', ev], ['timeline', tl],
     ['source', '<span class="mono">' + escapeHtml(m.source || '—') + '</span>'],
     ['repo', '<span class="mono">' + escapeHtml(m.repo || '—') + '</span>'],
     ['命中/采纳', fmtNum(m.stats_hits) + ' / ' + fmtNum(m.stats_adopted)],
-    ['最后命中', absTime(m.last_hit_at)],
-    ['创建', absTime(m.created_at)],
+    ['最后命中', absTime(m.last_hit_at)], ['创建', absTime(m.created_at)],
     ['更新', absTime(m.updated_at) + ' <span class="faint">(' + rel(m.updated_at) + ')</span>'],
   ].map(([k, v]) => '<div class="k">' + k + '</div><div class="v">' + v + '</div>').join('');
+  $$('#mem-drawer-body [data-ev-copy]').forEach((s) => {
+    s.onclick = async () => { try { await navigator.clipboard.writeText(s.dataset.evCopy); toast('已复制归档路径'); } catch (e) { toast('复制失败（浏览器限制）'); } };
+  });
   $('#mem-drawer').classList.add('open');
   $('#mem-drawer').setAttribute('aria-hidden', 'false');
   $('#drawer-scrim').classList.add('open');
@@ -2758,13 +3042,7 @@ function openMemForm(m) {
     + '</div>';
   showConfirm(isEdit ? '编辑经验 ' + m.id : '新建经验', html, async () => {
     const get = (id2) => ($(id2).value || '').trim();
-    const evidence = get('#mf-ev') ? get('#mf-ev').split(/[,，]/).map((s) => {
-      s = s.trim();
-      if (s.startsWith('archive:')) return { archive_ref: s.slice(8).trim() };
-      if (s.startsWith('issue:')) return { issue: s.slice(6).trim() };
-      if (s.startsWith('mr:')) return { mr: s.slice(3).trim() };
-      return { archive_ref: s };
-    }).filter((e) => Object.values(e)[0]) : [];
+    const evidence = parseEvidenceText(get('#mf-ev'));
     const body = { repo: get('#mf-repo'), lens: get('#mf-lens'), what: get('#mf-what'),
       when_expr: get('#mf-when'), why: get('#mf-why'), evidence };
     const r = await api('/v1/memories', { method: 'POST', body: JSON.stringify(body) });
@@ -2781,59 +3059,156 @@ async function loadMemories() {
   if (q.q) params.set('q', q.q);
   if (q.lens) params.set('lens', q.lens);
   if (q.repo) params.set('repo', q.repo);
-  if (q.status) params.set('status', q.status);
+  if (q.status && !MEM_STALE_MODE) params.set('status', q.status);
+  if (MEM_STALE_MODE) params.set('stale_days', '90');
   if (MEM.inflight) return MEM.inflight;
   MEM.inflight = (async () => {
-    const [lr, cr, sr] = await Promise.all([
-      api('/v1/memories?' + params.toString()),
-      api('/v1/memories/conflicts?limit=100'),
-      api('/v1/admin/stats?days=7'),
-    ]);
-    if (lr.status !== 200) { $('#mem-rows').innerHTML = '<tr><td colspan="7" class="empty">加载失败：' + lr.status + '</td></tr>'; return; }
+    // 顺序执行：MemoryStore 是单连接 sqlite，并发 HTTP 线程会撞 InterfaceError
+    const lr = await api('/v1/memories?' + params.toString());
+    const cr = await api('/v1/memories/conflicts?limit=100');
+    const sr = await api('/v1/admin/stats?days=7');
+    const str = await api('/v1/memories?limit=1&stale_days=90');
+    if (lr.status !== 200) { $('#mem-rows').innerHTML = '<tr><td colspan="6" class="empty">加载失败：' + lr.status + '</td></tr>'; return; }
     const b = lr.body || {};
     MEM.rows = b.items || []; MEM.total = Number(b.total || 0);
     MEM_CONFLICTS = (cr.status === 200 && cr.body ? cr.body.items : []) || [];
     MEM_STATS = (sr.status === 200 && sr.body ? sr.body.memories : null) || {};
-    renderMemRows(); renderMemFacets(); renderConflicts(); renderMemStats();
+    MEM_INBOX.pending = (cr.status === 200 && cr.body) ? Number(cr.body.total || 0) : 0;
+    MEM_INBOX.stale = (str.status === 200 && str.body) ? Number(str.body.total || 0) : 0;
+    renderMemRows(); renderMemFacets(); renderConflicts(); renderMemStats(); renderInbox();
   })().finally(() => { MEM.inflight = null; });
   return MEM.inflight;
 }
+async function loadMemoriesChain() {
+  // 经验 tab 打开时的 MemoryStore 读全串行：列表→conflicts→stats→stale→runs→向量探针
+  await loadMemories();
+  loadGovRuns();
+  loadInbox();
+}
 function resetMemOffset() { MEM.offset = 0; loadMemories(); }
+let ASSET_CODE = { scopes: 0, lineages: 0, chunks: 0, cov: null, pending: 0, pendingRepos: [] };
+let ASSET_MEM = { total: 0, conflicts: 0, weekly: 0, hits: 0, adopted: 0 };
+function renderHealthLine() {
+  const el = $('#health-line'); if (!el) return;
+  const h = HEALTH || {}, gov = h.governor || {}, auth = h.admin || {};
+  const seg = [
+    h.ready ? '<span style="color:var(--ok);font-weight:600">● ready</span>' : '<span style="color:var(--bad);font-weight:600">● not ready</span>',
+    gov.paused ? '<span style="color:var(--warn);font-weight:600">嵌入已暂停</span>' : '<span style="color:var(--ok)">嵌入运行中</span>',
+    ASSET_CODE.cov === null ? '<span class="faint">向量覆盖 —</span>'
+      : (ASSET_CODE.cov >= 95 ? '<span>向量覆盖 ' + ASSET_CODE.cov + '%</span>'
+        : '<span style="color:var(--warn)">向量覆盖 ' + ASSET_CODE.cov + '%（待补嵌）</span>'),
+    ASSET_MEM.conflicts > 0 ? '<span style="color:var(--warn);font-weight:600;cursor:pointer" title="点击进入经验页裁决">冲突待裁决 ' + ASSET_MEM.conflicts + ' →</span>'
+      : '<span>冲突待裁决 0</span>',
+    auth.authRequired ? '<span style="color:var(--ok)">鉴权已开</span>' : '<span style="color:var(--warn)">未开鉴权</span>',
+  ];
+  el.innerHTML = seg.join('<span class="faint"> · </span>');
+  el.onclick = (e) => { if (e.target.textContent.indexOf('冲突待裁决') >= 0 && ASSET_MEM.conflicts > 0) showTab('memories'); };
+}
 async function loadAssetCards() {
-  const [sr, mr, st] = await Promise.all([
-    api('/v1/scopes?limit=100'),
-    api('/v1/memories/conflicts?limit=1'),
-    api('/v1/admin/stats?days=1'),
-  ]);
+  // scopes(IndexStore) 与 stats(admin) 可并行；conflicts 与 list 同为 MemoryStore → 顺序执行
+  const [sr, st] = await Promise.all([api('/v1/scopes?limit=100'), api('/v1/admin/stats?days=1')]);
+  const mr = await api('/v1/memories/conflicts?limit=1');
+  const wk = await api('/v1/memories?limit=200');
   const sc = (sr.status === 200 && sr.body ? sr.body.scopes : []) || [];
-  let scopes = 0, lineages = new Set(), chunks = 0, vectors = 0, pending = 0;
+  let scopes = 0, chunks = 0, vectors = 0, pending = 0;
+  const lineages = new Set(), pendingRepos = [];
   for (const x of sc) {
     scopes += 1;
     if (x.repoId) lineages.add(x.repoId);
     chunks += Number(x.chunks || 0);
     vectors += Number(x.vectors || 0);
     pending += Math.max(0, Number(x.chunks || 0) - Number(x.vectors || 0));
+    const pct = Math.round((Number(x.coverage) || 0) * 100);
+    if (pct < 100 && (x.repoName || x.repoId)) pendingRepos.push((x.repoName || x.repoId) + ' ' + pct + '%');
   }
-  const cov = chunks ? Math.round(vectors * 1000 / chunks) / 10 : null;
+  const cov = chunks ? Math.round(vectors * 100 / chunks) : null;
+  ASSET_CODE = { scopes, lineages: lineages.size, chunks, cov, pending, pendingRepos: pendingRepos.slice(0, 4) };
   const ep = (st.status === 200 && st.body ? st.body.byEndpoint : []) || [];
   const cnt = (name) => { const e = ep.find((x) => (x.endpoint || '') === name); return e ? Number(e.requests || 0) : 0; };
-  $('#asset-code').innerHTML = [
+  const line = (arr) => arr.map(([l, r]) => '<div class="asset-line"><span class="l">' + l + '</span><span class="r">' + r + '</span></div>').join('');
+  const covHtml = cov === null ? '—' : cov + '% <span class="bar ' + (cov >= 95 ? 'ok' : 'warn') + '" style="width:70px;display:inline-block;vertical-align:middle;margin-left:6px"><i style="width:' + Math.min(100, cov) + '%"></i></span>';
+  $('#asset-code').innerHTML = line([
     ['作用域 / 血统', fmtNum(scopes) + ' / ' + fmtNum(lineages.size)],
     ['块数', fmtNum(chunks)],
-    ['向量覆盖', cov === null ? '—' : cov + '%'],
+    ['向量覆盖', covHtml],
     ['今日 sync / search', fmtNum(cnt('sync')) + ' / ' + fmtNum(cnt('search'))],
-  ].map(([l, r]) => '<div class="asset-line"><span class="l">' + l + '</span><span class="r">' + r + '</span></div>').join('');
-  const m = (mr.status === 200 && mr.body ? mr.body : { items: [], total: 0 });
-  const conflicts = Number(m.total || 0);
+  ]) + '<div class="asset-action">' + (pending > 0
+    ? '<span class="warn">待补嵌 ' + fmtNum(pending) + ' 块</span><span class="faint" style="overflow-wrap:anywhere">' + escapeHtml(ASSET_CODE.pendingRepos.join(' · ')) + '</span>'
+    : '<span style="color:var(--ok)">✓ 全量已嵌入</span>') + '</div>';
+  const conflicts = Number((mr.status === 200 && mr.body ? mr.body.total : 0) || 0);
   const mst = (st.status === 200 && st.body ? st.body.memories : null) || {};
   const mh = Number(mst.hits || 0), ma = Number(mst.adopted || 0);
-  $('#asset-mem').innerHTML = [
+  const wkItems = (wk.status === 200 && wk.body ? wk.body.items : []) || [];
+  const weekAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+  let weekly = 0;
+  for (const it of wkItems) if (Number(it.created_at || 0) >= weekAgo) weekly += 1;
+  if (wkItems.length >= 200 && weekly >= wkItems.length) weekly = -1;
+  ASSET_MEM = { total: Number(mst.total || 0), conflicts, weekly, hits: mh, adopted: ma };
+  $('#asset-mem').innerHTML = line([
     ['条目总数', fmtNum(Number(mst.total || 0))],
+    ['近 7 天新增', weekly < 0 ? '200+' : fmtNum(weekly)],
     ['命中 / 采纳', fmtNum(mh) + ' / ' + fmtNum(ma) + (mh ? '（' + Math.round(ma * 100 / mh) + '%）' : '')],
-    ['冲突待裁决', fmtNum(conflicts)],
-  ].map(([l, r]) => '<div class="asset-line"><span class="l">' + l + '</span><span class="r">' + r + '</span></div>').join('');
+  ]) + '<div class="asset-action">' + (conflicts > 0
+    ? '<span class="warn">待裁决 ' + conflicts + '（点击进入裁决 →）</span>'
+    : '<span style="color:var(--ok)">✓ 无待裁决冲突</span>') + '</div>';
   const dot = $('#mem-conflict-dot');
-  if (dot) { if (conflicts > 0) { dot.style.display = ''; dot.textContent = conflicts; } else { dot.style.display = 'none'; } }
+  if (dot) { dot.style.display = conflicts > 0 ? '' : 'none'; dot.textContent = conflicts; }
+  const badge = $('#mem-tab-badge');
+  if (badge) { badge.style.display = conflicts > 0 ? '' : 'none'; badge.textContent = conflicts; }
+  renderHealthLine();
+}
+// 代码资产 · 重复血统分组（duplicates 端点驱动）
+let DUP_GROUPS = null;
+function renderDupGroups() {
+  const el = $('#dup-groups'); if (!el) return;
+  const groups = (DUP_GROUPS || {}).groups || [];
+  if (!groups.length) { el.innerHTML = '<div class="empty">没有检测到重复血统 ✓</div>'; return; }
+  el.innerHTML = groups.map((g) => {
+    const est = g.estimates || {};
+    const rows = (g.lineages || []).map((ln) => '<div class="dup-row">'
+      + '<span class="mono small">' + escapeHtml(ln.id) + '</span>'
+      + '<span class="grow faint mono" style="font-size:11px" title="' + escapeHtml((ln.repoIds || []).join(', ') + ' · ns: ' + (ln.namespaces || []).join(', ')) + '">' + escapeHtml((ln.repoIds || []).join(', ')) + '</span>'
+      + '<span style="font-variant-numeric:tabular-nums">' + fmtNum(ln.chunks) + ' 块</span>'
+      + '<span class="faint" title="' + absTime(ln.last_seen) + '">' + rel(ln.last_seen) + '</span>'
+      + (ln.id === g.suggestId
+        ? '<span class="chip ok small">建议保留</span>'
+        : '<button class="ghost small" data-dup-merge="' + escapeHtml(ln.id) + '" data-dup-into="' + escapeHtml(g.suggestId) + '" data-dup-repo="' + escapeHtml(g.repoName) + '" data-dup-samefp="' + (g.same_chunk_fp ? '1' : '') + '">合并到 ' + escapeHtml(g.suggestId) + ' ↑</button>')
+      + '</div>').join('');
+    return '<div class="dup-group"><div class="dup-group-head"><b>' + escapeHtml(g.repoName) + '</b>'
+      + '<span class="faint">' + (g.lineages || []).length + ' 个血统</span>'
+      + '<span style="color:var(--warn);font-weight:600">⚠️ ' + (g.same_chunk_fp ? '同内容指纹' : '指纹不同·需人工确认') + '</span>'
+      + '<span class="faint mono" style="font-size:11px">suggest: ' + escapeHtml(g.suggest) + '</span>'
+      + '<span class="spacer"></span>'
+      + '<span class="faint" title="droppedChunks ' + fmtNum(est.droppedChunks) + ' · droppedVectors ' + fmtNum(est.droppedVectors) + '">估算释放 ' + (est.freedMb != null ? est.freedMb + ' MB' : '—') + '</span>'
+      + '</div>' + rows + '</div>';
+  }).join('');
+  $$('#dup-groups [data-dup-merge]').forEach((b) => {
+    b.onclick = () => mergeLineage(b.dataset.dupMerge, b.dataset.dupInto, b.dataset.dupRepo, !!b.dataset.dupSameFp);
+  });
+}
+async function loadDupGroups() {
+  const el = $('#dup-groups'); if (!el) return;
+  const r = await api('/v1/admin/lineages/duplicates');
+  if (r.status !== 200 || !r.body) { el.innerHTML = '<div class="empty">重复血统检测失败：' + r.status + '</div>'; return; }
+  DUP_GROUPS = r.body;
+  renderDupGroups();
+}
+async function mergeLineage(fromId, intoId, repoName, sameFp) {
+  if (!fromId || !intoId) return;
+  const msg = sameFp ? '合并 ' + fromId + ' → ' + intoId + '？（同内容指纹；旧血统软标记，观察期 7 天，namespaces 不动）'
+    : '「' + repoName + '」血统内容指纹不同（可能来自不同根目录/切块配置），确认合并 ' + fromId + ' → ' + intoId + '？';
+  if (!confirm(msg)) return;
+  const r = await api('/v1/admin/lineages/merge', { method: 'POST', body: JSON.stringify({ from: [fromId], into: intoId }) });
+  if (r.status !== 200) { toast('合并失败：' + ((r.body && r.body.error) || r.status)); return; }
+  const freed = (r.body || {}).freedMb;
+  const undo = async () => {
+    const r2 = await api('/v1/admin/lineages/merge', { method: 'POST', body: JSON.stringify({ from: [intoId], into: fromId }) });
+    if (r2.status !== 200) { toast('反向合并失败：' + r2.status); return; }
+    toast('已反向合并回 ' + fromId);
+    loadDupGroups(); loadScopes(); loadAssetCards();
+  };
+  toastReceipt('合并血统' + (freed ? '（释放 ' + freed + ' MB）' : ''), repoName + '：' + fromId + ' → ' + intoId, undo);
+  loadDupGroups(); loadScopes(); loadAssetCards();
 }
 
 function endpointSplitRows(eps) {
@@ -2853,7 +3228,7 @@ function endpointSplitRows(eps) {
 }
 
 // ---------------- 初始化 ----------------
-$('#btn-refresh').onclick = () => { refreshHealth(); if (location.hash === '#scopes') loadScopes(); if (location.hash === '#models') loadModels(); if (location.hash === '#stats') loadStats(STATS_DAYS); if (location.hash === '#keys') loadKeys(); if (location.hash === '#logs') loadLogs(); };
+$('#btn-refresh').onclick = () => { refreshHealth(); if (location.hash === '#scopes') { loadScopes(); loadDupGroups(); } if (location.hash === '#memories') loadMemoriesChain(); if (location.hash === '#models') loadModels(); if (location.hash === '#stats') loadStats(STATS_DAYS); if (location.hash === '#keys') loadKeys(); if (location.hash === '#logs') loadLogs(); };
 $('#btn-pause').onclick = () => action('pause');
 $('#btn-resume').onclick = () => action('resume');
 $('#btn-purge-tags').onclick = purgeTags;
@@ -2974,6 +3349,8 @@ $('#mem-prev').onclick = () => { if (MEM.offset > 0) { MEM.offset = Math.max(0, 
 $('#mem-next').onclick = () => { if (MEM.offset + MEM.rows.length < MEM.total) { MEM.offset += MEM.limit; loadMemories(); } };
 $('#mem-drawer-close').onclick = closeMemDrawer;
 $('#drawer-scrim').onclick = closeMemDrawer;
+$('#mem-stale-chip').onclick = toggleStaleMode;
+$('#btn-dup-refresh').onclick = loadDupGroups;
 $('#tab-memories').addEventListener('click', (e) => {
   const row = e.target.closest('#mem-rows tr[data-mem-id]');
   if (row && !e.target.closest('button')) {
@@ -3168,7 +3545,8 @@ def reset_index(confirm: str):
         try:
             with store.lock:
                 deleted = {}
-                for table in ("chunks", "vectors", "blobs", "repos", "lineages"):
+                # vectors_v2 与旧成员表一起清（CAS 后负载在 v2，reset 必须两端都清干净）
+                for table in ("chunks", "vectors", "vectors_v2", "blobs", "repos", "lineages"):
                     cur = store.db.execute(f"delete from {table}")
                     deleted[table] = int(cur.rowcount or 0)
                 store.db.commit()
@@ -3354,7 +3732,7 @@ def build():
             log("rerank unavailable: " + state["rerank_err"])
 
     store = index_store.IndexStore(DB_PATH)
-    memories_store = index_store.MemoryStore(store.db)  # 经验资产：同库同连接（表见 index_store.SCHEMA）
+    memories_store = index_store.MemoryStore(DB_PATH)  # 经验资产：独立连接（避免与 IndexStore 事务交错；表同库，见 index_store.SCHEMA）
     knn = _load("knn").KnnCache(store, KNN_MAX_BYTES)
     governor = _load("governor").EmbedGovernor(
         store, embedder, knn, EMBED_RATE, EMBED_BATCH, "spread", log,
@@ -3773,29 +4151,40 @@ def _memory_embed_target(what, when_expr):
 
 
 def memory_get_payload(memory_id):
-    """GET /v1/memories/{id}：单条，404 风格与 bodies 一致。"""
+    """GET /v1/memories/{id}：单条（含 stats_* 与 timeline 事件流），404 风格与 bodies 一致。"""
     ms, err = _memory_store()
     if err:
         return err
     item = ms.get(memory_id)
     if not item:
         return {"error": "unknown-memory"}, 404
+    # 治理可见性：事件时间线（倒序；存量数据合成 created/last-hit，标 synthesized）
+    timeline = ms.timeline(memory_id)
+    if timeline is not None:
+        item["timeline"] = timeline
     return item, 200
 
 
-def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, offset=None):
-    """GET /v1/memories：过滤 + 分页（limit clamp [1,200]，offset >= 0）。"""
+def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, offset=None,
+                        stale_days=None):
+    """GET /v1/memories：过滤 + 分页（limit clamp [1,200]，offset >= 0）。
+
+    stale_days（正整数）：只看 active 且 last_hit_at 早于 N 天前（或从未命中）的陈旧条目。
+    """
     ms, err = _memory_store()
     if err:
         return err
     try:
         limit = MEMORY_LIST_DEFAULT if limit is None else int(limit)
         offset = 0 if offset is None else int(offset)
+        stale = None if stale_days in (None, "") else int(stale_days)
     except (TypeError, ValueError):
         return {"error": "bad-pagination"}, 400
+    if stale is not None and stale < 0:
+        return {"error": "bad-pagination", "detail": "stale_days must be >= 0"}, 400
     limit = max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT))
     offset = max(0, offset)
-    return ms.list(repo, lens, status, q, limit, offset), 200
+    return ms.list(repo, lens, status, q, limit, offset, stale_days=stale), 200
 
 
 def memory_search_payload(req):
@@ -3816,9 +4205,12 @@ def memory_search_payload(req):
     t0 = time.time()
     # 查询向量：query 侧，embedder 会加 QUERY_PREFIX（与代码检索同约定）
     qvec, why_no_vec = _memory_embed_query(query)
+    # 检索口径（Memanto 模型）：active + conflicting 都参与召回；conflicting 命中
+    # 带 conflictWarning:true 标注（调用方自行决定是否采纳/提示用户），retired 不出。
     hits, channels = ms.search(query, qvec, req.get("repo") or None, req.get("lens") or None, top_k)
     out = {
         "hits": [{k: h[k] for k in ("id", "what", "when_expr", "why", "lens", "repo", "score")}
+                 | ({"conflictWarning": True} if h.get("status") == "conflicting" else {})
                  for h in hits],
         "ms": round((time.time() - t0) * 1000, 1),
     }
@@ -3886,6 +4278,64 @@ def memory_resolve_payload(memory_id, req):
     if not ms.set_status(memory_id, status):
         return {"error": "unknown-memory"}, 404
     return {"id": memory_id, "status": status}, 200
+
+
+def memory_link_conflict_payload(req):
+    """POST /v1/memories/link-conflict：冲突配对（管道 stage_c 调用）。
+
+    body: {conflicting_id, origin_id, trigger_words?:[...]}
+    语义：conflicting 条目在写入时不知道对手是谁（upsert 只有 status=conflicting）；
+    管道判 contradict 后补这一刀——双方 against_id 互指，触发词对存 conflicting 行。
+    """
+    ms, err = _memory_store()
+    if err:
+        return err
+    conflicting_id = str(req.get("conflicting_id") or "").strip()
+    origin_id = str(req.get("origin_id") or "").strip()
+    if not conflicting_id or not origin_id:
+        return {"error": "bad-conflict-link",
+                "detail": "conflicting_id and origin_id required"}, 400
+    if conflicting_id == origin_id:
+        return {"error": "bad-conflict-link", "detail": "cannot conflict with itself"}, 400
+    ok, against = ms.link_conflict(conflicting_id, origin_id, req.get("trigger_words"))
+    if not ok:
+        return {"error": "unknown-memory", "detail": "conflicting_id or origin_id not found"}, 404
+    out = {"id": conflicting_id, "against_id": origin_id, "linked": True}
+    if against:
+        out["against"] = against
+    return out, 200
+
+
+PIPELINE_RUN_MAX_LIMIT = 100     # pipeline-runs 列表分页上限
+
+
+def pipeline_run_report_payload(req):
+    """POST /v1/admin/pipeline-runs：管道跑批上报（留痕）。
+
+    body: {run_id, started_at, finished_at, engine, dry_run, candidates,
+           review_passed, review_blocked, dedup_kept, dedup_merged, actions:{...},
+           details:{...}}；run_id 重复时覆盖（重放幂等）。
+    """
+    ms, err = _memory_store()
+    if err:
+        return err
+    try:
+        return ms.record_run(req), 200
+    except ValueError as e:
+        return {"error": "bad-run", "detail": str(e)}, 400
+
+
+def pipeline_runs_list_payload(limit=None, offset=None):
+    """GET /v1/admin/pipeline-runs?limit=N：跑批列表，按 started_at 倒序。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    try:
+        limit = 20 if limit is None else int(limit)
+        offset = 0 if offset is None else int(offset)
+    except (TypeError, ValueError):
+        return {"error": "bad-pagination"}, 400
+    return ms.list_runs(max(1, min(limit, PIPELINE_RUN_MAX_LIMIT)), max(0, offset)), 200
 
 
 def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc", limit=50, offset=0):
@@ -4384,6 +4834,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data)
         if path == "/v1/admin/models":
             return self._send(200, models_payload())
+        if path == "/v1/admin/lineages/duplicates":
+            # 重复血统检测（只读，admin 鉴权同其余 /v1/admin/*）：同 repoName 多血统 /
+            # 同 chunkFp 聚类，返回建议合并对与删行/释放字节估算——UI 分组视图的数据源。
+            if not store:
+                return self._send(503, {"error": "not ready", "detail": state["err"]})
+            return self._send(200, store.lineage_duplicates())
+        if path == "/v1/admin/pipeline-runs":
+            # 治理跑批留痕列表（admin 鉴权已在上方 admin_only 分支统一做）
+            q = parse_qs(u.query or "")
+            payload, code = pipeline_runs_list_payload(
+                (q.get("limit") or [None])[0], (q.get("offset") or [None])[0],
+            )
+            return self._send(code, payload)
         if path == "/v1/admin/runtime":
             return self._send(200, self._runtime_payload())
         if path == "/log":
@@ -4468,7 +4931,8 @@ class Handler(BaseHTTPRequestHandler):
                 return (q.get(name) or [None])[0]
 
             payload, code = memory_list_payload(
-                _q1("repo"), _q1("lens"), _q1("status"), _q1("q"), _q1("limit"), _q1("offset"),
+                _q1("repo"), _q1("lens"), _q1("status"), _q1("q"), _q1("limit"),
+                _q1("offset"), _q1("stale_days"),
             )
             return self._send(code, payload)
         if path.startswith("/v1/memories/"):
@@ -4906,6 +5370,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(503, {"error": "not ready", "detail": state["err"]})
                 payload, code = memory_search_payload(req)
                 return self._send(code, payload)
+            if path == "/v1/memories/link-conflict":
+                # 字面路径在 /v1/memories/{id} 通配之前判（与 /search 同理，防被吞）
+                if not store:
+                    return self._send(503, {"error": "not ready", "detail": state["err"]})
+                payload, code = memory_link_conflict_payload(req)
+                return self._send(code, payload)
             if path.startswith("/v1/memories/") and path.endswith("/hit"):
                 if not store:
                     return self._send(503, {"error": "not ready", "detail": state["err"]})
@@ -4953,6 +5423,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, result)
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
+                if action == "pipeline-runs":
+                    # 管道跑批上报（留痕）；admin 鉴权已在上方 is_admin 分支统一做
+                    payload, code = pipeline_run_report_payload(req)
+                    return self._send(code, payload)
                 if action == "keys":
                     if not self._admin_creds_configured():
                         return self._send(400, {"error": "admin-password-required",
@@ -5096,6 +5570,42 @@ class Handler(BaseHTTPRequestHandler):
                     if not lineage:
                         return self._send(400, {"error": "lineage required"})
                     return self._send(200, store.gc(lineage))
+                elif action == "lineages/merge":
+                    # 血统合并（T-261120-dedup）：body {from: [repoId|lineageId|ns,...], into: "..."}
+                    # 单事务 BEGIN IMMEDIATE；旧血统软标记 merged_into 观察期 7 天。
+                    from_tokens = req.get("from")
+                    into_token = req.get("into")
+                    if not isinstance(from_tokens, list) or not from_tokens:
+                        return self._send(400, {"error": "from required",
+                                                 "hint": 'from 必须是数组：["<repoId|lineageId>",...]'})
+                    if not into_token:
+                        return self._send(400, {"error": "into required"})
+                    try:
+                        result = store.lineage_merge(from_tokens, into_token)
+                    except ValueError as e:
+                        return self._send(400, {"error": "bad-lineage", "detail": str(e)})
+                    # 契约字段同时给 snake_case 别名（任务包写 dropped_chunks 等，
+                    # 内部实现是 camelCase；两套键都可用，UI/脚本任选）。
+                    result["dropped_chunks"] = result["droppedChunks"]
+                    result["dropped_vectors"] = result["droppedVectors"]
+                    result["dropped_blobs"] = result["droppedBlobs"]
+                    result["freed_bytes"] = result["freedBytes"]
+                    if knn:
+                        knn.invalidate()  # 血统归一：受影响 namespace 的矩阵缓存全部失效
+                    return self._send(200, result)
+                elif action == "lineages/hard-clean":
+                    # 观察期物理清理：merged_into 置位且 merged_at 超过 minAgeDays（默认 7 天）
+                    # 的血统行物理删除。force=true 无视观察期（只给清理脚本用）。
+                    try:
+                        min_age_days = int(req.get("minAgeDays", 7))
+                    except (TypeError, ValueError):
+                        min_age_days = 7
+                    result = store.lineage_hard_clean(
+                        min_age_days=min_age_days, force=bool(req.get("force"))
+                    )
+                    if result["removedCount"] and knn:
+                        knn.invalidate()
+                    return self._send(200, result)
                 elif action == "purge-tags":
                     # 换模型后旧 tag 的向量仍占空间：删掉"非当前 tag"的向量（正文/其他 tag 不动）
                     drop = req.get("tag")

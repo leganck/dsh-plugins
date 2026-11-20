@@ -30,6 +30,19 @@ def default_api_key() -> str:
     return os.environ.get("INDEX_API_KEY", "")
 
 
+def admin_basic_auth() -> tuple[str, str] | None:
+    """admin 凭据（PIPE_ADMIN_USER/PIPE_ADMIN_PASSWORD env）。
+
+    pipeline-runs 上报走 /v1/admin/*（Basic 鉴权）。缺任一 env → 返回 None
+    （调用方跳过上报并打印说明，不报错——留痕是旁路，不能挡管道）。
+    """
+    user = os.environ.get("PIPE_ADMIN_USER", "").strip()
+    password = os.environ.get("PIPE_ADMIN_PASSWORD", "")
+    if not user or not password:
+        return None
+    return user, password
+
+
 class IndexClient:
     """轻量 REST 客户端。timeout 秒；失败重试 retries 次（指数退避）。"""
 
@@ -41,14 +54,20 @@ class IndexClient:
         self.retries = retries
 
     # ---------- 底层 ----------
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 basic_auth: tuple[str, str] | None = None) -> dict:
         url = self.base + path
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         last_err: Exception | None = None
         for attempt in range(self.retries + 1):
             req = urllib.request.Request(url, data=data, method=method)
             req.add_header("Content-Type", "application/json")
-            if self.api_key:
+            if basic_auth is not None:
+                import base64
+                token = base64.b64encode(
+                    f"{basic_auth[0]}:{basic_auth[1]}".encode("utf-8")).decode("ascii")
+                req.add_header("Authorization", "Basic " + token)
+            elif self.api_key:
                 req.add_header("Authorization", "Bearer " + self.api_key)
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -128,6 +147,26 @@ class IndexClient:
     def memory_resolve(self, mem_id: str, status: str) -> dict:
         """POST /v1/memories/{id}/resolve {status:'active'|'retired'}"""
         return self._request("POST", f"/v1/memories/{mem_id}/resolve", {"status": status})
+
+    def memory_link_conflict(self, conflicting_id: str, origin_id: str,
+                             trigger_words: list[str] | None = None) -> dict:
+        """POST /v1/memories/link-conflict：冲突配对双写（against_id 互指 + 触发词对）。"""
+        body: dict = {"conflicting_id": conflicting_id, "origin_id": origin_id}
+        if trigger_words:
+            body["trigger_words"] = trigger_words
+        return self._request("POST", "/v1/memories/link-conflict", body)
+
+    def report_run(self, payload: dict) -> dict:
+        """POST /v1/admin/pipeline-runs：跑批留痕上报（admin 鉴权）。
+
+        需 PIPE_ADMIN_USER/PIPE_ADMIN_PASSWORD env；缺失时抛 PipelineClientError
+        （调用方 pipeline.py 捕获后跳过并打印说明）。
+        """
+        creds = admin_basic_auth()
+        if creds is None:
+            raise PipelineClientError(
+                "report_run skipped: PIPE_ADMIN_USER/PIPE_ADMIN_PASSWORD not set")
+        return self._request("POST", "/v1/admin/pipeline-runs", payload, basic_auth=creds)
 
 
 # ---------------- 测试替身（test_pipeline.py 与 dry-run 复用）----------------
@@ -250,3 +289,22 @@ class StubIndexClient:
                 item["status"] = status
                 return {"id": mem_id, "status": status}
         raise PipelineClientError(f"resolve {mem_id}: not found")
+
+    def memory_link_conflict(self, conflicting_id: str, origin_id: str,
+                             trigger_words: list[str] | None = None) -> dict:
+        self._record("POST", "/v1/memories/link-conflict",
+                     {"conflicting_id": conflicting_id, "origin_id": origin_id,
+                      "trigger_words": trigger_words})
+        conf = next((i for i in self.existing if i["id"] == conflicting_id), None)
+        origin = next((i for i in self.existing if i["id"] == origin_id), None)
+        if not conf or not origin:
+            raise PipelineClientError(f"link-conflict: unknown id ({conflicting_id}/{origin_id})")
+        conf["against_id"] = origin_id
+        origin["against_id"] = conflicting_id
+        if trigger_words:
+            conf["trigger_words"] = list(trigger_words)
+        return {"id": conflicting_id, "against_id": origin_id, "linked": True}
+
+    def report_run(self, payload: dict) -> dict:
+        self._record("POST", "/v1/admin/pipeline-runs", payload)
+        return {"run_id": payload.get("run_id", ""), "recorded": True}

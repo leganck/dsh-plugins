@@ -80,8 +80,10 @@ def load_vectors():
     ).fetchone()
     ns, lineage, tag, n = row["namespace"], row["lineage_id"], row["tag"], row["n"]
     rows = con.execute(
-        "select c.hash, v.v, v.dim from chunks c join vectors v"
-        " on v.lineage_id = c.lineage_id and v.tag = ? and v.hash = c.hash where c.namespace = ?",
+        # CAS（T-261120-dedup）：向量负载在 vectors_v2（(tag,hash) 全局唯一）；
+        # 旧 vectors 表是成员表，v 列已清空，不能再当负载读。
+        "select c.hash, v.v, v.dim from chunks c join vectors_v2 v"
+        " on v.tag = ? and v.hash = c.hash where c.namespace = ?",
         (tag, ns),
     ).fetchall()
     dim = rows[0]["dim"]

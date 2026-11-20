@@ -271,6 +271,144 @@ def test_logic():
           server._stats_category("memories") == "retrieval",
           server._stats_category("memories"))
 
+    # 15) 治理可见性：pipeline_runs 上报/列表/覆盖
+    run_payload, code = server.pipeline_run_report_payload({
+        "run_id": "run-gov-001", "engine": "rules", "dry_run": False,
+        "started_at": 1700000000, "finished_at": 1700000042,
+        "candidates": 10, "review_passed": 8, "review_blocked": 2,
+        "dedup_kept": 7, "dedup_merged": 1,
+        "actions": {"create": 5, "update": 1, "skip": 1, "contradict": 1},
+        "details": {"blocked": [{"what": "x", "reasons": ["missing_when"]}]},
+    })
+    check("pipeline-runs 上报 → 200 且回显计数", code == 200
+          and run_payload.get("run_id") == "run-gov-001"
+          and run_payload.get("candidates") == 10
+          and run_payload.get("actions", {}).get("contradict") == 1,
+          f"code={code} {run_payload}")
+    server.pipeline_run_report_payload({
+        "run_id": "run-gov-002", "engine": "rules", "dry_run": True,
+        "started_at": 1700000100, "finished_at": 1700000110, "candidates": 3,
+    })
+    listed, code = server.pipeline_runs_list_payload(limit=10)
+    check("pipeline-runs 列表按 started_at 倒序", code == 200 and listed.get("total") == 2
+          and listed["items"][0]["run_id"] == "run-gov-002"
+          and listed["items"][1]["run_id"] == "run-gov-001"
+          and listed["items"][0]["dry_run"] is True,
+          f"code={code} {listed}"[:300])
+    again, _ = server.pipeline_run_report_payload({
+        "run_id": "run-gov-001", "engine": "rules", "candidates": 99,
+        "started_at": 1700000200, "finished_at": 1700000210,
+    })
+    listed2, _ = server.pipeline_runs_list_payload(limit=10)
+    check("pipeline-runs 同 run_id 重复上报覆盖（不新增行）",
+          listed2.get("total") == 2 and again.get("candidates") == 99
+          and listed2["items"][0]["run_id"] == "run-gov-001",
+          f"{again} {listed2}"[:300])
+    payload, code = server.pipeline_run_report_payload({"engine": "rules"})
+    check("pipeline-runs 缺 run_id → 400 bad-run", code == 400
+          and payload.get("error") == "bad-run", f"code={code} {payload}")
+
+    # 16) link-conflict：双方 against_id 互指 + trigger_words 存 conflicting 行
+    p_origin, _ = upsert("demo", "gov-lens", "发版必须走 release 分支流程")
+    p_conf, _ = upsert("demo", "gov-lens", "发版无需走 release 分支流程",
+                       status="conflicting")
+    payload, code = server.memory_link_conflict_payload({
+        "conflicting_id": p_conf["id"], "origin_id": p_origin["id"],
+        "trigger_words": ["必须", "无需"],
+    })
+    check("link-conflict → 200 且带 against 全文", code == 200
+          and payload.get("against_id") == p_origin["id"]
+          and payload.get("against", {}).get("what") == "发版必须走 release 分支流程",
+          f"code={code} {payload}")
+    conf = ms.get(p_conf["id"])
+    orig = ms.get(p_origin["id"])
+    check("against_id 双向互指（conflicting 行 + 原条目行）",
+          conf.get("against_id") == p_origin["id"] and orig.get("against_id") == p_conf["id"],
+          f"conf={conf.get('against_id')} orig={orig.get('against_id')}")
+    check("trigger_words 存在 conflicting 行（json 列）",
+          conf.get("trigger_words") == ["必须", "无需"] and "trigger_words" not in orig,
+          f"conf={conf.get('trigger_words')} orig={orig.get('trigger_words')}")
+    cq, _ = server.memory_conflicts_payload()
+    check("conflicts 响应 join 出 against + trigger_words",
+          any(it["id"] == p_conf["id"] and it.get("trigger_words") == ["必须", "无需"]
+              and it.get("against", {}).get("id") == p_origin["id"] for it in cq.get("items") or []),
+          repr(cq)[:400])
+    payload, code = server.memory_link_conflict_payload({
+        "conflicting_id": p_conf["id"], "origin_id": "exp-999999"})
+    check("link-conflict 未知 origin → 404", code == 404, f"code={code} {payload}")
+    payload, code = server.memory_link_conflict_payload({"conflicting_id": "", "origin_id": ""})
+    check("link-conflict 缺参 → 400 bad-conflict-link", code == 400
+          and payload.get("error") == "bad-conflict-link", f"code={code} {payload}")
+
+    # 17) timeline：真实事件流（倒序）+ 存量合成（synthesized）
+    tl = ms.timeline(p_origin["id"])
+    events = [e["event"] for e in tl]
+    check("timeline 真实事件：created 在流里（新写条目）",
+          "created" in events, repr(tl)[:300])
+    check("timeline 倒序（at 非升序）",
+          all(tl[i]["at"] >= tl[i + 1]["at"] for i in range(len(tl) - 1)), repr(tl)[:300])
+    conf_ev = [e for e in ms.timeline(p_conf["id"]) if e["event"] == "conflicted"]
+    check("link-conflict 写 conflicted 事件（含触发词 detail）",
+          conf_ev and conf_ev[0].get("detail", {}).get("against") == p_origin["id"],
+          repr(conf_ev)[:300])
+    # 存量合成：手工删掉事件行，模拟老条目 → timeline 仍非空且标 synthesized
+    st.db.execute("delete from memory_events where memory_id = ?", ("exp-000001",))
+    st.db.commit()
+    tl_old = ms.timeline("exp-000001")
+    check("存量条目（无事件）合成 timeline（synthesized 标注）",
+          tl_old and any(e["event"] == "created"
+                         and e.get("detail", {}).get("synthesized") is True for e in tl_old),
+          repr(tl_old)[:300])
+    st.db.execute("delete from memories where id = 'exp-nonexist-tl'")
+    st.db.commit()
+    check("timeline 未知 id → None", ms.timeline("exp-nonexist-tl") is None)
+    item_tl, _ = server.memory_get_payload(p_origin["id"])
+    check("GET /{id} 响应含 timeline 数组", isinstance(item_tl.get("timeline"), list)
+          and len(item_tl["timeline"]) >= 1, repr(item_tl.get("timeline"))[:200])
+
+    # 18) stale_days 过滤：从未命中（last_hit_at 为空）的 active 条目算陈旧
+    #     exp-000001 曾 hit（last_hit_at 不为空）→ 不算；page-repo 条目从未 hit → 算。
+    stale, _ = server.memory_list_payload(repo="page-repo", stale_days=90)
+    check("stale_days：从未命中的 active 条目算陈旧",
+          stale.get("total") == 6, repr(stale)[:300])
+    stale_hit, _ = server.memory_list_payload(repo="demo", lens="code-style", stale_days=90)
+    check("stale_days：最近命中过的条目不算陈旧（last_hit_at 在窗口内）",
+          stale_hit.get("total") == 0, repr(stale_hit)[:300])
+    # 直接把 last_hit_at 拨回 100 天前 → 变陈旧
+    st.db.execute("update memories set last_hit_at = ? where id = ?",
+                  (int(__import__("time").time()) - 100 * 86400, "exp-000001"))
+    st.db.commit()
+    stale2, _ = server.memory_list_payload(repo="demo", lens="code-style", stale_days=90)
+    check("stale_days：last_hit_at 早于 N 天 → 陈旧", stale2.get("total") == 1,
+          repr(stale2)[:300])
+    payload, code = server.memory_list_payload(repo="demo", stale_days="abc")
+    check("stale_days 非法 → 400 bad-pagination", code == 400
+          and payload.get("error") == "bad-pagination", f"code={code} {payload}")
+
+    # 19) 冲突召回：conflicting 参与 search 且带 conflictWarning（Memanto 模型）
+    payload, code = server.memory_search_payload({"q": "release 分支流程", "top_k": 10})
+    hits = payload.get("hits") or []
+    conf_hit = [h for h in hits if h["id"] == p_conf["id"]]
+    active_hit = [h for h in hits if h["id"] == p_origin["id"]]
+    check("search 召回 conflicting 条目（不再排除）",
+          bool(conf_hit), repr(hits)[:400])
+    check("conflicting 命中带 conflictWarning:true",
+          conf_hit and conf_hit[0].get("conflictWarning") is True, repr(conf_hit)[:200])
+    check("active 命中不带 conflictWarning", active_hit
+          and "conflictWarning" not in active_hit[0], repr(active_hit)[:200])
+    pure, ch = ms.search("release 分支流程", qvec=None, top_k=10)
+    check("存储层 search（status=True 口径）active+conflicting 都召回",
+          {h["id"] for h in pure} >= {p_conf["id"], p_origin["id"]}, repr(pure)[:300])
+    # retired 仍不召回：软删原条目后 search 不出
+    ms.set_status(p_origin["id"], "retired")
+    payload, _ = server.memory_search_payload({"q": "release 分支流程", "top_k": 10})
+    check("软删后 retired 仍不参与召回",
+          all(h["id"] != p_origin["id"] for h in payload.get("hits") or []),
+          repr(payload)[:300])
+    ms.set_status(p_origin["id"], "active")
+    # 清场：conflicting 队列留给 HTTP 层的用例（total==1 断言），resolve 掉本节条目
+    ms.set_status(p_conf["id"], "retired")
+
 
 # ---------------------------------------------------------------- ② 真实 HTTP 层
 def test_http():
@@ -363,6 +501,45 @@ def test_http():
                 check("带 Bearer → 200", resp.status == 200, resp.status)
         finally:
             server.API_KEY = old_key
+
+        # 治理可见性（HTTP 层）：pipeline-runs 上报/列表（admin 端点）+ stale_days + conflictWarning
+        code, body = req("POST", "/v1/admin/pipeline-runs", {
+            "run_id": "run-http-001", "engine": "rules", "dry_run": False,
+            "candidates": 5, "review_passed": 4, "review_blocked": 1,
+            "actions": {"create": 4},
+        })
+        check("HTTP POST /v1/admin/pipeline-runs → 200", code == 200
+              and body.get("run_id") == "run-http-001"
+              and body.get("review_blocked") == 1, f"code={code} {body}")
+        code, body = req("GET", "/v1/admin/pipeline-runs?limit=5")
+        check("HTTP GET /v1/admin/pipeline-runs 列表", code == 200
+              and body.get("total", 0) >= 1
+              and any(i["run_id"] == "run-http-001" for i in body.get("items") or []),
+              f"code={code} {body}"[:300])
+        code, body = req("POST", "/v1/admin/pipeline-runs", {"engine": "x"})
+        check("HTTP pipeline-runs 缺 run_id → 400", code == 400
+              and body.get("error") == "bad-run", f"code={code} {body}")
+
+        code, body = req("GET", "/v1/memories?repo=page-repo&stale_days=90")
+        check("HTTP stale_days 过滤生效", code == 200 and body.get("total") == 6,
+              f"code={code} {body}"[:200])
+
+        # conflicting 参与检索 + conflictWarning（HTTP 层钉住语义变更）
+        req("POST", "/v1/memories", {"repo": "http-repo", "lens": "warn-lens",
+                                     "what": "冲突召回验证条目", "status": "conflicting",
+                                     "evidence": [{"issue": "T-9"}]})
+        code, body = req("POST", "/v1/memories/search", {"q": "冲突召回验证", "top_k": 5})
+        whits = [h for h in body.get("hits") or [] if h.get("conflictWarning")]
+        check("HTTP search conflicting 命中带 conflictWarning", code == 200
+              and len(whits) >= 1 and whits[0]["what"] == "冲突召回验证条目",
+              f"code={code} {body}"[:300])
+
+        # timeline：HTTP GET /{id} 带 timeline（created 事件来自 upsert）
+        code, body = req("GET", f"/v1/memories/{mid}")
+        check("HTTP GET /{id} 含 timeline", code == 200
+              and isinstance(body.get("timeline"), list)
+              and any(e["event"] == "created" for e in body["timeline"]),
+              f"code={code} {body}"[:300])
 
         # admin stats 含 memories 盘点（验收 4：走真实 HTTP）
         code, body = req("GET", "/v1/admin/stats?days=1")
