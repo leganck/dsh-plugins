@@ -125,6 +125,35 @@ class StubLLMError(StubLLM):
         raise exp_llm.LLMError("boom", reason="http-500", attempts=3)
 
 
+class StubDegradeLLM(StubLLM):
+    """模拟 round1 的坏模型：**大段**截断或超时，**小段（≤threshold 字）**正常返回。
+
+    用来验证二级退化（失败/截断 → 200 字小段重试一次）真的生效。
+    """
+
+    def __init__(self, entries, mode="truncate", threshold=200):
+        super().__init__(entries)
+        self.mode = mode
+        self.threshold = threshold
+        self.lengths = []
+
+    def extract_json_array(self, material, **kwargs):
+        self.calls.append(material)
+        self.lengths.append(len(material))
+        self.timeouts = getattr(self, "timeouts", [])
+        self.timeouts.append(kwargs.get("timeout_ms"))
+        self.max_tokens = getattr(self, "max_tokens", [])
+        self.max_tokens.append(kwargs.get("max_tokens"))
+        if len(material) > self.threshold:
+            if self.mode == "truncate":
+                return {"content": "", "entries": [], "usage": dict(self.usage),
+                        "attempts": 1, "ms": 5000, "warning": "truncated"}
+            raise exp_llm.LLMError("timeout after 240s", reason="timeout")
+        return {"content": json.dumps(self.entries, ensure_ascii=False),
+                "entries": list(self.entries), "usage": dict(self.usage),
+                "attempts": 1, "ms": 100, "warning": None}
+
+
 def ok_response(content, reasoning="", finish="stop", tokens=(10, 5, 0)):
     return {
         "choices": [{"message": {"content": content, "reasoning_content": reasoning},
@@ -142,7 +171,7 @@ def ok_response(content, reasoning="", finish="stop", tokens=(10, 5, 0)):
 # ================================================================ ① prompt 常量
 def test_prompt_constants():
     print("\n[1] prompt 版本与必含要素")
-    check("PROMPT_VERSION == 'exp-v2.0'", exp_prompt.PROMPT_VERSION == "exp-v2.0",
+    check("PROMPT_VERSION == 'exp-v2.1'", exp_prompt.PROMPT_VERSION == "exp-v2.1",
           exp_prompt.PROMPT_VERSION)
     check("版本号形如 exp-v2.<n>", bool(__import__("re").match(r"^exp-v2\.\d+$", exp_prompt.PROMPT_VERSION)))
     check("三镜头 == jargon/index/logic", exp_prompt.LENSES == ("jargon", "index", "logic"),
@@ -176,6 +205,20 @@ def test_prompt_constants():
           str(exp_prompt.WHAT_MAX) in prompt_text and str(exp_prompt.WHEN_MAX) in prompt_text
           and str(exp_prompt.WHY_MAX) in prompt_text
           and str(exp_prompt.SIM_WHAT_WHY) in prompt_text)
+    check("prompt 里长度是软约束（目标是 TARGET，硬上限只用于截断）",
+          str(exp_prompt.WHAT_TARGET) in prompt_text and str(exp_prompt.WHEN_TARGET) in prompt_text
+          and str(exp_prompt.WHY_TARGET) in prompt_text
+          and exp_prompt.WHAT_MAX > exp_prompt.WHAT_TARGET
+          and exp_prompt.WHEN_MAX > exp_prompt.WHEN_TARGET
+          and exp_prompt.WHY_MAX > exp_prompt.WHY_TARGET)
+    check("prompt 写死 lens 判定顺序（黑话 → 位置 → 约束）",
+          all(mark in prompt_text for mark in ("①", "②", "③"))
+          and "命中即停" in prompt_text
+          and prompt_text.index("jargon") < prompt_text.index("index") < prompt_text.index("logic"))
+    check("prompt 要求输出 lens_reason 且给出字数上限",
+          "lens_reason" in prompt_text and str(exp_prompt.LENS_REASON_MAX) in prompt_text)
+    check("prompt 限制单段最多 3 条且只要 JSON 数组",
+          "最多输出 3 条" in prompt_text and "不要解释" in prompt_text)
     check("prompt 要求 what 用祈使句、when 可判定、why 讲机制",
           all(word in prompt_text for word in ("祈使句", "可判定", "机制")))
     check("prompt 带少样本且字段齐全",
@@ -216,9 +259,11 @@ def test_review_garbage_classes():
                why="改动集中在库存归属与结余重算两处逻辑")
     check("③ 对话摘要（过程录像）→ 拦", r["reason"] == "garbage-3-dialogue-summary", r)
 
-    r = review(what="确认 dev1 的临时开关已打开后再触发重放任务",
-               why="开关没打开时消息进队列但不被消费，看起来像投递失败")
-    check("④ 一次性 case → 拦", r["reason"] == "garbage-4-one-off", r)
+    # v2.1：一次性 case 不再"见时间词就拦"，只有标记词命中 **且** 可复用三要素不齐才成立。
+    # 这一条 three-element 全缺（when 只有时间限定、what 无动作/锚点、why 是空话）→ 仍要拦。
+    r = review(when_expr="今天就这一单，客户在催着要结果")
+    check("④ 一次性 case（when 只有时间限定 + 三要素不齐）→ 拦",
+          r["reason"] == "garbage-4-one-off", r)
 
     r = review(what="先沟通再动手改代码", why="避免方向理解偏差导致的返工与相互覆盖")
     check("⑤ 用户主观偏好 → 拦", r["reason"] == "garbage-5-user-preference", r)
@@ -255,7 +300,7 @@ def test_review_garbage_classes():
               lens="index"), lambda name: False),
         (dict(what="遇到问题多收集上下文"), None),
         (dict(what="本次改了 7 个文件并跑了 3 次测试"), None),
-        (dict(what="确认 dev1 的临时开关已打开后再触发重放任务"), None),
+        (dict(when_expr="今天就这一单，客户在催着要结果"), None),
         (dict(what="先沟通再动手改代码"), None),
         (dict(when_expr="处理问题时"), None),
         (dict(what="CHGJ-3735 涉及 3 笔共 34 元，需核对统计口径"), None),
@@ -298,8 +343,16 @@ def test_review_other_rules():
     r = review(when_expr="客户报上传成功但后台查不到流水")
     check("when 正常长度不拦", r["ok"] is True, r)
 
-    r = review(what="确认" + "分区归属" * 25)
-    check("what 超 90 字 → 粒度混用（超长）", r["reason"] == "garbage-7-mixed-granularity", r)
+    # v2.1：超长改软约束——截断到上限并记 warnings=['trimmed']，**不再判垃圾**
+    over = cand(what="确认" + "分区归属" * 30)  # 122 字 > WHAT_MAX
+    r = P.review_candidate(over)
+    check("what 超上限不再判粒度混用，而是截断放行",
+          r["ok"] is True and r["warnings"] and "trimmed:what" in r["warnings"][0], r)
+    check("截断后 what 长度 ≤ 硬上限且候选文本被原地改短",
+          len(over["what"]) <= exp_prompt.WHAT_MAX
+          and over.get("trimWarnings") and "what" in over["trimWarnings"], over.get("what"))
+    check("截断只影响长度，不影响其它字段",
+          over["trimWarnings"].get("what")[0] > over["trimWarnings"].get("what")[1], over["trimWarnings"])
 
     r = review(lens="unknown")
     check("lens 非法 → invalid-field", r["reason"] == "invalid-field", r)
@@ -320,6 +373,118 @@ def test_review_other_rules():
     check("相似度对同义改写不过度敏感（>0.5）", syn > 0.5, syn)
     check("相似度对无关文本接近 0",
           P.similarity("分区路由错时数据写进别的租户库", "gradle 构建用 java 直调") < 0.2)
+
+
+# ================================================================ ② Review：round1 真实错例回归（v2.1）
+# 这些用例的 what **逐字取自** round1 评测的真实产出/误拦记录：
+#   - 被误拦条目：`server/exp-pipeline/eval/judge.json` → `blocked_judgement`（7/7 全是误拦）
+#     与 `eval/raw/e1__*.json` 的 blocked[].what（round1 只落盘了 what，when/why 未落盘，
+#     这里补最短的合法值——这些用例只验证"长度/一次性"规则不再拦，与 when/why 措辞无关）；
+#   - 唯一被放行的真垃圾 N3：`eval/run_eval.py` NEGATIVES[2]。
+# 判据是**评测者的人工结论**，不是我编的期望值。
+ROUND1_FALSE_BLOCKS = (
+    ("e1:m05_c01 核查推送 bas_interface_log（what=131）",
+     "核查某单是否推送成功时，查 bas_interface_log 按 relation_id=sale_detail.id 且 "
+     "type=0/status=1/error_count=0 过滤，并用 vip_store_history 对照金额；不要找推送报文字段",
+     "客户反馈某单推了但下游没生效", "推送报文不可靠，落库记录才是最终事实，按 relation_id 对上才算推送成功"),
+    ("e1:m05_c02 MemberStoreServiceImpl.L364（what=113）",
+     "改用 MemberStoreServiceImpl.L364 的实时 branch.getName() 作为 branchName 来源，"
+     "不再从 vip_trade_history.trade_branch_name 读快照值",
+     "排查交易落在哪个分店时", "快照值在门店改绑后不更新，用它会定位到错的分店"),
+    ("e1:m07_c00 backport 归属判定（what=91）",
+     "先核对目标分支是否已含相应修复；backport 提交按原始分支归属判定，"
+     "并排除目标分支的 settings.gradle/project.properties/CHANGELOG。",
+     "判断某个提交是否该 backport 到补丁线时", "目标线自己的构建配置改动不该跟着回灌，否则会把版本号与仓库地址改回去"),
+    ("e1:m08_c00 cherry-pick nothing to commit（=黄金 #11，what=91）",
+     "cherry-pick --continue 报 nothing to commit 时按该 pick 已丢失处理，"
+     "依原 commit 逐文件手工重放，并用 git log 确认落地",
+     "跨线 cherry-pick 冲突解决后 --continue 报 nothing to commit",
+     "git 认为无变更就跳过该 pick，实际改动没进来，后续编译报找不到符号"),
+    ("e1:m08_c01 MSYS java -classpath gradle-wrapper（=黄金 #13，what=93/when=73）",
+     "MSYS 下用 java -classpath gradle-wrapper.jar 直接调用 GradleWrapperMain，"
+     "JAVA_HOME 指向 Windows JDK 路径",
+     "Git Bash/MSYS 里执行 gradlew 卡住或报找不到 java 时",
+     "gradlew 脚本按 POSIX 路径找 java，MSYS 环境变量转换后找不到，直调 jar 绕过脚本"),
+    ("e1:m10_c01 java -cp gradle-wrapper GradleWrapperMain（=黄金 #13，what=94/when=80）",
+     "直接运行 `java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <tasks>`",
+     "Windows 命令行里 gradlew 报错或 PATH 里没有 java 时",
+     "wrapper jar 自己负责下载并校验 gradle 发行包，直调可绕开 shell 脚本与 java 发现的坑"),
+    ("e2:digest OSS 临时链接（ONE_OFF 被“临时”误触发）",
+     "收到平台返回的截图或文件 OSS 临时链接后，立即下载到本地证据目录，不要等稍后统一收集",
+     "平台把截图或文件以 OSS 临时链接的形式返回时",
+     "链接有效期短，过期后就取不到，事后回查没有原始证据"),
+)
+
+
+def _round1_cand(what, when, why, **overrides):
+    base = {
+        "what": what, "when_expr": when, "why": why, "lens": "logic", "category": "repo",
+        "audit": {"reusable_because": "（round1 真实产出）", "exclusions": "1,2,3,6,8",
+                  "evidence_quote": "素材原文：" + what[:40]},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_review_round1_regression():
+    print("\n[3b] round1 真实错例回归（7 条误拦全部改回放行；1 条漏放的真垃圾补拦）")
+    for label, what, when, why in ROUND1_FALSE_BLOCKS:
+        r = P.review_candidate(_round1_cand(what, when, why))
+        check("误拦回归放行：" + label, r["ok"] is True, r)
+
+    # 超长那条要能看到"截断而非拦截"的证据（131 > WHAT_MAX 120）
+    over = _round1_cand(*ROUND1_FALSE_BLOCKS[0][1:])
+    r = P.review_candidate(over)
+    check("131 字的真实 what → 截断到 ≤上限并记 trimmed（不再判垃圾）",
+          r["ok"] is True and "trimmed:what" in (r["warnings"] or [""])[0]
+          and len(over["what"]) <= exp_prompt.WHAT_MAX, (r["warnings"], len(over["what"])))
+    check("黄金 #11 的 91 字 what 在 v2.1 上限内（不需要截断）",
+          exp_prompt.WHAT_MAX >= 91 and not P.review_candidate(
+              _round1_cand(*ROUND1_FALSE_BLOCKS[3][1:]))["warnings"])
+
+    # S1：唯一放行的真垃圾必须补拦
+    n3 = _round1_cand("超时就调大超时参数", "接口或脚本执行超时的时候",
+                      "把超时阈值调大可以避免任务被中断", lens="logic", category="tool")
+    r = P.review_candidate(n3)
+    check("S1 堆补丁「超时就调大超时参数」→ 事实性错误",
+          r["reason"] == "garbage-1-factual-error" and r["garbage"] is True, r)
+    with_cause = _round1_cand(
+        "增大堆内存前先看 GC 日志确认对象是否真的泄漏", "发布后频繁 FullGC 的时候",
+        "因为内存增大只是延缓回收，根因通常是缓存没设上限或大对象没释放",
+        lens="logic", category="debug")
+    r = P.review_candidate(with_cause)
+    check("S1 有根因词的「增大…」不拦（只拦堆补丁，不拦讲机理的）", r["ok"] is True, r)
+
+    # lens 自洽性纠正：what 是「去哪找」形态却判 logic → 改判 index
+    lookup = _round1_cand("查 bas_interface_log 的 error_count 字段判断是否推送成功",
+                          "客户说消息推了但下游没收到时",
+                          "error_count 为 0 才是真成功，推送日志里的返回码不可靠",
+                          lens="logic", category="debug")
+    r = P.review_candidate(lookup)
+    check("lens 自洽纠正：查表的 what 判 logic → 改判 index",
+          lookup["lens"] == "index" and lookup.get("lensOriginal") == "logic"
+          and any("lens-coerced" in w for w in (r["warnings"] or [])), (lookup["lens"], r["warnings"]))
+    jargon_fix = _round1_cand("不要把临时环境的数据当结论，必须回到生产库核对",
+                              "在测试环境复现出数据问题时",
+                              "测试环境的数据分布与生产不同，直接下结论会把结论做反", lens="jargon")
+    r = P.review_candidate(jargon_fix)
+    check("lens 自洽纠正：无黑话标记的约束判 jargon → 改判 logic",
+          jargon_fix["lens"] == "logic", (jargon_fix["lens"], r["warnings"]))
+    real_jargon = _round1_cand("看到「可摘/不可摘」理解为「该工单能否移植到目标补丁线」",
+                               "发布清单或评论里出现可摘字样",
+                               "团队内部黑话，字面推不出含义，直接按字面理解会把版本判断做反",
+                               lens="jargon", category="business")
+    r = P.review_candidate(real_jargon)
+    check("真黑话（带「」标记）不被误改判", real_jargon["lens"] == "jargon", real_jargon["lens"])
+
+    # ONE_OFF 边界两例
+    oss = _round1_cand(*ROUND1_FALSE_BLOCKS[6][1:])
+    check("ONE_OFF 边界：三要素齐全时「临时链接」不算一次性 case",
+          P.reusable_triad(oss)["complete"] is True and P.review_candidate(oss)["ok"] is True)
+    one_off = _round1_cand("核对一下", "今天就这一单，客户在催着要结果", "先把这单处理完")
+    r = P.review_candidate(one_off)
+    check("ONE_OFF 边界：三要素不齐的一次性 case 仍然拦",
+          r["reason"] == "garbage-4-one-off", r)
 
 
 # ================================================================ ③ 黄金样本回归
@@ -853,6 +1018,72 @@ def test_pipeline_end_to_end():
           len(P.split_segments("\n\n".join(["x" * 200] * 10), max_chars=300)) > 1)
 
 
+# ================================================================ ⑨b 二级退化
+def test_degradation():
+    print("\n[10b] 二级退化（失败/截断 → ≤200 字小段重试一次）")
+    long_bullet = "- " + "分区路由错时数据写进其他租户库，客户端仍收到成功提示，只查本租户永远查不到" * 8
+    material = "### [segment_001.md] 库存归属\n" + long_bullet + "\n"
+    segs = P.split_segments(material)
+    check("素材段 >200 字（够长才切得动，短段不该触发退化）",
+          len(segs) == 1 and len(segs[0]["text"]) > P.DEGRADE_CHARS, [len(s["text"]) for s in segs])
+
+    for mode, label in (("truncate", "截断"), ("fail", "超时失败")):
+        llm = StubDegradeLLM([cand()], mode=mode)
+        result = P.run_pipeline(material, llm=llm, dry_run=True)
+        job = result["job"]
+        check(f"{label} → 小段重试成功，不再计 failed/truncated",
+              job["failed_segments"] == 0 and job["truncated"] == 0 and job["degraded_segments"] == 1,
+              {k: job[k] for k in ("failed_segments", "truncated", "degraded_segments")})
+        check(f"{label} → 退化分段 ≤200 字，且最多切 {P.DEGRADE_MAX_PARTS} 片",
+              all(L <= P.DEGRADE_CHARS for L in llm.lengths[1:])
+              and len(llm.lengths) <= 1 + P.DEGRADE_MAX_PARTS, llm.lengths)
+        check(f"{label} → 退化调用用更短截止 timeout_ms={P.DEGRADE_TIMEOUT_MS}",
+              llm.timeouts[0] is None
+              and all(t == P.DEGRADE_TIMEOUT_MS for t in llm.timeouts[1:]
+                      if llm.timeouts[1:] is not None), llm.timeouts)
+        check(f"{label} → 退化调用把输出预算放宽到 max_tokens={P.DEGRADE_MAX_TOKENS}",
+              llm.max_tokens[0] is None
+              and all(m == P.DEGRADE_MAX_TOKENS for m in llm.max_tokens[1:]), llm.max_tokens)
+        check(f"{label} → 小段产出被采纳（候选数 ≥1）",
+              job["candidates"] >= 1 and any(s.get("degraded") for s in result["segments"]),
+              job["candidates"])
+        check(f"{label} → 退化留痕进 warnings（不进 reasons/垃圾率）",
+              any(w["warning"] == P.DEGRADE_WARNING for w in result["warnings"])
+              and "extract-failed" not in job["reasons"], result["warnings"])
+
+    # 退化也失败：仍记 failed，且段明细标 degradedFailed（不静默丢）
+    llm = StubDegradeLLM([cand()], mode="fail", threshold=-1)
+    result = P.run_pipeline(material, llm=llm, dry_run=True)
+    job = result["job"]
+    check("退化也失败 → 仍记 failed 并保留原失败原因",
+          job["failed_segments"] == 1 and job["status"] == "failed"
+          and result["errors"] and result["errors"][0]["reason"] == "timeout",
+          (job["failed_segments"], result["errors"]))
+
+    # 短段不退化（切不动，退化只会放大调用数）
+    short = "### [segment_002.md] 重放\n- 接口日志 452 条、status 全 1，必须先清理再重放\n"
+    llm = StubDegradeLLM([cand()], mode="truncate", threshold=0)
+    result = P.run_pipeline(short, llm=llm, dry_run=True)
+    check("短段（≤200 字）不做退化：调用次数仍为 1，截断照常记账",
+          len(llm.lengths) == 1 and result["job"]["truncated"] == 1
+          and result["job"]["degraded_segments"] == 0,
+          (llm.lengths, result["job"]["truncated"]))
+
+    # exp_llm 按次覆盖 timeout：退化用 120s，不污染实例默认值
+    captured = {}
+
+    def transport(url, payload, headers, timeout_s):
+        captured.setdefault("timeouts", []).append(timeout_s)
+        return ok_response(json.dumps([cand()], ensure_ascii=False))
+
+    client = exp_llm.LLMClient(transport=transport, sleep=lambda s: None,
+                               max_retries=0, timeout_ms=240_000, hard_timeout_ms=0)
+    client.chat([{"role": "user", "content": "x"}], timeout_ms=120_000)
+    client.chat([{"role": "user", "content": "x"}])
+    check("exp_llm 支持按次覆盖 timeout_ms，且默认值不被改",
+          captured["timeouts"] == [120.0, 240.0], captured["timeouts"])
+
+
 # ================================================================ ⑩ admin 设置存储
 def test_admin_settings():
     print("\n[11] admin_store：LLM settings（只回掩码 / 明文分离 / 校验）")
@@ -967,6 +1198,7 @@ def main():
     test_prompt_constants()
     test_review_garbage_classes()
     test_review_other_rules()
+    test_review_round1_regression()
     test_golden_regression()
     test_symbol_verification()
     test_dedup()
@@ -974,6 +1206,7 @@ def main():
     test_excerpt_and_mask()
     test_llm_client()
     test_pipeline_end_to_end()
+    test_degradation()
     test_admin_settings()
     test_fingerprint_and_normalize()
     print(f"\n结果：{PASS} 通过 / {FAIL} 失败（合计 {PASS + FAIL} 项断言）")

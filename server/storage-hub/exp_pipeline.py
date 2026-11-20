@@ -88,6 +88,20 @@ SEGMENT_MAX_CHARS = 400
 SEGMENT_HEADER_RE = re.compile(r"^###\s*\[(segment_\d+\.md(?:[~#]\d+)?)\]\s*(.*)$")
 PART_SEP = "~"
 
+# 二级退化（v2.1）：round1 失败率 17.9%（3 次 timeout + 4 次 bad-json）/ 截断 15.4%。
+# 失败或 finish_reason=length 时，把该段再切成 ≤200 字的小段**重试一次**（只一次），
+# 单次硬截止收紧到 120s——小段的产出量本来就小，再用 240s 等同一个坏请求只会拖长批次。
+DEGRADE_CHARS = 200
+DEGRADE_TIMEOUT_MS = 120_000
+DEGRADE_MAX_PARTS = 2  # 400 字的段最多切 2 片，避免退化把调用数放大 3 倍
+# 退化重试同时把输出预算放宽：round1 的 4 次 bad-json 里 3 次是 reasoning 把 8000 预算吃光
+# （复跑探针复核：m08_c00 的首次调用就是 finish_reason=length）。`docs/exp-eval.md` §8.2-5 的
+# "content 为空时把 max_tokens 提到 12000 再试一次" 就是这一条。
+DEGRADE_MAX_TOKENS = 12_000
+DEGRADE_WARNING = "degraded"
+# 与 exp_llm.WARN_TRUNCATED 同值：本模块不 import exp_llm（保持纯逻辑层可独立单测）
+WARN_TRUNCATED = "truncated"
+
 
 def split_segments(material, max_chars=SEGMENT_MAX_CHARS):
     """把素材切成"一次喂给模型的最小单元"（≤max_chars）。返回 `[{segmentId, topic, bullets, text}]`。
@@ -387,7 +401,16 @@ DIALOGUE_SUMMARY_RE = re.compile(
     r"(本次|这次|这一轮|随后我|接着我|然后我|接着又|最终我|已经部署|部署到\s*\w+|"
     r"改了\s*\d+\s*个文件|跑了\s*\d+\s*次(?:测试|构建)|共改了)"
 )
+# 一次性 case 的标记词。v2.1 起**不能再只看标记词**：round1 里「OSS 临时链接」里那个
+# "临时"就是这么被误判成一次性 case 的（7 条误拦里唯一一条非长度误拦）。
+# 判据改成"标记词命中 **且** 写不出可复用三要素"（见 `reusable_triad`）。
 ONE_OFF_RE = re.compile(r"(今天|当天|当下|临时|暂时|这一次|本次|刚才|刚刚)")
+# 弱标记：这些词也能当名词定语（临时链接/临时表/暂时字段），三要素齐全时一律不判一次性。
+ONE_OFF_WEAK_MARKERS = ("临时", "暂时", "本次")
+# 可复用三要素里的"触发条件"信号：when 能指到一个可观测的现象/时点，而不是空条件。
+TRIGGER_CUE_RE = re.compile(
+    r"(时|后|前|当|出现|发现|收到|看到|报错|报|查不到|为空|失败|超时|不一致|冲突|异常|现象|场景)"
+)
 GRANULARITY_RE = re.compile(r"\d+\s*(?:笔|元)|共\s*\d+\s*元|涉及\s*\d+\s*(?:笔|元)")
 VAGUE_REF_RE = re.compile(r"(这一块|那个地方|这块|那处|相关代码|某个地方)")
 # what 里必须能读出一个"下一步动作"。这里宁可宽松（多列常见动词）也不要严：
@@ -418,6 +441,100 @@ SKILL_COVERED_RE = re.compile(
     r"提交前先跑\s*CI|回写云效|按\s*yunxiao\s*流程)"
 )
 
+# ---------------------------------------------------------------- 堆补丁启发式（S1 事实性错误）
+# round1 唯一被放行的真垃圾是「超时就调大超时参数」——它的根因是 reasoning 吃光预算，
+# 调大超时只会让失败更晚发生。这类"把调参当结论"的写法一律按事实性错误拦；
+# 只要句子里写出了机制/根因（因为/根因/原因是/机制…），就说明它在讲机理，放过。
+PATCH_FIX_RE = re.compile(
+    r"(调大|调高|放大|加大|增加|提高|拉长|放宽)\s*(?:一下)?\s*"
+    r"(?:超时时间|超时|重试次数|重试|线程数|线程|内存|堆|参数|阈值|连接池|并发)"
+)
+ROOT_CAUSE_RE = re.compile(r"(根因|因为|原因是|机制|由于|本质|其实|真正原因|为什么|会失效|失效原因)")
+
+# ---------------------------------------------------------------- lens 自洽性（v2.1）
+# round1 Category(lens) Acc 只有 50%（3/6），错法集中在"位置不可发现"被判成 logic。
+# prompt 里已写死判定顺序（黑话 → 位置 → 约束），这里做一次兜底纠正：只纠正形态明显冲突的，
+# 纠正结果记 `lens-coerced:*` warning 并保留原值（`lensOriginal`），不拦候选。
+LOOKUP_PREFIX_RE = re.compile(r"^(?:查|查询|查找|去查|先查|核对|确认位置|定位|改用|换成|用|在)")
+LOCATION_CUE_RE = re.compile(
+    r"([a-z][a-z0-9]*_[a-z0-9_]+|[A-Z][A-Za-z0-9]{2,}|表|环境|目录|路径|topic|日志|jar|"
+    r"classpath|字段|参数|端口|env=|-d\b)"
+)
+JARGON_CUE_RE = re.compile(r"(「|」|『|』|黑话|代称|缩写|术语|俗称|内部叫)")
+CONSTRAINT_RE = re.compile(r"(必须|不能|不要|禁止|否则)")
+
+
+def _trim_text(text, limit):
+    """超长**只截断不拦**：优先在标点处断开（尽量保住语义），返回 `(text, changed)`。
+
+    v2.1 的口径：长度与"粒度混用"没有因果关系，round1 的 7 条误拦里 6 条死在
+    `what>90 / when>70` 硬阈值上（含黄金 #11/#13）。所以长度只用来做截断上限。
+    """
+    text = text if isinstance(text, str) else str(text or "")
+    if not text or limit <= 0 or len(text) <= limit:
+        return text, False
+    head = text[: max(0, limit - 1)]
+    cut = -1
+    for i in range(len(head) - 1, int(len(head) * 0.6), -1):
+        if head[i] in "；;。，,、：: ":
+            cut = i
+            break
+    if cut > 0:
+        return head[:cut] + "…", True
+    return head + "…", True
+
+
+def reusable_triad(candidate):
+    """判「可复用三要素」：触发条件 + 动作/锚点 + 机制。
+
+    一次性 case 的本质是"换场景就不成立"，不是"句子里出现了时间词"。
+    round1 真实误拦「收到 OSS 临时链接后立即下载到本地」三要素齐全（有触发、有动作、有机制），
+    只是把"临时"当定语用，按标记词一刀切必然误伤。
+    """
+    cand = candidate or {}
+    what = str(cand.get("what") or "")
+    when = str(cand.get("when_expr") or "")
+    why = str(cand.get("why") or "")
+    trigger = bool(TRIGGER_CUE_RE.search(when)) or bool(CONCRETE_ANCHOR_RE.search(when))
+    action = bool(ACTION_VERB_RE.search(what)) or bool(CONCRETE_ANCHOR_RE.search(what))
+    mechanism = len(why) >= 8 and similarity(what, why) <= SIM_WHAT_WHY
+    return {"trigger": trigger, "action": action, "mechanism": mechanism,
+            "complete": bool(trigger and action and mechanism)}
+
+
+def patch_fix_signal(candidate):
+    """堆补丁信号：`调大/加大/增加… + 超时/重试/线程/内存/参数` 且**没有**根因词。
+
+    返回命中的 `Match` 或 None。命中即判 `garbage-1-factual-error`。
+    """
+    cand = candidate or {}
+    blob = " ".join(str(cand.get(k) or "") for k in ("what", "why"))
+    m = PATCH_FIX_RE.search(blob)
+    if not m:
+        return None
+    if ROOT_CAUSE_RE.search(blob):
+        return None
+    return m
+
+
+def coerce_lens(candidate):
+    """lens 与 what 形态的自洽性纠正。返回 `(lens, detail)`；无需纠正时 detail 为空串。
+
+    只处理两类明显冲突（其余交给 prompt 的判定顺序）：
+    - what 是"去哪找"形态（查/核对/用 + 表/类/环境/命令等位置线索）却判 `logic` → `index`；
+    - 判 `jargon` 但既无黑话标记（「」/黑话/代称…）又在讲约束 → `logic`。
+    """
+    cand = candidate or {}
+    what = str(cand.get("what") or "")
+    lens = str(cand.get("lens") or "").strip().lower()
+    reason = str(cand.get("lens_reason") or cand.get("lensReason") or "").strip()
+    if lens == "logic" and LOOKUP_PREFIX_RE.match(what) and LOCATION_CUE_RE.search(what):
+        return "index", "lens-coerced:logic->index（what 是「去哪找」形态）"
+    if lens == "jargon" and not JARGON_CUE_RE.search(what + " " + reason) \
+            and CONSTRAINT_RE.search(what):
+        return "logic", "lens-coerced:jargon->logic（无黑话标记，实为约束）"
+    return lens, ""
+
 DEFAULT_CATEGORY = "business"
 # 模型偶尔漏填 category：按关键词兜底（只影响落库字段，不参与质量判定）
 _CATEGORY_HINTS = (
@@ -438,7 +555,11 @@ def infer_category(candidate):
 
 
 def default_policy(**overrides):
-    """Review 阈值集中一处：单测可只覆盖某一项，不必重写整套规则。"""
+    """Review 阈值集中一处：单测可只覆盖某一项，不必重写整套规则。
+
+    `what_max/when_max/why_max` 在 v2.1 起是**截断上限**，不是拦截条件
+    （`trim_overflow=False` 可关掉截断，用于对照 round1 的硬拦口径）。
+    """
     policy = {
         "what_max": WHAT_MAX,
         "when_max": WHEN_MAX,
@@ -447,17 +568,33 @@ def default_policy(**overrides):
         "sim_what_why": SIM_WHAT_WHY,
         "verify_symbols": True,
         "check_skill_covered": True,
+        # v2.1：超长只截断 + warnings=['trimmed']，不再判垃圾
+        "trim_overflow": True,
+        # v2.1：一次性 case 只有"标记词命中 且 可复用三要素不全"才成立
+        "one_off_requires_triad": True,
+        # v2.1：lens 与 what 形态自洽性纠正（只改判，不拦）
+        "coerce_lens": True,
+        # v2.1：堆补丁启发式（「调大超时」这类把调参当结论的写法按事实性错误拦）
+        "check_patch_fix": True,
+        # v2.1：二级退化（失败/截断 → 更小分段 + 更宽输出预算，重试一次）
+        "degrade_chars": DEGRADE_CHARS,
+        "degrade_timeout_ms": DEGRADE_TIMEOUT_MS,
+        "degrade_max_tokens": DEGRADE_MAX_TOKENS,
+        "degrade_max_parts": DEGRADE_MAX_PARTS,
     }
     policy.update(overrides)
     return policy
 
 
 def review_candidate(candidate, policy=None, symbol_lookup=None):
-    """定向过滤。返回 `{ok, reason, detail, garbage, skillCovered}`。
+    """定向过滤。返回 `{ok, reason, detail, garbage, skillCovered, warnings}`。
 
     顺序有讲究：**先判 process/skill-covered**（redundancy 不该被记成垃圾），
     再判字段合法性，最后按"信息量从高到低"逐条判垃圾——这样最终 reason 是
     最具体的那条，而不是被后面的弱规则抢先。
+
+    v2.1 起**超长不再拦**：越界只截断（候选原地改短）并记 `warnings=['trimmed']`。
+    `verdict['warnings']` 是软标记，不进 `reasons` 统计、不影响垃圾率。
     """
     policy = policy or default_policy()
     cand = candidate or {}
@@ -467,6 +604,7 @@ def review_candidate(candidate, policy=None, symbol_lookup=None):
     lens = str(cand.get("lens") or "").strip()
     category = str(cand.get("category") or "").strip()
     audit = cand.get("audit") or {}
+    warnings = []
 
     def block(reason, detail=""):
         return {
@@ -475,10 +613,12 @@ def review_candidate(candidate, policy=None, symbol_lookup=None):
             "detail": detail,
             "garbage": exp_prompt.is_garbage_reason(reason),
             "skillCovered": reason == PROCESS_REJECT_REASON,
+            "warnings": list(warnings),
         }
 
     def ok_(detail=""):
-        return {"ok": True, "reason": "", "detail": detail, "garbage": False, "skillCovered": False}
+        return {"ok": True, "reason": "", "detail": detail, "garbage": False,
+                "skillCovered": False, "warnings": list(warnings)}
 
     # ① process 拒收（不是垃圾，是 redundancy）
     if category == REJECTED_CATEGORY:
@@ -494,16 +634,39 @@ def review_candidate(candidate, policy=None, symbol_lookup=None):
     if category and category not in CATEGORIES:
         return block(REASON_INVALID, f"category 非法：{category!r}")
 
-    # ③ 超长（粒度混用嫌疑）
-    if len(what) > policy["what_max"] or len(when) > policy["when_max"] or len(why) > policy["why_max"]:
-        too_long = []
-        if len(what) > policy["what_max"]:
-            too_long.append(f"what={len(what)}>{policy['what_max']}")
-        if len(when) > policy["when_max"]:
-            too_long.append(f"when={len(when)}>{policy['when_max']}")
-        if len(why) > policy["why_max"]:
-            too_long.append(f"why={len(why)}>{policy['why_max']}")
-        return block(REASON_GARBAGE["mixed-granularity"], "超长：" + " ".join(too_long))
+    # ②' lens 自洽性纠正（只改判 + 记 warning，不拦）
+    if policy.get("coerce_lens", True):
+        fixed, lens_detail = coerce_lens(cand)
+        if fixed != lens:
+            cand["lensOriginal"] = lens
+            cand["lens"] = fixed
+            lens = fixed
+            warnings.append(lens_detail)
+
+    # ③ 超长：**只截断不判垃圾**
+    #    round1 的 7 条误拦里 6 条死在长度硬阈值上（含黄金 #11/#13）；粒度混用另有
+    #    内容判据（⑩ GRANULARITY_RE：what 里出现金额/笔数），长度与它没有因果关系。
+    if policy.get("trim_overflow", True):
+        trimmed = {}
+        for field, key in (("what", "what_max"), ("when_expr", "when_max"), ("why", "why_max")):
+            value = str(cand.get(field) or "").strip()
+            short, changed = _trim_text(value, policy[key])
+            if not changed:
+                continue
+            cand[field] = short
+            trimmed[field] = [len(value), len(short)]
+            if field == "what":
+                what = short
+            elif field == "when_expr":
+                when = short
+            else:
+                why = short
+        if trimmed:
+            cand["trimWarnings"] = trimmed
+            if isinstance(cand.get("audit"), dict):
+                cand["audit"]["trimmed"] = True
+            warnings.append("trimmed:" + ",".join(
+                f"{k}:{v[0]}->{v[1]}" for k, v in sorted(trimmed.items())))
 
     # ④ what 与 why 重复 = 没提炼
     sim = similarity(what, why)
@@ -531,26 +694,42 @@ def review_candidate(candidate, policy=None, symbol_lookup=None):
     if hit:
         return block(REASON_GARBAGE["dialogue-summary"], f"只复述过程：{hit.group(0)}")
 
-    # ⑨ 一次性 case
+    # ⑨ 一次性 case：标记词命中 **且** 可复用三要素不齐才拦
+    #    v2.1：「OSS 临时链接」的"临时"是三要素齐全的经验里的定语，不能当 case 标记
     hit = ONE_OFF_RE.search(when) or ONE_OFF_RE.search(what)
     if hit:
-        return block(REASON_GARBAGE["one-off"], f"一次性标记：{hit.group(0)}")
+        triad = reusable_triad(cand)
+        if policy.get("one_off_requires_triad", True) \
+                and hit.group(0) in ONE_OFF_WEAK_MARKERS and triad["complete"]:
+            hit = None
+        if hit:
+            missing = "、".join(k for k in ("trigger", "action", "mechanism") if not triad[k])
+            return block(REASON_GARBAGE["one-off"],
+                         f"一次性标记：{hit.group(0)}（可复用三要素缺 {missing or '无'}）")
 
-    # ⑩ 粒度混用（业务明细写进 what，应降级到 evidence）
+    # ⑩ 粒度混用（业务明细写进 what，应降级到 evidence）——**按内容判，不按长度判**
     hit = GRANULARITY_RE.search(what)
     if hit:
         return block(REASON_GARBAGE["mixed-granularity"], f"case 明细进 what：{hit.group(0)}")
 
-    # ⑪ 不可执行：既无动作动词，也无任何具体锚点（表名/符号/路径/命令）
+    # ⑪ 堆补丁式事实性错误（S1）：把"调大参数"当结论，且写不出根因
+    #    round1 唯一被放行的真垃圾「超时就调大超时参数」就是这一形态
+    if policy.get("check_patch_fix", True):
+        hit = patch_fix_signal(cand)
+        if hit:
+            return block(REASON_GARBAGE["factual-error"],
+                         f"堆补丁当结论：{hit.group(0)}（无根因/机制）")
+
+    # ⑫ 不可执行：既无动作动词，也无任何具体锚点（表名/符号/路径/命令）
     if not ACTION_VERB_RE.search(what) and not CONCRETE_ANCHOR_RE.search(what):
         return block(REASON_GARBAGE["not-actionable"], "what 无动作动词也无具体锚点")
 
-    # ⑫ 证据不足（硬门：缺 evidence_quote 一律拦）
+    # ⑬ 证据不足（硬门：缺 evidence_quote 一律拦）
     quote = str(audit.get("evidence_quote") or "").strip()
     if not quote:
         return block(REASON_GARBAGE["no-evidence"], "audit.evidence_quote 为空")
 
-    # ⑬ 源码探索事实校验：不存在只标 unverified，只有"断言存在"才拦
+    # ⑭ 源码探索事实校验：不存在只标 unverified，只有"断言存在"才拦
     if policy.get("verify_symbols") and symbol_lookup is not None:
         verdict = verify_symbols(cand, symbol_lookup)
         if verdict["claimedMissing"]:
@@ -747,6 +926,8 @@ def normalize_candidate(raw, *, policy=None, segment_id=None, source="llm", work
         "when_expr": str(cand.get("when_expr") or cand.get("when") or "").strip(),
         "why": str(cand.get("why") or "").strip(),
         "lens": str(cand.get("lens") or "").strip().lower(),
+        # v2.1：模型自述的镜头理由（Review 用它做 lens 自洽性校验；不参与落库判据）
+        "lens_reason": str(cand.get("lens_reason") or cand.get("lensReason") or "").strip(),
         "category": category,
         "workflow": workflow or cand.get("workflow"),
         "repo": repo or cand.get("repo"),
@@ -799,15 +980,100 @@ def run_pipeline(material, llm=None, *, policy=None, search_memories=None, symbo
     truncated_segments = 0
 
     segments = split_segments(material, max_chars=max_chars)
+    degraded_segments = 0
+
+    def _extract(text, timeout_ms=None, max_tokens=None):
+        """调一次抽取；`timeout_ms`/`max_tokens` 只在退化重试时传（替身会忽略 kwargs）。"""
+        kwargs = {}
+        if timeout_ms is not None:
+            kwargs["timeout_ms"] = timeout_ms
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if not kwargs:
+            return llm.extract_json_array(text)
+        try:
+            return llm.extract_json_array(text, **kwargs)
+        except TypeError:  # 替身模型 / 老签名不支持这些 kwargs
+            return llm.extract_json_array(text)
+
+    def _degrade(seg):
+        """二级退化：失败或截断 → 切 ≤degrade_chars 的小段**重试一次**。
+
+        返回 `{entries, usage, parts, okParts, failed, truncated}`。
+        小段的产出与大段取**并集**：截断时大段已抽出的前半部分不能丢，
+        失败时大段本来就是空的。单次硬截止收紧到 `degrade_timeout_ms`，
+        输出预算放宽到 `degrade_max_tokens`（reasoning 吃光 8000 的那类 bad-json 靠它救回）。
+        """
+        parts = split_segments(seg["text"], max_chars=policy["degrade_chars"])
+        parts = parts[: max(1, int(policy["degrade_max_parts"]))]
+        out = {"entries": [], "usage": {"tokensIn": 0, "tokensOut": 0, "tokensTotal": 0,
+                                        "reasoningTokens": 0},
+               "parts": len(parts), "okParts": 0, "failed": 0, "truncated": 0}
+        for part in parts:
+            try:
+                resp = _extract(part["text"], timeout_ms=policy["degrade_timeout_ms"],
+                                max_tokens=policy.get("degrade_max_tokens"))
+            except Exception:  # noqa: BLE001 - 退化也失败：交由调用方保留首次失败的计数
+                out["failed"] += 1
+                continue
+            out["okParts"] += 1
+            out["entries"].extend((resp or {}).get("entries") or [])
+            usage = (resp or {}).get("usage") or {}
+            for key in out["usage"]:
+                out["usage"][key] += int(usage.get(key) or 0)
+            if (resp or {}).get("warning") == WARN_TRUNCATED:
+                out["truncated"] += 1
+        return out
+
     for seg in segments:
         seg_entry = {"segmentId": seg["segmentId"], "topic": seg.get("topic", ""),
                      "candidates": 0, "blocked": 0, "kept": 0}
+        response, first_error = None, None
         try:
-            response = llm.extract_json_array(seg["text"])
+            response = _extract(seg["text"])
         except Exception as exc:  # noqa: BLE001 - 单段失败不影响其它段
+            first_error = exc
+
+        primary_truncated = (response or {}).get("warning") == WARN_TRUNCATED
+        # 二级退化：只对"失败"或"截断"的段做，且该段本身要够长（否则切不动）
+        if (first_error is not None or primary_truncated) \
+                and policy.get("degrade_chars") and len(seg["text"]) > int(policy["degrade_chars"]):
+            primary_reason = getattr(first_error, "reason", "") if first_error else ""
+            degraded = _degrade(seg)
+            degraded_segments += 1
+            seg_entry["degraded"] = True
+            seg_entry["degradedParts"] = degraded["parts"]
+            if degraded["okParts"]:
+                merged = [dict(e) for e in ((response or {}).get("entries") or [])]
+                merged.extend(degraded["entries"])
+                # token 账要算全：首次调用的 usage 不能因为退化成功就被丢掉
+                primary_usage = (response or {}).get("usage") or {}
+                usage_sum = {k: int(primary_usage.get(k) or 0) + int(degraded["usage"].get(k) or 0)
+                             for k in degraded["usage"]}
+                response = {
+                    "entries": merged,
+                    "usage": usage_sum,
+                    "ms": int((response or {}).get("ms") or 0),
+                    # 退化成功 = 不再算 failed；只有小段也全被截断时才仍记 truncated
+                    "warning": WARN_TRUNCATED if degraded["truncated"] else None,
+                }
+                first_error = None
+                msg = f"二级退化成功：{degraded['parts']} 小段"
+                if degraded["truncated"]:
+                    msg += "（仍截断）"
+                if primary_reason:
+                    msg += f"；原失败原因 {primary_reason}"
+                warnings.append({"segmentId": seg["segmentId"], "warning": DEGRADE_WARNING,
+                                 "message": msg})
+            else:
+                seg_entry["degradedFailed"] = True
+                if first_error is None:
+                    first_error = RuntimeError("degraded retry failed")
+        if first_error is not None:
             failed_segments += 1
             errors.append({"segmentId": seg["segmentId"], "stage": "extract",
-                           "reason": getattr(exc, "reason", "error"), "message": str(exc)[:300]})
+                           "reason": getattr(first_error, "reason", "error"),
+                           "message": str(first_error)[:300]})
             reasons["extract-failed"] = reasons.get("extract-failed", 0) + 1
             segments_out.append(seg_entry)
             continue
@@ -894,6 +1160,8 @@ def run_pipeline(material, llm=None, *, policy=None, search_memories=None, symbo
         "segments": len(segments),
         "failed_segments": failed_segments,
         "truncated": truncated_segments,
+        # v2.1 二级退化：有多少段走了"更小分段重试一次"（成功的不再计入 failed/truncated）
+        "degraded_segments": degraded_segments,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "ms": total_ms,

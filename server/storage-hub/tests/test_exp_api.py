@@ -46,6 +46,7 @@ for _k in ("API_KEY", "ADMIN_PASSWORD"):
     os.environ.pop(_k, None)  # 鉴权全空 = 开放（API 段自测口径；登录冒烟段临时开密码）
 
 import server  # noqa: E402
+import exp_prompt  # noqa: E402
 import exp_llm  # noqa: E402
 import index_store  # noqa: E402
 
@@ -151,7 +152,7 @@ def test_settings():
     check("响应里没有明文 key 字段", "apiKey" not in body and "api_key" not in body
           and "apiKeyPlain" not in body, list(body))
     check("prompt 版本来自 exp_prompt.PROMPT_VERSION",
-          body.get("promptVersion") == "exp-v2.0", body.get("promptVersion"))
+          body.get("promptVersion") == exp_prompt.PROMPT_VERSION, body.get("promptVersion"))
 
     SECRET = "sk-local-abcdef123456"
     code, body, _h = call("PUT", "/v1/admin/settings/llm",
@@ -263,7 +264,7 @@ def test_extract():
     check("响应带 tokens / model / promptVersion / ms",
           (body.get("tokens") or {}).get("in") == 11
           and body.get("model") == "stub-extract-model"
-          and body.get("promptVersion") == "exp-v2.0"
+          and body.get("promptVersion") == exp_prompt.PROMPT_VERSION
           and isinstance(body.get("ms"), int), body)
     code, jobs, _h = call("GET", "/v1/exp/jobs?limit=20")
     mine = [x for x in jobs.get("items") or []

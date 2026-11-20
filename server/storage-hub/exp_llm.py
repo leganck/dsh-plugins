@@ -208,7 +208,8 @@ class LLMClient:
         return self.stats["tokensIn"] + self.stats["tokensOut"]
 
     # ------------------------------------------------------------ 主入口
-    def chat(self, messages, *, max_tokens=None, temperature=None, model=None, response_format=None):
+    def chat(self, messages, *, max_tokens=None, temperature=None, model=None, response_format=None,
+             timeout_ms=None):
         """发一次对话请求（含重试）。返回 dict，失败抛 LLMError。
 
         返回字段：
@@ -219,6 +220,10 @@ class LLMClient:
           attempts     实际请求次数
           ms           本次总耗时（含重试等待）
           model        实际使用的模型名
+
+        `timeout_ms` 是**本次调用的**墙钟/socket 超时（覆盖实例默认值）：
+        管道做二级退化时用更短的截止重试更小的分段——小段产出量本来就小，
+        再用 240s 等同一个坏请求只会拖长整批（见 `exp_pipeline.run_pipeline`）。
         """
         payload = {
             "model": model or self.model,
@@ -245,7 +250,7 @@ class LLMClient:
                     self._sleep(delay)
                 self.stats["attempts"] += 1
                 try:
-                    parsed = self._transport_with_deadline(payload)
+                    parsed = self._transport_with_deadline(payload, timeout_ms=timeout_ms)
                 except LLMError as exc:
                     last_error = exc
                     if exc.reason not in RETRYABLE_REASONS:
@@ -281,10 +286,19 @@ class LLMClient:
             headers["Authorization"] = "Bearer " + self.api_key
         return headers
 
-    def _transport_with_deadline(self, payload):
-        """带墙钟硬截止地调一次 transport；超截止抛 `LLMError(reason="timeout")`。"""
-        args = (self.base_url + "/chat/completions", payload, self._headers(), self.timeout_s)
-        if self.hard_timeout_s <= 0:
+    def _transport_with_deadline(self, payload, timeout_ms=None):
+        """带墙钟硬截止地调一次 transport；超截止抛 `LLMError(reason="timeout")`。
+
+        `timeout_ms` 传入时覆盖本次调用的 socket 超时与硬截止（二级退化用更短截止）。
+        """
+        if timeout_ms is not None:
+            timeout_s = max(0.001, int(timeout_ms) / 1000.0)
+            hard_timeout_s = max(0.0, int(timeout_ms) / 1000.0)
+            hard_timeout_ms = int(timeout_ms)
+        else:
+            timeout_s, hard_timeout_s, hard_timeout_ms = self.timeout_s, self.hard_timeout_s, self.hard_timeout_ms
+        args = (self.base_url + "/chat/completions", payload, self._headers(), timeout_s)
+        if hard_timeout_s <= 0:
             return self._transport(*args)
         box = {}
 
@@ -296,11 +310,11 @@ class LLMClient:
 
         worker = threading.Thread(target=run, name="llm-request", daemon=True)
         worker.start()
-        worker.join(self.hard_timeout_s)
+        worker.join(hard_timeout_s)
         if worker.is_alive():
             self.stats["hardTimeouts"] = self.stats.get("hardTimeouts", 0) + 1
             raise LLMError(
-                f"hard timeout after {self.hard_timeout_ms}ms（socket 仍活着，已放弃本次请求）",
+                f"hard timeout after {hard_timeout_ms}ms（socket 仍活着，已放弃本次请求）",
                 reason="timeout",
             )
         if "error" in box:
@@ -351,14 +365,17 @@ class LLMClient:
         }
 
     # ------------------------------------------------------------ 便捷方法
-    def extract_json_array(self, material, *, max_tokens=None, system_prompt=None):
-        """把素材喂给 prompt 并解析出候选 dict 列表（解析失败抛 LLMError reason=bad-json）。"""
+    def extract_json_array(self, material, *, max_tokens=None, system_prompt=None, timeout_ms=None):
+        """把素材喂给 prompt 并解析出候选 dict 列表（解析失败抛 LLMError reason=bad-json）。
+
+        `timeout_ms` 透传给 `chat()`：二级退化用更短截止重试更小分段时用得上。
+        """
         import exp_prompt  # 延迟 import：exp_llm 可独立用于其它 prompt
 
         messages = [{"role": "user", "content": exp_prompt.render_prompt(material)}]
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
-        result = self.chat(messages, max_tokens=max_tokens)
+        result = self.chat(messages, max_tokens=max_tokens, timeout_ms=timeout_ms)
         entries, parse_error = parse_json_array(result["content"])
         if parse_error and not entries:
             raise LLMError(f"JSON 解析失败：{parse_error}；原文前 200 字：{result['content'][:200]}",
