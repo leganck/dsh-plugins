@@ -17,3 +17,14 @@ regexes = [
   '''(?i)change[-_]me[-\w]*''',
   '''(?i)(your|example|placeholder|dummy|fake|test|mock)[-_]?(token|key|secret|password|pat)[-_]?[\w-]*''',
 ]
+
+[[allowlists]]
+description = "模型清单的 sha256 完整性校验值（非凭据；generic-api-key 对 64 位 hex 的固定误报）"
+paths = [
+  '''model_downloader\.py$''',
+  '''fetch-models\.mjs$''',
+]
+regexTarget = "line"
+regexes = [
+  '''sha256["']?\s*[:=]\s*["'][0-9a-f]{64}''',
+]
