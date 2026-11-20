@@ -142,3 +142,39 @@ pnpm 缓存旧包未重拉），所以 expand/code_graph/闸门/降权全都没�
 | 远端 + 新 API_KEY | `hybrid-remote` 通道；embed 228~255 ms / kNN 2~7 ms |
 | 覆盖率闸门 | 生效（且修了「字段缺失当 0」缺陷） |
 | 图规模（版本强制重扫后） | dsh-plugins **1546 符号 / 3363 边**（原 1384/1960）；erp-pos **25406 符号 / 75825 边，重建 3.7 s** |
+
+## 新批次：admin v3 + 治理可见性 + 指纹去重（2026-11-20 13:40）
+
+| Thread | 队员 | 状态 | 目标 | 写范围 |
+|---|---|---|---|---|
+| T-261120-gov | gov | **closed（Lead 抽验通过）** | pipeline_runs/conflicts配对(against+trigger_words)/timeline/stale_days/冲突召回(conflictWarning) | code-index-service + exp-pipeline(client/pipeline/stage_c) |
+| T-261120-dedup | dedup | **closed（Lead 抽验通过）** | vectors CAS化(v2)/lineages merge(事务+merged_into观察期)/duplicates检测/cleanup脚本 | code-index-service（与gov有同文件分工约定：MemoryStore归gov，IndexStore向量区归dedup） |
+| T-261120-ui2 | ui2 | **pending（blocked by 9+10）** | 驾驶舱概览/Review Inbox/治理流水/融合裁决/分组视图/receipt toast | server.py ADMIN_HTML |
+
+设计依据：docs/research-mature-solutions-and-mnemon.md（LangSmith run观测/knowns Review Inbox/Memanto冲突双方保留/CAS/alias观察期/Mnemon receipt文化）+ docs/diagnosis-admin-ui-governance-duplicates.md。
+
+## 112 本地构建预览（预研完成，方案见 docs/preview-build-on-112.md）
+- 112 具备直建能力：docker 29.5.2 + buildx 0.34.1 + ghcr 通 + latest-cpu(=v0.17.0)已缓存，磁盘余14G
+- 流程：ui2 回报抽验后 → git archive 工作区 rsync 到 112 /srv/dsh-preview → docker build Dockerfile.app（FROM 缓存 base）→ preview 容器绑 18080（独立数据卷+独立KEY）→ seed 灌 223 条 → 浏览器看 v3
+- 正式发版仍走 GitHub CI（分层缓存+smoke 门禁不变）；112 直建只做预览
+- 模型层：首建时从生产容器 docker cp /models 一次性拷出，之后零下载
+
+gov 抽验记录（Lead 亲自跑）：test_memories **90/90**（59 既有+31 新增）、test_pipeline 70/70、
+selftest 274/274、test_bodies 31/31；锚点确认：pipeline_runs 路由（server.py L3931-3951）、
+memories_against_id/trigger_words 列+索引（index_store.py L106-113）、memory_events 表+合成 timeline
+（L115/L1692 synthesized）、link_conflict 双写；search 语义变更（conflicting 召回带 conflictWarning）
+已进 docs/memories.md 且测试钉住。改动范围干净（8 文件全在授权内）。
+
+dedup 抽验记录（Lead 亲自跑）：test_lineages **43/43**、selftest 274/274、test_bodies 31/31、
+test_memories 90/90（gov 新基线）；锚点：vectors_v2 CAS 表（(tag,hash) 复合主键，取舍见 docs/lineages.md §1.1）、
+旧表降级为血统成员表保住 _missing/adopt 兼容读、lineages/{duplicates,merge,hard-clean} 三端点（server.py L4463/L5199）、
+cleanup-lineages.py 双模式（--db/--url）+ --dry-run/--apply/--hard/--vacuum。
+用户已授权「历史数据可清理」：merge 即生效、观察期仅作安全网；bug-analysis 组 same_chunk_fp=false 清洗前人工确认。
+
+dedup 调整版抽验（Lead 亲自跑，2026-11-20 14:40）：按「历史数据可清理」授权重交——
+test_lineages **46/46**、test_memories 90/90、ast ok；启动 gate 只认 v2（旧库 RuntimeError 提示跑脚本）、
+merge 当场物理删重（merged_into 仅墓碑/重定向）、--migrate-cas 一次性迁移幂等。
+**部署执行序（已冻结，写进 docs/lineages.md §5）**：
+  停写 → cleanup-lineages.py --db $DB --migrate-cas --vacuum → 起服务 → --dry-run 核对 → --apply
+  （bug-analysis 组 same_chunk_fp=false 先人工确认，可 --only 清其余三组）
+预期净删：chunks≈461 行、vectors 成员≈2049 行、erp-pos 组 blobs 归并≈9467 正文行。
