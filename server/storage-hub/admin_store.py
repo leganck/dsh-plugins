@@ -110,6 +110,81 @@ PBKDF2_ITER = 200_000
 SESSION_SECRET_KEY = "session_secret"
 ADMIN_PASSWORD_KEY = "admin_password"
 
+# ---------------------------------------------------------------- 经验抽取 LLM 设置（键名即 settings.key）
+# 与 prompt 版本号一起放在代码里：prompt 是"质量口径"，这些是"运行参数"，
+# 两者都不该让页面在线改坏（页面可以改 max_tokens 这类无害参数，改不了 prompt）。
+try:  # 单独 import 失败不该把整个 admin_store 拖死（例如只部署了管理端）
+    from exp_prompt import PROMPT_VERSION
+except Exception:  # noqa: BLE001
+    PROMPT_VERSION = "exp-v2.0"
+
+LLM_API_KEY_KEY = "llm.api_key"
+LLM_SETTING_DEFAULTS = {
+    "llm.enabled": False,  # 默认关闭：抽取是写库动作，必须显式开启
+    "llm.base_url": "http://127.0.0.1:3425/v1",
+    "llm.api_key": "",
+    "llm.model": "auto/deepseek-v4.1-flash",
+    # 与 exp_llm.DEFAULT_MAX_TOKENS / DEFAULT_TIMEOUT_MS 保持一致：本机实测单条经验就要
+    # 28.5s / 1878 output tokens，2000/60s 会把正常素材直接判成超时或截断。
+    "llm.max_tokens": 8000,
+    "llm.timeout_ms": 240_000,
+    "llm.daily_token_cap": 200_000,
+    "llm.mode": "server",
+    "llm.evidence_mode": "excerpt",
+}
+# 枚举型设置：写进来非法值要立刻报错，而不是落库等到抽取时才发现
+LLM_SETTING_CHOICES = {
+    "llm.mode": ("server", "client"),
+    "llm.evidence_mode": ("excerpt", "digest"),
+}
+# 数值型设置：settings.value 是 text，读写两头都要显式转型
+LLM_INT_SETTINGS = ("llm.max_tokens", "llm.timeout_ms", "llm.daily_token_cap")
+# 对外字段名 → settings.key（接口用 camelCase，库用点号分层）
+LLM_SETTING_ALIASES = {
+    "enabled": "llm.enabled",
+    "base_url": "llm.base_url",
+    "baseUrl": "llm.base_url",
+    "api_key": "llm.api_key",
+    "apiKey": "llm.api_key",
+    "model": "llm.model",
+    "max_tokens": "llm.max_tokens",
+    "maxTokens": "llm.max_tokens",
+    "timeout_ms": "llm.timeout_ms",
+    "timeoutMs": "llm.timeout_ms",
+    "daily_token_cap": "llm.daily_token_cap",
+    "dailyTokenCap": "llm.daily_token_cap",
+    "mode": "llm.mode",
+    "evidence_mode": "llm.evidence_mode",
+    "evidenceMode": "llm.evidence_mode",
+}
+
+
+def _setting_key(name):
+    """把 camelCase/snake_case 的对外字段名映射回 settings.key。"""
+    key = str(name or "").strip()
+    if key in LLM_SETTING_DEFAULTS:
+        return key
+    return LLM_SETTING_ALIASES.get(key, f"llm.{key}")
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
+def _mask_api_key(secret):
+    """只回掩码：`sk-loc…3f9a`。未配置回空串，短到无法掩码就整串打码。"""
+    value = str(secret or "")
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:6]}…{value[-4:]}"
+
+
 SCHEMA = """
 create table if not exists settings(
   key text primary key,
@@ -1140,6 +1215,95 @@ class AdminStore:
                 (str(key), "" if value is None else str(value)),
             )
             self.db.commit()
+
+    # ---------------------------------------------------------------- 经验抽取 LLM 设置
+    # 只用已有 `settings` 表（key/value），**不新增表、不动 api_keys 逻辑**。
+    # 分层：对外 `get_llm_settings()` 永远只回掩码（页面/接口不该拿到明文）；
+    # 明文只有 `get_llm_secret()` 给服务端内部取，且不进任何返回值日志。
+    def get_llm_settings(self):
+        """读 LLM 配置（api_key 只回掩码）。缺省值来自 `LLM_SETTING_DEFAULTS`。"""
+        raw = {key: self.get_setting(key) for key in LLM_SETTING_DEFAULTS if key != LLM_API_KEY_KEY}
+        enabled_raw = raw.get("llm.enabled")
+        enabled = LLM_SETTING_DEFAULTS["llm.enabled"] if enabled_raw in (None, "") else _as_bool(enabled_raw)
+
+        def text(name):
+            value = raw.get(name)
+            return LLM_SETTING_DEFAULTS[name] if value in (None, "") else value
+
+        def number(name):
+            value = raw.get(name)
+            if value in (None, ""):
+                return LLM_SETTING_DEFAULTS[name]
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return LLM_SETTING_DEFAULTS[name]
+
+        secret = self.get_llm_secret()
+        return {
+            "enabled": enabled,
+            "baseUrl": text("llm.base_url"),
+            "model": text("llm.model"),
+            "maxTokens": number("llm.max_tokens"),
+            "timeoutMs": number("llm.timeout_ms"),
+            "dailyTokenCap": number("llm.daily_token_cap"),
+            "mode": text("llm.mode"),
+            "evidenceMode": text("llm.evidence_mode"),
+            # 掩码而不是明文：管理页面只需要"配没配 + 认得出是哪把"
+            "apiKeyMasked": _mask_api_key(secret),
+            "apiKeyConfigured": bool(secret),
+            "promptVersion": PROMPT_VERSION,
+        }
+
+    def set_llm_settings(self, patch, *, clear_api_key=False):
+        """写 LLM 配置。`api_key` 传空串/None 表示"保持原值"（避免页面回显掩码时被写坏）。
+
+        返回写入后的 `get_llm_settings()`；未知字段或非法枚举抛 `ValueError`
+        （宁可报错也不要静默丢配置——静默丢配置在下一次抽取时才爆，排查成本高得多）。
+        """
+        writes = {}
+        for raw_key, value in dict(patch or {}).items():
+            key = _setting_key(raw_key)
+            if key not in LLM_SETTING_DEFAULTS:
+                raise ValueError(f"unknown llm setting: {raw_key}")
+            if key == LLM_API_KEY_KEY:
+                if value in (None, ""):
+                    continue  # 空值 = 保持原值（页面回显掩码后原样提交不会抹掉密钥）
+                writes[key] = str(value).strip()
+                continue
+            if key == "llm.enabled":
+                writes[key] = "1" if _as_bool(value) else "0"
+                continue
+            if key in LLM_SETTING_CHOICES and str(value) not in LLM_SETTING_CHOICES[key]:
+                raise ValueError(
+                    f"invalid value for {raw_key}: {value!r}（可选 {', '.join(LLM_SETTING_CHOICES[key])}）"
+                )
+            if key in LLM_INT_SETTINGS:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"invalid number for {raw_key}: {value!r}") from None
+                if number < 0:
+                    raise ValueError(f"{raw_key} 不能为负：{number}")
+                writes[key] = str(number)
+                continue
+            writes[key] = str(value)
+        with self._lock:
+            for key, value in writes.items():
+                self.set_setting(key, value)
+            if clear_api_key:
+                self.set_setting(LLM_API_KEY_KEY, "")
+        return self.get_llm_settings()
+
+    def get_llm_secret(self):
+        """明文 api_key —— **仅供服务端内部**构造 LLM 客户端。不要放进任何 HTTP 响应。"""
+        return str(self.get_setting(LLM_API_KEY_KEY) or "")
+
+    def has_llm_secret(self):
+        return bool(self.get_llm_secret())
+
+    def mask_llm_secret(self):
+        return _mask_api_key(self.get_llm_secret())
 
     # ---------------------------------------------------------------- 管理员密码
     def has_admin_password(self):
