@@ -131,7 +131,9 @@ create index if not exists memories_repo_status on memories(repo, status);
 create index if not exists memories_lens_status on memories(lens, status);
 create index if not exists memories_status on memories(status);
 create index if not exists memories_created on memories(created_at desc);
-create index if not exists memories_against on memories(against_id);
+-- memories_against(against_id) 索引不在 SCHEMA 里建：老库 memories 表还没有 against_id 列
+-- （列由 __init__ 的 ALTER 块补齐），SCHEMA 的 executescript 先于 ALTER 执行会直接
+-- "no such column"（生产库副本预演实测踩到）。索引在补列之后建（__init__ 内）。
 -- 条目事件时间线：upsert/hit/adopt/resolve/软删/冲突配对各写一行（治理可见性，audit 用）
 create table if not exists memory_events (
   id integer primary key autoincrement,
@@ -583,6 +585,8 @@ class IndexStore:
         ):
             if name not in mem_cols:
                 self.db.execute(f"alter table memories add column {name} {ddl}")
+        # 索引必须在补列之后建（老库列刚 ALTER 进来）；SCHEMA 里没有它（见 SCHEMA 注释）
+        self.db.execute("create index if not exists memories_against on memories(against_id)")
         # lineages 合并软标记列（旧库补齐；merge 端点写，--hard 观察期后物理清理）。
         lin_cols = {r["name"] for r in self.db.execute("pragma table_info(lineages)").fetchall()}
         for name, ddl in (
