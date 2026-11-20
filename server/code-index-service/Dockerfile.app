@@ -33,6 +33,10 @@ COPY --chown=10001:10001 \
   runtime_preflight.py scope_format.json favicon.svg \
   /app/
 COPY --chown=10001:10001 tests/selftest.py tests/bench_knn_modes.py /app/tests/
+# scripts/ 必须进镜像：cleanup-lineages.py 是部署序的一环（CAS 迁移 + 血统清洗都在
+# 容器里跑 `docker exec dsh-embed python /app/scripts/cleanup-lineages.py`），
+# 预演时漏拷导致只能挂宿主目录跑（2026-11-20 实测踩到）。
+COPY --chown=10001:10001 scripts/ /app/scripts/
 COPY --chown=10001:10001 docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod 0755 /app/docker-entrypoint.sh
 
