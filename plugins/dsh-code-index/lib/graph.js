@@ -57,7 +57,13 @@ export function scanChunk(body) {
 
   // ---- 声明（宽松版；多语言通用。接口/抽象方法以 `;` 结尾也算声明）----
   // 方法声明：修饰符 + 可选泛型/返回类型 + 名字 + (  —— 结尾是 { 或 ; 都行
-  const METHOD_RE = /(?:^|\n)\s*(?:(?:public|private|protected|internal|static|final|abstract|override|suspend|default|native|synchronized)\s+)*[\w<>,.[\]\s]*?\b([A-Za-z_$][\w$]*)\s*\([^;{]*\)\s*(?:\{|;)/g
+  //
+  // 参数段用 `\([^;)]*\)`（允许 `{`/`}`，禁止 `;` 与嵌套 `)`）：
+  // JS/TS 里**解构参数**极常见（`function buildIndex({ store, repoRoot })`），
+  // 早先的 `[^;{]*` 会把 `{` 排除掉 → 这类声明整条漏抓（实测：本插件自己的
+  // buildIndex/rebuildGraph 都抓不到，code_graph 查不到入口）。允许 `{` 后仍
+  // 保守：`;` 与 `)` 不进参数段，所以不会跨语句，也不会跨嵌套调用。
+  const METHOD_RE = /(?:^|\n)\s*(?:(?:public|private|protected|internal|static|final|abstract|override|suspend|default|native|synchronized)\s+)*[\w<>,.[\]\s]*?\b([A-Za-z_$][\w$]*)\s*\([^;)]*\)\s*(?:\{|;)/g
   let m
   while ((m = METHOD_RE.exec(text))) {
     const name = m[1]
@@ -104,6 +110,14 @@ export function scanChunk(body) {
  * @param {{logger?: (m:string)=>void}} [p]
  * @returns {{symbols:number, edges:number, files:number, errors:number}}
  */
+/**
+ * 图构建算法版本。**改了 scanChunk 的提取规则就 +1**：
+ * 建库时的"没变更就跳过重建"会沿用旧结果（0 ms），旧规则抽出来的符号/边
+ * 会一直留在库里，直到用户下次改文件才刷新。有了这个版本号，升级插件后
+ * 第一次建库会因版本不匹配强制重扫一次。
+ */
+export const GRAPH_VERSION = 2
+
 export function rebuildGraph(store, { logger = () => {} } = {}) {
   const t0 = Date.now()
   store.clearGraph()
@@ -148,6 +162,7 @@ export function rebuildGraph(store, { logger = () => {} } = {}) {
   const symbols = store.insertSymbols(perFile)
   const edges = store.insertEdges({ perFile, declIndex, stmtIndex })
   store.setMeta('graph_built_at', String(Date.now()))
+  store.setMeta('graph_version', String(GRAPH_VERSION))
   logger(`图重建完成：${symbols} 符号 / ${edges} 边 / ${files.length} 文件，耗时 ${Date.now() - t0} ms，坏块 ${errors}`)
   return { symbols, edges, files: files.length, errors }
 }
@@ -267,6 +282,7 @@ export function graphStats(store) {
     symbols: one('select count(*) from symbols'),
     edges: one('select count(*) from edges'),
     builtAt: Number(store.getMeta('graph_built_at') ?? 0) || null,
+    version: Number(store.getMeta('graph_version') ?? 0) || 0,
   }
 }
 

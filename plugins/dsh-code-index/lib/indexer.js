@@ -22,7 +22,7 @@ import { resolveChunkConfig } from './strategies.js'
 import { getParser } from './chunk-ast.js'
 import { detectMissingGrammars } from './parser-hints.js'
 // 只用 graph.js 的「store → 图」这一侧（graph.js 不 import indexer.js），不构成循环依赖
-import { rebuildGraph, graphStats } from './graph.js'
+import { rebuildGraph, graphStats, GRAPH_VERSION } from './graph.js'
 
 /**
  * 本仓库**实际会用到、且确实加载成功**的 AST 语法（用于切块指纹）。
@@ -322,7 +322,9 @@ export async function buildIndex({
   let graphError = null
   if (graph?.enabled !== false) {
     const prev = graphStats(store)
-    if (!changed.length && !removed.length && prev.builtAt) {
+    // 版本不匹配 = 提取规则变过，旧图不可信 → 强制重扫（哪怕文件没变）
+    const graphFresh = prev.builtAt && prev.version === GRAPH_VERSION
+    if (!changed.length && !removed.length && graphFresh) {
       graphInfo = { symbols: prev.symbols, edges: prev.edges, ms: 0, builtAt: prev.builtAt, skipped: true }
     } else {
       try {

@@ -22,6 +22,7 @@ import {
   renderExpandBlock,
   graphStats,
   firstLineOf,
+  GRAPH_VERSION,
 } from './lib/graph.js'
 import { buildIndex } from './lib/indexer.js'
 
@@ -216,6 +217,36 @@ const bBroken = await buildIndex({
 brokenStore.clearGraph = origClear
 check('图失败不影响建库成功', bBroken.chunksWritten > 0 && bBroken.graph === null, `chunks=${bBroken.chunksWritten}`)
 check('图失败记 warning 并带原因', /boom/.test(bBroken.graphError ?? '') && warnLogs.some((m) => m.includes('boom')), JSON.stringify({ err: bBroken.graphError, logs: warnLogs }))
+
+// ---------------------------------------------------------------------------
+// 8) 解构参数（JS/TS 常见形态）必须被识别为声明
+//    早先 `\([^;{]*\)` 排除了 `{`，导致 `function buildIndex({ store })` 整条漏抓
+//    → code_graph 查不到入口（本插件自己的入口函数就踩中过）
+// ---------------------------------------------------------------------------
+const destructured = scanChunk(
+  'export async function buildIndex({\n  store,\n  repoRoot,\n}) {\n  const x = 1\n}\n',
+)
+check('解构参数（多行）识别为声明', destructured.declared.includes('buildIndex'), JSON.stringify(destructured.declared))
+const nestedCall = scanChunk('  const r = await foo({ a: 1 })\n')
+check('嵌套调用里的对象字面量不误判为声明', !nestedCall.declared.includes('foo'), JSON.stringify(nestedCall.declared))
+check(
+  '控制流关键字不因允许 { 而误判',
+  scanChunk('  if (a) {\n  for (i) {\n').declared.length === 0,
+  JSON.stringify(scanChunk('  if (a) {\n  for (i) {\n').declared),
+)
+
+// ---------------------------------------------------------------------------
+// 9) 图构建版本：规则变更后必须强制重扫（否则升级插件后旧图赖着不走）
+// ---------------------------------------------------------------------------
+const verStore = Store.open(path.join(dir, 'graph-ver.db'))
+const gv1 = await buildIndex({ store: verStore, repoRoot: buildRepo, embedder: { ok: false, reason: 't' }, graph: {} })
+check('首建图写入 graph_version', graphStats(verStore).version === GRAPH_VERSION, `v=${graphStats(verStore).version}`)
+const gv2 = await buildIndex({ store: verStore, repoRoot: buildRepo, embedder: { ok: false, reason: 't' }, graph: {} })
+check('版本一致且无变更 → 跳过重建', gv2.graph?.skipped === true, JSON.stringify(gv2.graph))
+verStore.setMeta('graph_version', String(GRAPH_VERSION - 1))
+const gv3 = await buildIndex({ store: verStore, repoRoot: buildRepo, embedder: { ok: false, reason: 't' }, graph: {} })
+check('版本不一致 → 强制重建（不跳过）', gv3.graph?.skipped === false, JSON.stringify(gv3.graph))
+check('重建后版本回到当前', graphStats(verStore).version === GRAPH_VERSION, `v=${graphStats(verStore).version}`)
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
 if (fail > 0) process.exit(1)

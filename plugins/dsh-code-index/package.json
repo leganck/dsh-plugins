@@ -1,9 +1,9 @@
 {
   "name": "dsh-code-index",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "private": true,
   "type": "module",
-  "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional remote vectors/index/rerank (no local models). 0.17.0: symbol graph (code_graph + code_search expand), remote coverage gate, doc-weight down-rank, auto graph rebuild on index.",
+  "description": "DSH bundle: local codebase retrieval — SQLite FTS5 (BM25) + optional remote vectors/index/rerank (no local models). 0.17.1: symbol graph (code_graph + code_search expand), remote coverage gate, doc-weight down-rank; fix destructured-param declarations + graph build versioning.",
   "license": "MIT",
   "icon": "./icon.svg",
   "engines": {
