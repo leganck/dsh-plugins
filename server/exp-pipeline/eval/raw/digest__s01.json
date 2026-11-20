@@ -1,0 +1,95 @@
+{
+  "key": "digest__s01",
+  "exp": "e2",
+  "segment": "segment_002.md",
+  "chunk_idx": 1,
+  "chars": 323,
+  "status": "ok",
+  "elapsed_s": 83.9,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1821,
+    "tokens_out": 6306,
+    "ms": 83859,
+    "candidates": 3,
+    "blocked": 0,
+    "created_n": 3,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 3,
+      "blocked": 0,
+      "kept": 3
+    }
+  ],
+  "candidates": [
+    {
+      "what": "取云效工单评论里的图片时，先从 content.htmlValue 正则提取 fileIdentifier，再用 get_workitem_file --id 下载",
+      "when_expr": "需要下载云效评论中的图片或附件时",
+      "why": "图片的 fileIdentifier 不作为独立字段返回，只嵌在评论 content 富文本里；不先抽取就拿不到 --id 参数，附件取不下来",
+      "lens": "index",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把「附件取不到」变成两步可照做的取参动作",
+        "exclusions": "1,2,3,4,5,6,8",
+        "evidence_quote": "评论图片从 content htmlValue 里正则取 `fileIdentifier`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "查 pay 项目日志改用 default-*/www_local-*/dev2-* 项目，不要用 www_ali",
+      "when_expr": "logs query 在 www_ali 下对 pay 项目返回 count=0",
+      "why": "pay 的日志不写进 www_ali 项目，count=0 是查错项目造成的假阴性，按空结果收工会漏掉真正线索",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "阻止把 count=0 当作「没有日志」而终止排查",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "打异常日志时把 e.getMessage() 拼进 message 字符串，不要只把异常对象传给 log.error",
+      "when_expr": "在 catch 块里打 error 日志，或线上报错在 SLS 里查不到堆栈时",
+      "why": "SLS 只保留日志首行，异常堆栈随参数被丢弃，报表失败之类的问题只剩一句无信息量报错，根因不可见",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "让线上异常根因落在 SLS 首行，可直接检索定位",
+        "exclusions": "2,3,5,6,8",
+        "evidence_quote": "SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

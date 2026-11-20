@@ -1,0 +1,63 @@
+{
+  "key": "e1__m13_c01",
+  "exp": "e1",
+  "segment": "segment_029.md/summary",
+  "chunk_idx": 1,
+  "chars": 163,
+  "status": "ok",
+  "elapsed_s": 79.6,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1729,
+    "tokens_out": 5652,
+    "ms": 79564,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "判断修复是否还需 cherry-pick 到 5.0.x 时，先比对目标文件；若 5.0.x 已与修复分支完全一致，按已包含修复处理，不要标记可摘或执行 cherry-pick",
+      "when_expr": "准备把某修复摘到 5.0.x，且该修复涉及文件与 5.0.x 完全一致",
+      "why": "文件一致说明 5.0.x 已含该修复，cherry-pick 结果为空；继续按可摘操作会误判版本状态并浪费移植动作",
+      "lens": "logic",
+      "category": "repo",
+      "evidence_issue": "CHGJ-2979",
+      "audit": {
+        "reusable_because": "把文件一致从可摘信号改成已含修复信号，避免空 cherry-pick",
+        "exclusions": "2,3,4,6,8",
+        "evidence_quote": "file identical means **5.0.x already contains the fix**",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

@@ -1,0 +1,79 @@
+{
+  "key": "digest__s05",
+  "exp": "e2",
+  "segment": "segment_012.md~2",
+  "chunk_idx": 5,
+  "chars": 335,
+  "status": "ok",
+  "elapsed_s": 179.7,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1837,
+    "tokens_out": 4953,
+    "ms": 179714,
+    "candidates": 2,
+    "blocked": 0,
+    "created_n": 2,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 0,
+      "kept": 2
+    }
+  ],
+  "candidates": [
+    {
+      "what": "统计 Count 与 Data 不一致且 Count 偏大时，给查询补上 `is_deleted=0` 过滤软删除记录",
+      "when_expr": "Count 比 Data 多，且表存在软删除字段 is_deleted",
+      "why": "软删除记录仍留在表中，COUNT 不排除会把已删除数据计入；明细列表已按 is_deleted 过滤，导致两边数字对不上",
+      "lens": "logic",
+      "category": "business",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "给出直接可做的排查动作，避免再次人工比对 Count 与 Data",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "fixed by adding `p.is_deleted=0`; final 953.",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "用 rows.size() 作为列表条数，代替单独的 Count 字段值",
+      "when_expr": "列表接口或报表的 Count 为 0，但数据明细有内容时",
+      "why": "Count 字段可能来自未刷新或独立于当前数据集的一次计数，与 rows 不同源；rows 是真实取到的记录，用它才能与列表对齐",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "提供直接替换计数来源的动作，避免在 Count 上反复排查",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "fixed to `rows.size()`.",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

@@ -1,0 +1,222 @@
+[
+  {
+    "key": "digest__s01",
+    "segment": "segment_002.md",
+    "chars": 323,
+    "material": "- 云效评论/附件下载需用 `get_workitem_file --id <fileIdentifier>`；评论图片从 content htmlValue 里正则取 `fileIdentifier`。\n- `logs query --thread`/`--query` 在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*` 等（`logs projects -e default` 43 个）。\n- SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失 → 报表失败根因不可见（建议改为带 `e.getMessage()`）。",
+    "rule": [
+      {
+        "what": "云效评论/附件下载需用 `get_workitem_file --id <fileIdentifier>`；评论图片从 content htmlValue 里正则取 `fileIdentifier`。",
+        "when_expr": "处理digest时",
+        "why": "云效评论/附件下载需用 `get_workitem_file --id <fileIdentifier>`；评论图片从 content htmlValue 里正则取 `fileIdentifier`",
+        "lens": "jargon",
+        "repo": "global"
+      },
+      {
+        "what": "`logs query --thread`/`--query` 在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*` 等（`logs projects -e default` 43 个）。",
+        "when_expr": "处理digest时",
+        "why": "`logs query --thread`/`--query` 在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*` 等（`logs projects -e default` 43 个）",
+        "lens": "jargon",
+        "repo": "global"
+      },
+      {
+        "what": "SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失 → 报表失败根因不可见（建议改为带 `e.getMessage()`）。",
+        "when_expr": "处理digest时",
+        "why": "SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失 → 报表失败根因不可见（建议改为带 `e.getMessage()`）",
+        "lens": "logic",
+        "repo": "global"
+      }
+    ],
+    "llm": [
+      {
+        "what": "取云效工单评论里的图片时，先从 content.htmlValue 正则提取 fileIdentifier，再用 get_workitem_file --id 下载",
+        "when_expr": "需要下载云效评论中的图片或附件时",
+        "why": "图片的 fileIdentifier 不作为独立字段返回，只嵌在评论 content 富文本里；不先抽取就拿不到 --id 参数，附件取不下来",
+        "lens": "index",
+        "category": "tool",
+        "evidence_issue": "",
+        "audit": {
+          "reusable_because": "把「附件取不到」变成两步可照做的取参动作",
+          "exclusions": "1,2,3,4,5,6,8",
+          "evidence_quote": "评论图片从 content htmlValue 里正则取 `fileIdentifier`",
+          "prompt_version": "exp-v2.0"
+        },
+        "excerptKind": "quote",
+        "excerptHitFound": true
+      },
+      {
+        "what": "查 pay 项目日志改用 default-*/www_local-*/dev2-* 项目，不要用 www_ali",
+        "when_expr": "logs query 在 www_ali 下对 pay 项目返回 count=0",
+        "why": "pay 的日志不写进 www_ali 项目，count=0 是查错项目造成的假阴性，按空结果收工会漏掉真正线索",
+        "lens": "logic",
+        "category": "tool",
+        "evidence_issue": "",
+        "audit": {
+          "reusable_because": "阻止把 count=0 当作「没有日志」而终止排查",
+          "exclusions": "1,2,3,4,6,8",
+          "evidence_quote": "在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*`",
+          "prompt_version": "exp-v2.0"
+        },
+        "excerptKind": "quote",
+        "excerptHitFound": true
+      },
+      {
+        "what": "打异常日志时把 e.getMessage() 拼进 message 字符串，不要只把异常对象传给 log.error",
+        "when_expr": "在 catch 块里打 error 日志，或线上报错在 SLS 里查不到堆栈时",
+        "why": "SLS 只保留日志首行，异常堆栈随参数被丢弃，报表失败之类的问题只剩一句无信息量报错，根因不可见",
+        "lens": "logic",
+        "category": "debug",
+        "evidence_issue": "",
+        "audit": {
+          "reusable_because": "让线上异常根因落在 SLS 首行，可直接检索定位",
+          "exclusions": "2,3,5,6,8",
+          "evidence_quote": "SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失",
+          "prompt_version": "exp-v2.0"
+        },
+        "excerptKind": "quote",
+        "excerptHitFound": true
+      }
+    ],
+    "llm_blocked": []
+  },
+  {
+    "key": "digest__s05",
+    "segment": "segment_012.md~2",
+    "chars": 335,
+    "material": "- Data branch `SysPosPlugins` Count=0 vs Data 22; fixed to `rows.size()`.\n- `DietPromotionSpecial`: Count 955 vs Data 953; fixed by adding `p.is_deleted=0`; final 953.\n- `DietPromotion`: Data 53 vs Count 42; fixed by adding `dpbr.branch_id`; final 42.\n- Actual `hzfPayBookBranchList` request returns HTTP 200 with `result=FAILURE` and:",
+    "rule": [
+      {
+        "what": "Data branch `SysPosPlugins` Count=0 vs Data 22; fixed to `rows.size()`.",
+        "when_expr": "处理digest时",
+        "why": "Data branch `SysPosPlugins` Count=0 vs Data 22; fixed to `rows.size()`",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "`DietPromotionSpecial`: Count 955 vs Data 953; fixed by adding `p.is_deleted=0`; final 953.",
+        "when_expr": "处理digest时",
+        "why": "`DietPromotionSpecial`: Count 955 vs Data 953; fixed by adding `p.is_deleted=0`; final 953",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "`DietPromotion`: Data 53 vs Count 42; fixed by adding `dpbr.branch_id`; final 42.",
+        "when_expr": "处理digest时",
+        "why": "`DietPromotion`: Data 53 vs Count 42; fixed by adding `dpbr.branch_id`; final 42",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "Actual `hzfPayBookBranchList` request returns HTTP 200 with `result=FAILURE` and:",
+        "when_expr": "处理digest时",
+        "why": "Actual `hzfPayBookBranchList` request returns HTTP 200 with `result=FAILURE` and",
+        "lens": "index",
+        "repo": "global"
+      }
+    ],
+    "llm": [
+      {
+        "what": "统计 Count 与 Data 不一致且 Count 偏大时，给查询补上 `is_deleted=0` 过滤软删除记录",
+        "when_expr": "Count 比 Data 多，且表存在软删除字段 is_deleted",
+        "why": "软删除记录仍留在表中，COUNT 不排除会把已删除数据计入；明细列表已按 is_deleted 过滤，导致两边数字对不上",
+        "lens": "logic",
+        "category": "business",
+        "evidence_issue": "",
+        "audit": {
+          "reusable_because": "给出直接可做的排查动作，避免再次人工比对 Count 与 Data",
+          "exclusions": "1,2,3,4,6,8",
+          "evidence_quote": "fixed by adding `p.is_deleted=0`; final 953.",
+          "prompt_version": "exp-v2.0"
+        },
+        "excerptKind": "quote",
+        "excerptHitFound": true
+      },
+      {
+        "what": "用 rows.size() 作为列表条数，代替单独的 Count 字段值",
+        "when_expr": "列表接口或报表的 Count 为 0，但数据明细有内容时",
+        "why": "Count 字段可能来自未刷新或独立于当前数据集的一次计数，与 rows 不同源；rows 是真实取到的记录，用它才能与列表对齐",
+        "lens": "logic",
+        "category": "debug",
+        "evidence_issue": "",
+        "audit": {
+          "reusable_because": "提供直接替换计数来源的动作，避免在 Count 上反复排查",
+          "exclusions": "1,2,3,4,6,8",
+          "evidence_quote": "fixed to `rows.size()`.",
+          "prompt_version": "exp-v2.0"
+        },
+        "excerptKind": "quote",
+        "excerptHitFound": true
+      }
+    ],
+    "llm_blocked": []
+  },
+  {
+    "key": "digest__s07",
+    "segment": "segment_018.md",
+    "chars": 380,
+    "material": "- `fetch-workitem.ps1` successfully fetched `CHGJ-3777`; workitem ID `5a0b4868470d71e6221b49aff7`, status `已确认`, assignee `来立强`.\n- Screenshot download URLs returned `401 Unauthorized`; screenshots are not available locally.\n- SQL probing errors:\n- `show tables` unsupported: `不支持的语句类型：SQLShowTablesStatement`.\n- `goods.code` unknown column.\n- `goods_code='40000954'` found no row.",
+    "rule": [
+      {
+        "what": "`fetch-workitem.ps1` successfully fetched `CHGJ-3777`; workitem ID `5a0b4868470d71e6221b49aff7`, status `已确认`, assignee `来立强`.",
+        "when_expr": "工单 CHGJ-3777",
+        "why": "`fetch-workitem.ps1` successfully fetched `CHGJ-3777`; workitem ID `5a0b4868470d71e6221b49aff7`, status `已确认`, assignee `来立强`",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "Screenshot download URLs returned `401 Unauthorized`; screenshots are not available locally.",
+        "when_expr": "处理digest时",
+        "why": "Screenshot download URLs returned `401 Unauthorized`; screenshots are not available locally",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "SQL probing errors:",
+        "when_expr": "处理digest时",
+        "why": "SQL probing errors",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "`show tables` unsupported: `不支持的语句类型：SQLShowTablesStatement`.",
+        "when_expr": "处理digest时",
+        "why": "`show tables` unsupported: `不支持的语句类型：SQLShowTablesStatement`",
+        "lens": "index",
+        "repo": "global"
+      },
+      {
+        "what": "`goods.code` unknown column.",
+        "when_expr": "处理digest时",
+        "why": "`goods.code` unknown column",
+        "lens": "jargon",
+        "repo": "global"
+      },
+      {
+        "what": "`goods_code='40000954'` found no row.",
+        "when_expr": "处理digest时",
+        "why": "`goods_code='40000954'` found no row",
+        "lens": "jargon",
+        "repo": "global"
+      }
+    ],
+    "llm": [
+      {
+        "what": "查询商品数据时用 `goods_code` 列，不要用 `code`，也不要写成 `goods.code`",
+        "when_expr": "SQL 按商品编码过滤 goods 数据时报 `goods.code unknown column`",
+        "why": "当前表实际编码列是 `goods_code`，`code` 列不存在；SQL 解析器遇到不存在的列会直接拒绝整条语句，导致查询无法继续",
+        "lens": "logic",
+        "category": "business",
+        "evidence_issue": "CHGJ-3777",
+        "audit": {
+          "reusable_because": "把商品表编码列名纠为 goods_code，避免后续 Agent 重复踩 unknown column",
+          "exclusions": "1,2,3,4,5,6,7,8",
+          "evidence_quote": "goods.code unknown column. goods_code='40000954' found no row.",
+          "prompt_version": "exp-v2.0"
+        },
+        "excerptKind": "sql",
+        "excerptHitFound": false
+      }
+    ],
+    "llm_blocked": []
+  }
+]

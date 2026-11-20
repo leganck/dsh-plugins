@@ -1,0 +1,254 @@
+{
+  "segments_in_digest": 59,
+  "segments_deduped": 30,
+  "chunks_per_segment": {
+    "segment_000.md": 6,
+    "segment_001.md": 3,
+    "segment_002.md": 3,
+    "segment_003.md": 4,
+    "segment_004.md": 6,
+    "segment_005.md": 4,
+    "segment_006.md": 4,
+    "segment_007.md": 3,
+    "segment_008.md": 2,
+    "segment_009.md": 5,
+    "segment_010.md": 2,
+    "segment_011.md": 2,
+    "segment_012.md": 4,
+    "segment_013.md": 3,
+    "segment_014.md": 3,
+    "segment_015.md": 2,
+    "segment_016.md": 4,
+    "segment_017.md": 3,
+    "segment_018.md": 2,
+    "segment_019.md": 2,
+    "segment_020.md": 2,
+    "segment_021.md": 5,
+    "segment_022.md": 5,
+    "segment_023.md": 5,
+    "segment_024.md": 5,
+    "segment_025.md": 5,
+    "segment_026.md": 3,
+    "segment_027.md": 3,
+    "segment_028.md": 5,
+    "segment_029.md": 7
+  },
+  "golden_mapping": {
+    "0": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "1": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "2": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "3": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "4": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "5": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "6": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "7": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "8": [
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.6
+      ],
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        0.6
+      ]
+    ],
+    "9": [
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        1.0
+      ],
+      [
+        "segment_029.md",
+        "dev1 startup failure `APPLICATION FAILED TO START … form a cycle`** — chain: `masterConfiguration → redisEventQueueTask → redisDelayQueueService → onlineDietOrderService → crmOrderPayUtilService → crmOrderSaleServiceImpl → crmOrderOrderPaymentService → crmOrderPayPostService → crmOrderBranchTableServiceImpl → crmOrderTableActiveOrderResolver → crmOrderPayUtilService`. My SPLAT-5627 added `PayUtilService` ctor dep to `TableActiveOrderResolver`. **Fix: `@Lazy PayUtilService payUtilService` ctor param** (+import `org.springframework.context.annotation.Lazy`), applied to both `hotfix/5.0.23` (`ac3548fb`) and `fix/5.0/SPLAT-5627` (`d50dc18e`, MR !332) since master-5.0.x already merged !331. Only manifests at Spring container startup — compiles and unit tests pass.",
+        1.0
+      ],
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.8333333333333334
+      ]
+    ],
+    "10": [
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        1.0
+      ],
+      [
+        "segment_029.md",
+        "dev1 startup failure `APPLICATION FAILED TO START … form a cycle`** — chain: `masterConfiguration → redisEventQueueTask → redisDelayQueueService → onlineDietOrderService → crmOrderPayUtilService → crmOrderSaleServiceImpl → crmOrderOrderPaymentService → crmOrderPayPostService → crmOrderBranchTableServiceImpl → crmOrderTableActiveOrderResolver → crmOrderPayUtilService`. My SPLAT-5627 added `PayUtilService` ctor dep to `TableActiveOrderResolver`. **Fix: `@Lazy PayUtilService payUtilService` ctor param** (+import `org.springframework.context.annotation.Lazy`), applied to both `hotfix/5.0.23` (`ac3548fb`) and `fix/5.0/SPLAT-5627` (`d50dc18e`, MR !332) since master-5.0.x already merged !331. Only manifests at Spring container startup — compiles and unit tests pass.",
+        1.0
+      ],
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.8333333333333334
+      ]
+    ],
+    "11": [
+      [
+        "segment_028.md",
+        "CHGJ-3922 created in wrong space (CHGJ) → deleted, recreated SPLAT-5627; branch/ledger/analysis dirs renamed.",
+        1.0
+      ],
+      [
+        "segment_029.md",
+        "dev1 startup failure `APPLICATION FAILED TO START … form a cycle`** — chain: `masterConfiguration → redisEventQueueTask → redisDelayQueueService → onlineDietOrderService → crmOrderPayUtilService → crmOrderSaleServiceImpl → crmOrderOrderPaymentService → crmOrderPayPostService → crmOrderBranchTableServiceImpl → crmOrderTableActiveOrderResolver → crmOrderPayUtilService`. My SPLAT-5627 added `PayUtilService` ctor dep to `TableActiveOrderResolver`. **Fix: `@Lazy PayUtilService payUtilService` ctor param** (+import `org.springframework.context.annotation.Lazy`), applied to both `hotfix/5.0.23` (`ac3548fb`) and `fix/5.0/SPLAT-5627` (`d50dc18e`, MR !332) since master-5.0.x already merged !331. Only manifests at Spring container startup — compiles and unit tests pass.",
+        1.0
+      ],
+      [
+        "segment_027.md",
+        "用户纠正：CHGJ-3905/CHGJ-3893 分析代理各多发一条详细评论 → 已叫停；SPLAT-5623 误建技术需求单 → 已删除云效单 + 删台账 + 改 sp-rules/记忆。",
+        0.8333333333333334
+      ]
+    ],
+    "12": [],
+    "13": [],
+    "14": [
+      [
+        "segment_018.md",
+        "`information_schema.tables` blocked by “执行sql越权，只能在当前选择的数据库下执行。表名前面，请不要带数据库前缀”.",
+        0.7142857142857143
+      ]
+    ],
+    "15": [
+      [
+        "segment_029.md",
+        "CHGJ-3735/SPLAT-5584 were wrongly included in the first approval draft — verified they are **5.2-line-only bugs** (5.0 line has had `ORDER BY checkout_at DESC` since 2024-03-04 commit `13d8a74d9`); removed from draft.",
+        1.0
+      ],
+      [
+        "segment_013.md",
+        "User corrected report location; report was moved from `D:\\Code\\wt\\DATA-COUNT-MISMATCH` to `D:\\work\\bug-analysis\\chgj-3723`.",
+        0.6
+      ],
+      [
+        "segment_015.md",
+        "Yunxiao comments for CHGJ-3745: `list_work_item_comments` requires `--page`; returning `[]`, no comments.",
+        0.6
+      ]
+    ],
+    "16": [
+      [
+        "segment_029.md",
+        "Earlier claim “文件与 5.0.x 一致 = 可摘” was wrong — file identical means **5.0.x already contains the fix**; CHGJ-2979/goodsId cherry-picks were empty for this reason.",
+        1.0
+      ]
+    ]
+  },
+  "e1_segments": [
+    "segment_027.md",
+    "segment_028.md",
+    "segment_029.md",
+    "segment_018.md",
+    "segment_013.md",
+    "segment_015.md"
+  ],
+  "e1_calls": 22,
+  "e2_segments": [
+    "segment_000.md",
+    "segment_001.md",
+    "segment_002.md",
+    "segment_003.md",
+    "segment_004.md",
+    "segment_005.md",
+    "segment_006.md",
+    "segment_007.md",
+    "segment_008.md",
+    "segment_009.md",
+    "segment_010.md",
+    "segment_011.md"
+  ],
+  "e2_calls": 44
+}

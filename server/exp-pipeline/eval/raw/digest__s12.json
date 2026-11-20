@@ -1,0 +1,70 @@
+{
+  "key": "digest__s12",
+  "exp": "e2",
+  "segment": "segment_029.md~4",
+  "chunk_idx": 12,
+  "chars": 371,
+  "status": "ok",
+  "elapsed_s": 229.0,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 1,
+    "tokens_in": 1842,
+    "tokens_out": 10046,
+    "ms": 229009,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": "truncated:1/1"
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1,
+      "truncated": true
+    }
+  ],
+  "candidates": [
+    {
+      "what": "将参与循环依赖的一个构造器参数改为 `@Lazy`，并 import `org.springframework.context.annotation.Lazy`",
+      "when_expr": "Spring 容器启动失败，且代码刚改过构造器注入，编译与单测都通过",
+      "why": "构造器注入创建 Bean 时必须先解析全部参数，循环依赖下双方互相等待；`@Lazy` 先注入代理，目标 Bean 推迟到真正使用时才创建，从而打破启动死锁",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "SPLAT-5627",
+      "audit": {
+        "reusable_because": "把“编译/单测过了但启动失败”对应到构造器循环依赖，并给出可执行的 `@Lazy` 修法",
+        "exclusions": "1,2,3,4,5,6,7,8",
+        "evidence_quote": "Only manifests at Spring container startup — compiles and unit tests pass.",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": [
+    {
+      "segmentId": "segment_001.md",
+      "warning": "truncated",
+      "message": "模型返回 warning=truncated"
+    }
+  ]
+}

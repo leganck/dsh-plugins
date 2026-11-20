@@ -1,0 +1,63 @@
+{
+  "key": "digest__s02",
+  "exp": "e2",
+  "segment": "segment_004.md~3",
+  "chunk_idx": 2,
+  "chars": 155,
+  "status": "ok",
+  "elapsed_s": 31.8,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1779,
+    "tokens_out": 1882,
+    "ms": 31796,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "登录 dev2 时放弃用 CDP 驱动登录表单，改用真实浏览器会话的 curl cookie 直连 dev2 API",
+      "when_expr": "用 CDP 自动填并提交 dev2 登录表单后无网络请求、会话被判定无效",
+      "why": "该登录页的提交由前端接管，CDP 触发的 submit 不发出网络请求，服务端会话始终建不起来；只有真实浏览器会话产生的 cookie 才能通过 dev2 API 鉴权",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把认证方式从自动化登录切到复用真实 cookie，避免在同一失效路径上反复重试",
+        "exclusions": "2,3,4,5,7,8",
+        "evidence_quote": "session invalid; user then supplied curl cookie for dev2 API",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

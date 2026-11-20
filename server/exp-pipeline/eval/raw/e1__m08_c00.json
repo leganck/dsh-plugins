@@ -1,0 +1,71 @@
+{
+  "key": "e1__m08_c00",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 0,
+  "chars": 360,
+  "status": "ok",
+  "elapsed_s": 59.1,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1773,
+    "tokens_out": 3871,
+    "ms": 59101,
+    "candidates": 2,
+    "blocked": 1,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 1,
+    "skill_covered": 0,
+    "garbage_rate": 0.5,
+    "reasons": {
+      "garbage-7-mixed-granularity": 1
+    },
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 1,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "摘补丁前先 grep 目标分支中该改动引入的被调用方法，确认已有等效调用就跳过该 pick",
+      "when_expr": "某修复 commit 在目标分支上找不到，但其功能可能已被别处实现",
+      "why": "两条产品线常各自内联同一修复；仅凭 commit 不在分支就判定要摘，会白白解冲突，还可能在解冲突时删掉已生效的调用",
+      "lens": "logic",
+      "category": "repo",
+      "evidence_issue": "CHGJ-3693",
+      "audit": {
+        "reusable_because": "把「是否需要摘」的判断从 commit 是否存在改为搜索目标分支的调用点",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "`OrderPrintTicketAssembler` already calls `SpecDescFormatter.format(...)`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [
+    {
+      "what": "cherry-pick --continue 报 nothing to commit 时按该 pick 已丢失处理，依原 commit 逐文件手工重放，并用 git log 确认落地",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=91>90"
+    }
+  ],
+  "errors": [],
+  "warnings": []
+}

@@ -1,0 +1,63 @@
+{
+  "key": "e1__m01_c00",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 0,
+  "chars": 393,
+  "status": "ok",
+  "elapsed_s": 160.5,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1924,
+    "tokens_out": 3362,
+    "ms": 160524,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "核对 pos 流水归属时，用 tenant_id+branch_id+pos_code 三元组与路由日志比对，禁止单独用 pos id 定位",
+      "when_expr": "路由日志 tenantId/branchId/posId/posCode 与落库租户/分店/pos_code 不一致",
+      "why": "pos id 不是全局唯一，同一 id 在不同库可对应不同租户；单独按 pos id 关联会把流水错落到同 id 的其他租户，且该租户数据极少时更不易察觉",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把排查从单 id 关联升级为完整身份比对，直接改变误路由定位路径",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "zb1 pos id=66112 → tenant 140709; ti4 pos id=66112 → tenant 431912",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": false
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

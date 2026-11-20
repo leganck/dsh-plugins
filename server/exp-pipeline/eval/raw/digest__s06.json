@@ -1,0 +1,71 @@
+{
+  "key": "digest__s06",
+  "exp": "e2",
+  "segment": "segment_015.md",
+  "chunk_idx": 6,
+  "chars": 203,
+  "status": "ok",
+  "elapsed_s": 176.8,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1782,
+    "tokens_out": 4351,
+    "ms": 176831,
+    "candidates": 2,
+    "blocked": 1,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 1,
+    "skill_covered": 0,
+    "garbage_rate": 0.5,
+    "reasons": {
+      "garbage-4-one-off": 1
+    },
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 1,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "调用 Yunxiao 的 list_work_item_comments 获取工单评论时，显式传入 --page 参数（如 --page 1），不要省略",
+      "when_expr": "使用该命令查工单评论且返回 [] 或疑似无评论时",
+      "why": "该命令不把缺省页当作第一页，省略 --page 会静默返回空数组而不报错，容易把有评论误判成无评论，进而跳过后续处理",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "CHGJ-3745",
+      "audit": {
+        "reusable_because": "遇到空返回会先补页参数，不再误判评论不存在",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "list_work_item_comments requires --page; returning [], no comments",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [
+    {
+      "what": "收到平台返回的截图或文件 OSS 临时链接后，立即下载到本地证据目录，不要等稍后统一收集",
+      "reason": "garbage-4-one-off",
+      "detail": "一次性标记：临时"
+    }
+  ],
+  "errors": [],
+  "warnings": []
+}

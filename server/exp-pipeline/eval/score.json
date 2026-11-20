@@ -1,0 +1,734 @@
+{
+  "cost": {
+    "calls": 39,
+    "elapsed_s": 5524.0,
+    "tokens_in": 57814,
+    "tokens_out": 182413,
+    "reasoning_tokens": 0,
+    "truncated": 7,
+    "failed": 7,
+    "chars": 11171
+  },
+  "per_exp": {
+    "e1": {
+      "calls": 26,
+      "elapsed_s": 3449.3999999999996,
+      "tokens_in": 41517,
+      "tokens_out": 126577,
+      "truncated": 5,
+      "failed": 3,
+      "candidates": 19,
+      "blocked": 6,
+      "kept": 19,
+      "chars": 7217,
+      "avg_s": 132.7
+    },
+    "e2": {
+      "calls": 13,
+      "elapsed_s": 2074.6,
+      "tokens_in": 16297,
+      "tokens_out": 55836,
+      "truncated": 2,
+      "failed": 4,
+      "candidates": 13,
+      "blocked": 1,
+      "kept": 13,
+      "chars": 3954,
+      "avg_s": 159.6
+    }
+  },
+  "recall": {
+    "rows": [
+      {
+        "idx": 0,
+        "lens": "logic",
+        "what": "上传流水后台查不到时，先比对同机同收银员相邻流水的落库分区，不要只查客户自己的库",
+        "cands": 3,
+        "best_sim": 0.159,
+        "anchors": [
+          "分区"
+        ],
+        "best_what": "用已知正常的控制交易确认该租户正常分区名，再核对上传流水实际落库分区；不要只查默认分区",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 1,
+        "lens": "index",
+        "what": "确认错写分区后，在该分区的 pos 表按 posId 查真实归属租户与门店号",
+        "cands": 1,
+        "best_sim": 0.069,
+        "anchors": [
+          "posId"
+        ],
+        "best_what": "核对 pos 流水归属时，用 tenant_id+branch_id+pos_code 三元组与路由日志比对，禁止单独用 pos id 定位",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 2,
+        "lens": "logic",
+        "what": "跨租户错写的修复同时准备源库软删与目标库按原 payload 补录，一次提审批",
+        "cands": 0,
+        "best_sim": null,
+        "anchors": [],
+        "best_what": null,
+        "best_lens": null,
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 3,
+        "lens": "logic",
+        "what": "客户报有销售但库存没扣时，按 tenant_id 查 store_account 的 branch_id 分布，而不是按门店号查",
+        "cands": 0,
+        "best_sim": null,
+        "anchors": [],
+        "best_what": null,
+        "best_lens": null,
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 5,
+        "lens": "index",
+        "what": "评估库存数据修复范围前先读 StoreComputeImpl，确认它写的是五张表",
+        "cands": 1,
+        "best_sim": 0.0,
+        "anchors": [],
+        "best_what": "判断商品 mainId 是否有效时，把 null 和 0 都判为无效，不能只判 null",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 6,
+        "lens": "logic",
+        "what": "重放库存消息前先删除 bas_interface_log 中对应的防重记录",
+        "cands": 3,
+        "best_sim": 0.055,
+        "anchors": [],
+        "best_what": "排查 lian_tuo 相关推送时，只找 lian_tuo_branch 表，不要查 member/record/log 等同名子表",
+        "best_lens": "index",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 9,
+        "lens": "logic",
+        "what": "两条产品线各自新建了同名类时，按已发版修复逐个 cherry-pick，禁止全分支 merge",
+        "cands": 1,
+        "best_sim": 0.135,
+        "anchors": [
+          "cherry-pick"
+        ],
+        "best_what": "cherry-pick 前先在目标分支 grep 该提交改动的类和方法名，若目标分支已有等价调用则跳过该 pick",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 10,
+        "lens": "index",
+        "what": "需要让分支成为祖先但代码逐字节不变时，用 git merge -s ours",
+        "cands": 0,
+        "best_sim": null,
+        "anchors": [],
+        "best_what": null,
+        "best_lens": null,
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 11,
+        "lens": "logic",
+        "what": "cherry-pick 冲突解决后要确认真的产生了提交，没有就手工重贴该次意图",
+        "cands": 1,
+        "best_sim": 0.057,
+        "anchors": [],
+        "best_what": "摘补丁前先 grep 目标分支中该改动引入的被调用方法，确认已有等效调用就跳过该 pick",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 12,
+        "lens": "index",
+        "what": "查 POS/ERP 生产业务日志用 devops 的 default 环境，不要用 www_ali",
+        "cands": 1,
+        "best_sim": 0.269,
+        "anchors": [
+          "default",
+          "www_ali",
+          "44"
+        ],
+        "best_what": "查 smartpos 日志 topic 先到 env=default，按 `default-<group>-smartpos-svc-*` 命名找，不要用 www_ali",
+        "best_lens": "index",
+        "hit": true,
+        "manual": null
+      },
+      {
+        "idx": 13,
+        "lens": "index",
+        "what": "在 Git Bash 里构建用 JAVA_HOME 下的 java 直调 gradle-wrapper.jar",
+        "cands": 1,
+        "best_sim": 0.037,
+        "anchors": [],
+        "best_what": "解冲突后执行 git diff HEAD 确认有实际改动；若为空，按目标提交逐文件重放改动后再 --continue",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 14,
+        "lens": "index",
+        "what": "用 sp-devops 执行 SQL 时库名一律走 -d 参数，语句里不要带库名前缀",
+        "cands": 3,
+        "best_sim": 0.032,
+        "anchors": [],
+        "best_what": "当前环境查不到日志时，改查 default 环境，不要先按超保留期或不可用下结论",
+        "best_lens": "index",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 15,
+        "lens": "logic",
+        "what": "发布清单里判断工单能否进补丁版本，先确认它属于哪条版本线、目标线是否已含该修复",
+        "cands": 1,
+        "best_sim": 0.024,
+        "anchors": [],
+        "best_what": "将「惠管家修复发版」识别为内部固定发版类型；产物按 smartpos-svc-erp-chain-{版本} 对应的 POS 端处理",
+        "best_lens": "jargon",
+        "hit": false,
+        "manual": null
+      },
+      {
+        "idx": 16,
+        "lens": "jargon",
+        "what": "看到「可摘/不可摘」理解为「该工单能否移植到目标补丁线」",
+        "cands": 3,
+        "best_sim": 0.025,
+        "anchors": [
+          "可摘"
+        ],
+        "best_what": "判断修复是否还需 cherry-pick 到 5.0.x 时，先比对目标文件；若 5.0.x 已与修复分支完全一致，按已包含修复处理，不要标记可摘或执行 cherry-pick",
+        "best_lens": "logic",
+        "hit": false,
+        "manual": null
+      }
+    ],
+    "denominator": 14,
+    "missing": [
+      4,
+      7,
+      8
+    ],
+    "hits": 1
+  },
+  "candidates": [
+    {
+      "hash": "b3d660ff61",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "用已知正常的控制交易确认该租户正常分区名，再核对上传流水实际落库分区；不要只查默认分区",
+      "when_expr": "客户上传成功但后台查不到流水，且能定位到同笔控制交易",
+      "why": "上传可能因租户路由错误写入相邻分区，客户端仍返回成功；只查默认分区会把跨分区落库误判为数据丢失",
+      "lens": "logic",
+      "category": "debug",
+      "judge": null
+    },
+    {
+      "hash": "8b63a98933",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "定位到流水落入错误租户分区后，先执行台账重同步把数据补回正确分区，再提交代码修复",
+      "when_expr": "已确认根因是错误租户路由，且缺失流水能在非正常分区中查到",
+      "why": "错误路由写入的数据不会随代码发布自动迁移，不重同步则用户侧账目持续缺失",
+      "lens": "logic",
+      "category": "debug",
+      "judge": null
+    },
+    {
+      "hash": "dc15bf9ef8",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "合并含 ours-merge bookkeeping commit 的 MR 时使用 merge 而非 squash，保留全部提交",
+      "when_expr": "在补丁分支（如 5.2.3）上集成已移植的修复 MR",
+      "why": "bookkeeping commit 是移植来源的记账标记，squash 会将其折叠进单个提交，后续补丁线合回 master 时丢失移植关系，冲突排查和变更追溯失去依据",
+      "lens": "logic",
+      "category": "repo",
+      "judge": null
+    },
+    {
+      "hash": "3038f617ee",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "核对 pos 流水归属时，用 tenant_id+branch_id+pos_code 三元组与路由日志比对，禁止单独用 pos id 定位",
+      "when_expr": "路由日志 tenantId/branchId/posId/posCode 与落库租户/分店/pos_code 不一致",
+      "why": "pos id 不是全局唯一，同一 id 在不同库可对应不同租户；单独按 pos id 关联会把流水错落到同 id 的其他租户，且该租户数据极少时更不易察觉",
+      "lens": "logic",
+      "category": "debug",
+      "judge": null
+    },
+    {
+      "hash": "3350943ef9",
+      "exp": "e1",
+      "segment": "segment_013.md/verbatim",
+      "what": "判断商品 mainId 是否有效时，把 null 和 0 都判为无效，不能只判 null",
+      "when_expr": "代码只对 mainId 判 null 就用于归集、供应计算或库存分组",
+      "why": "mainId=0 是无效占位；漏掉会把 0 当成真实主商品 ID 或误判为有主商品，导致归集或查询结果错",
+      "lens": "logic",
+      "category": "business",
+      "judge": null
+    },
+    {
+      "hash": "8ad974a0bc",
+      "exp": "e1",
+      "segment": "segment_001.md/verbatim",
+      "what": "核对门店与小精灵商户号对应关系时，按门店 ID 一对一取绑定行，不要用 branch.last_update_at 判断绑定是否过期",
+      "when_expr": "门店改名后，小精灵商户号绑定行的建档时间仍停在改名前的日期",
+      "why": "绑定行建档后从不随门店改名更新，branch 的更新时间反映不了绑定变化，拿它比对会把正常绑定误判成过期数据",
+      "lens": "logic",
+      "category": "business",
+      "judge": null
+    },
+    {
+      "hash": "5499db5206",
+      "exp": "e1",
+      "segment": "segment_001.md/verbatim",
+      "what": "小精灵商户号建档时间早于门店销售起点时，按开业前预建号处理，不要作为数据异常排查",
+      "when_expr": "商户号建档日期早于该门店销售起点或会员消费起点",
+      "why": "商户号允许在门店开业前预先建好，建号时间与销售起点本就不同步，按时间先后判定异常会白查一轮",
+      "lens": "logic",
+      "category": "business",
+      "judge": null
+    },
+    {
+      "hash": "3a0b3b201a",
+      "exp": "e1",
+      "segment": "segment_001.md/verbatim",
+      "what": "排查 lian_tuo 相关推送时，只找 lian_tuo_branch 表，不要查 member/record/log 等同名子表",
+      "when_expr": "涉及 lian_tuo 推送链路的调查或需要从 lian_tuo 表取数时",
+      "why": "命名上像有完整子表族，实际只有 branch 一张表；按惯性去找其他表会得零结果，并可能误判推送链路缺失",
+      "lens": "index",
+      "category": "debug",
+      "judge": null
+    },
+    {
+      "hash": "8df24482fb",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "cherry-pick 前先在目标分支 grep 该提交改动的类和方法名，若目标分支已有等价调用则跳过该 pick",
+      "when_expr": "准备把某提交 cherry-pick 到另一条产品线，且该提交改动的类在目标分支也存在",
+      "why": "两条产品线常各自独立实现同一处修复，目标分支已含等价调用；强行 pick 会产生冲突，解决冲突时容易删掉目标分支原有调用，只能 reset 工作树重做",
+      "lens": "logic",
+      "category": "repo",
+      "judge": null
+    },
+    {
+      "hash": "970291026e",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "摘补丁前先 grep 目标分支中该改动引入的被调用方法，确认已有等效调用就跳过该 pick",
+      "when_expr": "某修复 commit 在目标分支上找不到，但其功能可能已被别处实现",
+      "why": "两条产品线常各自内联同一修复；仅凭 commit 不在分支就判定要摘，会白白解冲突，还可能在解冲突时删掉已生效的调用",
+      "lens": "logic",
+      "category": "repo",
+      "judge": null
+    },
+    {
+      "hash": "a387b7823c",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "查 smartpos 日志 topic 先到 env=default，按 `default-<group>-smartpos-svc-*` 命名找，不要用 www_ali",
+      "when_expr": "需要查 smartpos 各服务（erp-pos、router、web-erp 等）日志时",
+      "why": "业务日志只存在于 default 的 44 个 topics，www_ali 下 pos topics 仅含 lettuce heartbeats，查错环境会看不到业务数据",
+      "lens": "index",
+      "category": "tool",
+      "judge": null
+    },
+    {
+      "hash": "6b5fd93115",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "解冲突后执行 git diff HEAD 确认有实际改动；若为空，按目标提交逐文件重放改动后再 --continue",
+      "when_expr": "cherry-pick 解冲突后 git 提示 nothing to commit，或 git diff HEAD 为空",
+      "why": "git 把与 HEAD 相同的解决结果视为空提交，--continue 会静默丢弃该 pick；命令看似成功，目标补丁实际未合入",
+      "lens": "logic",
+      "category": "repo",
+      "judge": null
+    },
+    {
+      "hash": "0a4b55f04c",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "在 MSYS/Git Bash 调用 ipconfig 时，改用 MSYS_NO_PATHCONV=1 ipconfig /all，不要传 //all",
+      "when_expr": "在 MSYS/Git Bash 里执行 ipconfig /all 或 //all 参数被改写、输出异常",
+      "why": "MSYS 会把斜杠参数当路径做转换，Windows 命令收不到 /all；禁用路径转换后原生命令才能正确解析参数",
+      "lens": "logic",
+      "category": "tool",
+      "judge": null
+    },
+    {
+      "hash": "d4feeefde6",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "当前环境查不到日志时，改查 default 环境，不要先按超保留期或不可用下结论",
+      "when_expr": "当前环境日志为空且准备按超保留期/不可用处理",
+      "why": "可查的日志被放在 default，只在当前环境查会把环境错位误判成日志已过期或缺失",
+      "lens": "index",
+      "category": "tool",
+      "judge": null
+    },
+    {
+      "hash": "751792e114",
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "查不到数据时，先扩展到其他租户/tenant 查询，确认是否落在错误租户",
+      "when_expr": "按目标租户查询为空、准备判定数据从未落库时",
+      "why": "数据可能已写进错误租户，限定目标租户的查询必然为空，会把已存在数据误判为未落库",
+      "lens": "logic",
+      "category": "debug",
+      "judge": null
+    },
+    {
+      "hash": "251c0f6fbe",
+      "exp": "e1",
+      "segment": "segment_029.md/verbatim",
+      "what": "将「惠管家修复发版」识别为内部固定发版类型；产物按 smartpos-svc-erp-chain-{版本} 对应的 POS 端处理",
+      "when_expr": "在发布单、提交信息或评论里看到「惠管家」/「惠管家修复发版」字样",
+      "why": "「惠管家」是项目内部代称，字面推不出产品线；不理解这层含义会把发布记录归错产品，影响版本与分支追溯",
+      "lens": "jargon",
+      "category": "business",
+      "judge": null
+    },
+    {
+      "hash": "661689f875",
+      "exp": "e1",
+      "segment": "segment_029.md/summary",
+      "what": "调用 search_workitems 时先传 category，再在返回结果里按 serialNumber 二次筛选，不能只依赖 serialNumber 过滤",
+      "when_expr": "想用 search_workitems 按 serialNumber 精确查一条工单/流水时",
+      "why": "search_workitems 内部只按 category 拼条件，serialNumber 参数不参与过滤；不传 category 会返回无关列表，直接依赖该参数会把非目标项当命中",
+      "lens": "logic",
+      "category": "tool",
+      "judge": null
+    },
+    {
+      "hash": "d7d4971b55",
+      "exp": "e1",
+      "segment": "segment_029.md/summary",
+      "what": "把 5.2 修复的工单纳入 5.0 审批单前，先在 5.0 分支搜索修复关键代码（如 ORDER BY checkout_at DESC），已存在就剔除",
+      "when_expr": "从 5.2 修复清单挑工单补进 5.0 发布/审批单时",
+      "why": "同一问题可能只存在于 5.2，5.0 早已有等价实现；按工单号照搬会把非 5.0 bug 带进审批，造成错误发布和返工",
+      "lens": "logic",
+      "category": "repo",
+      "judge": null
+    },
+    {
+      "hash": "8a70a2a412",
+      "exp": "e1",
+      "segment": "segment_029.md/summary",
+      "what": "判断修复是否还需 cherry-pick 到 5.0.x 时，先比对目标文件；若 5.0.x 已与修复分支完全一致，按已包含修复处理，不要标记可摘或执行 cherry-pick",
+      "when_expr": "准备把某修复摘到 5.0.x，且该修复涉及文件与 5.0.x 完全一致",
+      "why": "文件一致说明 5.0.x 已含该修复，cherry-pick 结果为空；继续按可摘操作会误判版本状态并浪费移植动作",
+      "lens": "logic",
+      "category": "repo",
+      "judge": null
+    }
+  ],
+  "blocked": [
+    {
+      "exp": "e1",
+      "segment": "segment_001.md/verbatim",
+      "what": "核查某单是否推送成功时，查 bas_interface_log 按 relation_id=sale_detail.id 且 type=0/status=1/error_count=0 过滤，并用 vip_store_history 对照金额；不要找推送报文字段",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=131>90"
+    },
+    {
+      "exp": "e1",
+      "segment": "segment_001.md/verbatim",
+      "what": "改用 MemberStoreServiceImpl.L364 的实时 branch.getName() 作为 branchName 来源，不再从 vip_trade_history.trade_branch_name 读快照值",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=113>90"
+    },
+    {
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "先核对目标分支是否已含相应修复；backport 提交按原始分支归属判定，并排除目标分支的 settings.gradle/project.properties/CHANGELOG。",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=91>90"
+    },
+    {
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "cherry-pick --continue 报 nothing to commit 时按该 pick 已丢失处理，依原 commit 逐文件手工重放，并用 git log 确认落地",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=91>90"
+    },
+    {
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "MSYS 下用 java -classpath gradle-wrapper.jar 直接调用 GradleWrapperMain，JAVA_HOME 指向 Windows JDK 路径",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=93>90 when=73>70"
+    },
+    {
+      "exp": "e1",
+      "segment": "segment_032.md/summary",
+      "what": "直接运行 `java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <tasks>`",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=94>90 when=80>70"
+    },
+    {
+      "exp": "e2",
+      "segment": "segment_015.md",
+      "what": "收到平台返回的截图或文件 OSS 临时链接后，立即下载到本地证据目录，不要等稍后统一收集",
+      "reason": "garbage-4-one-off",
+      "detail": "一次性标记：临时"
+    }
+  ],
+  "e3": {
+    "exp": "e3",
+    "policy": {
+      "what_max": 90,
+      "when_max": 70,
+      "why_max": 140,
+      "when_min": 10,
+      "sim_what_why": 0.75,
+      "verify_symbols": true,
+      "check_skill_covered": true
+    },
+    "negatives": [
+      {
+        "id": "N1",
+        "what": "多试几次就好了",
+        "garbage_class": "common-sense / one-off",
+        "ok": false,
+        "reason": "garbage-2-common-sense",
+        "detail": "通用常识前缀：多试几次",
+        "garbageFlag": true,
+        "skillCovered": false
+      },
+      {
+        "id": "N2",
+        "what": "遇到复杂问题多收集上下文",
+        "garbage_class": "common-sense / not-actionable",
+        "ok": false,
+        "reason": "garbage-6-missing-context",
+        "detail": "when 仅 9 字（<10，无法判定触发）",
+        "garbageFlag": true,
+        "skillCovered": false
+      },
+      {
+        "id": "N3",
+        "what": "超时就调大超时参数",
+        "garbage_class": "factual-error",
+        "ok": false,
+        "reason": "invalid-field",
+        "detail": "lens 非法：'tool'",
+        "garbageFlag": true,
+        "skillCovered": false
+      },
+      {
+        "id": "N4",
+        "what": "先沟通再动手",
+        "garbage_class": "user-preference / skill-covered",
+        "ok": false,
+        "reason": "skill-covered",
+        "detail": "category=process（交付流程由 skill 覆盖）",
+        "garbageFlag": false,
+        "skillCovered": true
+      },
+      {
+        "id": "N5",
+        "what": "本次改了 7 个文件、跑了 3 次测试",
+        "garbage_class": "dialogue-summary",
+        "ok": false,
+        "reason": "garbage-3-dialogue-summary",
+        "detail": "只复述过程：本次",
+        "garbageFlag": true,
+        "skillCovered": false
+      },
+      {
+        "id": "N6",
+        "what": "已经部署到 dev1 了",
+        "garbage_class": "one-off",
+        "ok": false,
+        "reason": "garbage-3-dialogue-summary",
+        "detail": "只复述过程：已经部署",
+        "garbageFlag": true,
+        "skillCovered": false
+      },
+      {
+        "id": "N7",
+        "what": "CHGJ-3735 涉及 3 笔共 34 元",
+        "garbage_class": "mixed-granularity",
+        "ok": false,
+        "reason": "garbage-7-mixed-granularity",
+        "detail": "case 明细进 what：涉及 3 笔",
+        "garbageFlag": true,
+        "skillCovered": false
+      },
+      {
+        "id": "N8",
+        "what": "只推个人 fork、不直推 origin",
+        "garbage_class": "skill-covered（不算垃圾但重复入库无收益）",
+        "ok": false,
+        "reason": "skill-covered",
+        "detail": "命中 skill 已覆盖的团队规范（重复入库无收益）",
+        "garbageFlag": false,
+        "skillCovered": true
+      }
+    ],
+    "golden": [
+      {
+        "idx": 0,
+        "lens": "logic",
+        "what": "上传流水后台查不到时，先比对同机同收银员相邻流水的落库分区，不要只查客户自己的库",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 1,
+        "lens": "index",
+        "what": "确认错写分区后，在该分区的 pos 表按 posId 查真实归属租户与门店号",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 2,
+        "lens": "logic",
+        "what": "跨租户错写的修复同时准备源库软删与目标库按原 payload 补录，一次提审批",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 3,
+        "lens": "logic",
+        "what": "客户报有销售但库存没扣时，按 tenant_id 查 store_account 的 branch_id 分布，而不是按门店号查",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 4,
+        "lens": "logic",
+        "what": "改库存台账归属后按 (goods_id, occur_at, id) 顺序重算 5 个结余列，不能只改 branch_id",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 5,
+        "lens": "index",
+        "what": "评估库存数据修复范围前先读 StoreComputeImpl，确认它写的是五张表",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 6,
+        "lens": "logic",
+        "what": "重放库存消息前先删除 bas_interface_log 中对应的防重记录",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 7,
+        "lens": "index",
+        "what": "手工投递 Redis Stream 后，用 XINFO STREAM 的 last-generated-id 判断投递，不要看 XLEN",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 8,
+        "lens": "logic",
+        "what": "批量重放前先投 1 条并核对台账与余量，确认后再放量",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 9,
+        "lens": "logic",
+        "what": "两条产品线各自新建了同名类时，按已发版修复逐个 cherry-pick，禁止全分支 merge",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 10,
+        "lens": "index",
+        "what": "需要让分支成为祖先但代码逐字节不变时，用 git merge -s ours",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 11,
+        "lens": "logic",
+        "what": "cherry-pick 冲突解决后要确认真的产生了提交，没有就手工重贴该次意图",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 12,
+        "lens": "index",
+        "what": "查 POS/ERP 生产业务日志用 devops 的 default 环境，不要用 www_ali",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 13,
+        "lens": "index",
+        "what": "在 Git Bash 里构建用 JAVA_HOME 下的 java 直调 gradle-wrapper.jar",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 14,
+        "lens": "index",
+        "what": "用 sp-devops 执行 SQL 时库名一律走 -d 参数，语句里不要带库名前缀",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 15,
+        "lens": "logic",
+        "what": "发布清单里判断工单能否进补丁版本，先确认它属于哪条版本线、目标线是否已含该修复",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      },
+      {
+        "idx": 16,
+        "lens": "jargon",
+        "what": "看到「可摘/不可摘」理解为「该工单能否移植到目标补丁线」",
+        "ok": true,
+        "reason": "",
+        "detail": ""
+      }
+    ],
+    "negatives_blocked": 8,
+    "negatives_total": 8,
+    "negatives_skill_covered": 2,
+    "golden_pass": 17,
+    "golden_total": 17
+  },
+  "review_side": {
+    "candidates": 32,
+    "blocked": 7
+  }
+}

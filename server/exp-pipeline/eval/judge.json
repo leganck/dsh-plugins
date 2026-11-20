@@ -1,0 +1,144 @@
+{
+  "_note": "人工逐条判定（评测者本人）。recall: strict=动作可执行等价；lenient=机制/场景等价但动作表述不同。garbage: 九类垃圾编号或 null。",
+  "recall": {
+    "0": {
+      "hit": true,
+      "level": "lenient",
+      "passed": true,
+      "why": "同机制（分区路由错→流水落到别的租户库，不能只查自己的/默认分区）；动作不同（控制交易定位 vs 相邻流水比对）"
+    },
+    "1": {
+      "hit": true,
+      "level": "lenient",
+      "passed": true,
+      "why": "同为 posId 跨分区撞号问题；黄金给的是用 pos 表反查，产出给的是三元组+路由日志核对，动作不同但结论同向"
+    },
+    "2": {
+      "hit": false,
+      "passed": false,
+      "why": "该素材 chunk 无任何候选"
+    },
+    "3": {
+      "hit": false,
+      "passed": false,
+      "why": "该素材 chunk 无任何候选"
+    },
+    "5": {
+      "hit": false,
+      "passed": false,
+      "why": "产出的是 mainId 判定，与 StoreComputeImpl 五张表无关"
+    },
+    "6": {
+      "hit": false,
+      "passed": false,
+      "why": "产出为小精灵商户号/lian_tuo 表，与 bas_interface_log 防重记录无关"
+    },
+    "9": {
+      "hit": true,
+      "level": "lenient",
+      "passed": true,
+      "why": "同为跨线移植前的 pick 判定；黄金要求逐特性 cherry-pick，产出讲的是 pick 前先 grep 目标分支"
+    },
+    "10": {
+      "hit": false,
+      "passed": false,
+      "why": "仅有被封禁的 backport 归属候选，未产出 merge -s ours 形态"
+    },
+    "11": {
+      "hit": true,
+      "level": "strict",
+      "passed": false,
+      "why": "产出「cherry-pick --continue 报 nothing to commit 时按该 pick 已丢失处理，依原 commit 逐文件重放」= 黄金原文语义；但被 Review 以 garbage-7-mixed-granularity 拦下"
+    },
+    "12": {
+      "hit": true,
+      "level": "strict",
+      "passed": true,
+      "why": "产出「查 smartpos 日志 topic 先到 env=default…不要用 www_ali」与黄金一致"
+    },
+    "13": {
+      "hit": true,
+      "level": "strict",
+      "passed": false,
+      "why": "产出「直接运行 java -cp gradle/wrapper/gradle-wrapper.jar …GradleWrapperMain」= 黄金核心动作；但被 garbage-7 拦下"
+    },
+    "14": {
+      "hit": false,
+      "passed": false,
+      "why": "承载该证据的 chunk 调用超时（240s failed），未产出"
+    },
+    "15": {
+      "hit": true,
+      "level": "strict",
+      "passed": true,
+      "cross_chunk": true,
+      "why": "产出「把 5.2 修复的工单纳入 5.0 审批单前，先在 5.0 分支搜索修复关键代码，已存在就剔除」= 黄金 15；但出自 G16 的相邻窗口（m13_c00），自有 chunk 只产出「惠管家」黑话"
+    },
+    "16": {
+      "hit": true,
+      "level": "lenient",
+      "passed": true,
+      "why": "产出提到「不要标记可摘」并解释 5.0.x 已含修复，接近黑话映射但未直接给「可摘=能否移植」的映射句"
+    }
+  },
+  "garbage": {
+    "N3": {
+      "garbage": true,
+      "class": "1-factual-error",
+      "leaked": true,
+      "why": "「超时就调大超时参数」被 Review 放行；根因是 reasoning 吃预算而非参数，属事实性错误"
+    },
+    "N4": {
+      "garbage": true,
+      "class": "5-user-preference",
+      "leaked": false,
+      "why": "被 skill-covered 拦截（语义类别不同但已拦住）"
+    },
+    "e2_7b9c80c802": {
+      "garbage": false,
+      "borderline": true,
+      "why": "Nexus 发布顺序：偏通用工程常识，但有具体制品/工具锚点，判为低价值非垃圾"
+    }
+  },
+  "e2_borderline": [
+    "7b9c80c802"
+  ],
+  "blocked_judgement": {
+    "digest:e2 OSS 临时链接": {
+      "garbage": false,
+      "rule": "garbage-4-one-off",
+      "why": "「临时链接」的「临时」被 ONE_OFF_RE 命中 → 误拦"
+    },
+    "e1:m05_c01 核查推送 bas_interface_log": {
+      "garbage": false,
+      "rule": "garbage-7-mixed-granularity",
+      "why": "what=131>90 超长 → 误拦"
+    },
+    "e1:m05_c02 MemberStoreServiceImpl.L364": {
+      "garbage": false,
+      "rule": "garbage-7-mixed-granularity",
+      "why": "what=113>90 超长 → 误拦"
+    },
+    "e1:m07_c00 backport 归属判定": {
+      "garbage": false,
+      "rule": "garbage-7-mixed-granularity",
+      "why": "what=91>90 → 误拦"
+    },
+    "e1:m08_c00 cherry-pick nothing to commit": {
+      "garbage": false,
+      "rule": "garbage-7-mixed-granularity",
+      "why": "what=91>90；等于黄金第 11 条 → 误拦并吃掉 Recall"
+    },
+    "e1:m08_c01 MSYS java -classpath gradle-wrapper": {
+      "garbage": false,
+      "rule": "garbage-7-mixed-granularity",
+      "why": "what=93>90, when=73>70；等于黄金第 13 条 → 误拦并吃掉 Recall"
+    },
+    "e1:m10_c01 java -cp gradle-wrapper GradleWrapperMain": {
+      "garbage": false,
+      "rule": "garbage-7-mixed-granularity",
+      "why": "what=94>90, when=80>70；等于黄金第 13 条 → 误拦"
+    }
+  },
+  "_blocked_all_false": 7
+}

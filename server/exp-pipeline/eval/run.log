@@ -1,0 +1,2 @@
+E2: digest 共 112 chunk，抽样 13 个（每 9 取 1）
+[01] digest__s00                  status=failed  64.4s cand=0 blocked=0 job_err=extract-failed:1/1

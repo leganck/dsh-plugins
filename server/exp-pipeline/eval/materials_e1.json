@@ -1,0 +1,425 @@
+[
+  {
+    "idx": 0,
+    "lens": "logic",
+    "what": "上传流水后台查不到时，先比对同机同收银员相邻流水的落库分区，不要只查客户自己的库",
+    "evidence_issue": "CHGJ-3943",
+    "evidence_quote": "分区 za4 正常；三笔上传被路由到 zb1，落进 tenant_id=140709",
+    "missing": false,
+    "material": "### [segment_032.md] Pending Jobs\n- Rewrite CHGJ-3943 analysis with the misrouting root cause** (wrong tenant) and re-sync ledger + git commit.\n- Post one business-readable conclusion comment on CHGJ-3943 (awaiting user approval).\n- Verify whether tenant 431912's normal partition is za4 (control sale at 16:39:41 found in `default-za4-smartpos-svc-erp-pos`) and why 3 uploads went to `default-zb1-smartpos-svc-erp-pos`.\n- Decide 5.2.3 disposition: MR !337 (6 ported fixes + `31a34cff` ours-merge bookkeeping commit) awaiting CI then merge **without squash**; then `5.2.3 → master` MR.\n- Optional: write `docs/版本号由来-plat与5.100.md`; register 5.1/5.100 line in ledger configs; SPLAT-5633 pending tenant confirmation.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Pending Jobs",
+      "hit_index": 2,
+      "hits": 3,
+      "anchors": [
+        "zb1",
+        "za4",
+        "upload"
+      ],
+      "lines": null,
+      "bullets": [
+        "Rewrite CHGJ-3943 analysis with the misrouting root cause** (wrong tenant) and re-sync ledger + git commit.",
+        "Post one business-readable conclusion comment on CHGJ-3943 (awaiting user approval).",
+        "Verify whether tenant 431912's normal partition is za4 (control sale at 16:39:41 found in `default-za4-smartpos-svc-erp-pos`) and why 3 uploads went to `default-zb1-smartpos-svc-erp-pos`.",
+        "Decide 5.2.3 disposition: MR !337 (6 ported fixes + `31a34cff` ours-merge bookkeeping commit) awaiting CI then merge **without squash**; then `5.2.3 → master` MR.",
+        "Optional: write `docs/版本号由来-plat与5.100.md`; register 5.1/5.100 line in ledger configs; SPLAT-5633 pending tenant confirmation."
+      ],
+      "matched": "Verify whether tenant 431912's normal partition is za4 (control sale at 16:39:41 found in `default-za4-smartpos-svc-erp-pos`) and why 3 uploads went to `default-zb1-smartpos-svc-erp-pos`."
+    }
+  },
+  {
+    "idx": 1,
+    "lens": "index",
+    "what": "确认错写分区后，在该分区的 pos 表按 posId 查真实归属租户与门店号",
+    "evidence_issue": "CHGJ-3943",
+    "evidence_quote": "zb1 库 pos 66112 → tenant 140709/门店 9016/机号 012；ti4 库同 id → 431912/55285/003",
+    "missing": false,
+    "material": "### [segment_032.md] Current Work\n- `pos` table collision confirmed: zb1 `pos id=66112 → tenant 140709, branch 9016, pos_code 012`; ti4 `pos id=66112 → tenant 431912, branch 55285, pos_code 003` (the customer's, per router pay logs `tenantId=431912, branchId=55285, posId=66112, posCode=003, tenantCode=61440144`).\n- Tenant 140709 (东吴面馆木渎店) has only 98 sales lifetime, 3 in Nov 2026 — exactly these three → wrongly routed dump.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Current Work",
+      "hit_index": 1,
+      "hits": 3,
+      "anchors": [
+        "66112",
+        "pos id=",
+        "ti4"
+      ],
+      "lines": null,
+      "bullets": [
+        "`pos` table collision confirmed: zb1 `pos id=66112 → tenant 140709, branch 9016, pos_code 012`; ti4 `pos id=66112 → tenant 431912, branch 55285, pos_code 003` (the customer's, per router pay logs `tenantId=431912, branchId=55285, posId=66112, posCode=003, tenantCode=61440144`).",
+        "Tenant 140709 (东吴面馆木渎店) has only 98 sales lifetime, 3 in Nov 2026 — exactly these three → wrongly routed dump."
+      ],
+      "matched": "`pos` table collision confirmed: zb1 `pos id=66112 → tenant 140709, branch 9016, pos_code 012`; ti4 `pos id=66112 → tenant 431912, branch 55285, pos_code 003` (the customer's, per router pay logs `ten"
+    }
+  },
+  {
+    "idx": 2,
+    "lens": "logic",
+    "what": "跨租户错写的修复同时准备源库软删与目标库按原 payload 补录，一次提审批",
+    "evidence_issue": "CHGJ-3943",
+    "evidence_quote": "zb1 软删 10 行 + za4 补录 10 行，预期 20 行",
+    "missing": false,
+    "material": "```\n**给单子的回复口径（一条，待你点头我再发）：**\n> POS 端三笔流水上传接口均返回成功（POS 日志有 SUCCESS 应答），但服务端落库环节静默失败，三笔在数据库中完全不存在（含软删记录）。同机前后单据与 004 机同时段均正常，可排除网络与支付方式问题；根因是上传落库代码对单行写入异常做了静默吞掉处理（重复键/字段超限），POS 被应答误导不再重传。由于 11-12 服务日志已超保留期，具体异常类型无法回溯。改进方向：落库失败改为显式失败+重传机制并加监控，另可按 POS 留存的 payload 走数据调整审批补录。\n要我现在把这条发到云效单上吗？\n````\n",
+    "provenance": {
+      "kind": "verbatim",
+      "segment": "segment_032.md",
+      "section": "Verbatim turns",
+      "hit_index": 11068,
+      "hits": 3,
+      "anchors": [
+        "软删",
+        "补录",
+        "审批"
+      ],
+      "lines": [
+        "```\n**给单子的回复口径（一条，待你点头我再发）：**\n> POS 端三笔流水上传接口均返回成功（POS 日志有 SUCCESS 应答），但服务端落库环节静默失败，三笔在数据库中完全不存在（含软删记录）。同机前后单据与 004 机同时段均正常，可排除网络与支付方式问题；根因是上传落库代码对单行写入异常做了静默吞掉处理（重复键/字段超限），POS 被应答误导不再重传。由于 11-12 服务日志已超保留期，具体异常类型无法回溯。改进方向：落库失败改为显式失败+重传机制并加监控，另可按 POS 留存的 payload 走数据调整审批补录。\n要我现在把这条发到云效单上吗？\n````"
+      ],
+      "bullets": [
+        "```",
+        "**给单子的回复口径（一条，待你点头我再发）：**",
+        "> POS 端三笔流水上传接口均返回成功（POS 日志有 SUCCESS 应答），但服务端落库环节静默失败，三笔在数据库中完全不存在（含软删记录）。同机前后单据与 004 机同时段均正常，可排除网络与支付方式问题；根因是上传落库代码对单行写入异常做了静默吞掉处理（重复键/字段超限），POS 被应答误导不再重传。由于 11-12 服务日志已超保留期，具体异常类型无法回溯。改进方向：落库失败改为显式失败+重传机制并加监控，另可按 POS 留存的 payload 走数据调整审批补录。",
+        "要我现在把这条发到云效单上吗？",
+        "````"
+      ],
+      "matched": "> POS 端三笔流水上传接口均返回成功（POS 日志有 SUCCESS 应答），但服务端落库环节静默失败，三笔在数据库中完全不存在（含软删记录）。同机前后单据与 004 机同时段均正常，可排除网络与支付方式问题；根因是上传落库代码对单行写入异常做了静默吞掉处理（重复键/字段超限），POS 被应答误导不再重传。由于 11-12 服务日志已超保留期，具体异常类型无法回溯。改进方向：落库失败改为显式失"
+    }
+  },
+  {
+    "idx": 3,
+    "lens": "logic",
+    "what": "客户报有销售但库存没扣时，按 tenant_id 查 store_account 的 branch_id 分布，而不是按门店号查",
+    "evidence_issue": "CHGJ-3955",
+    "evidence_quote": "11-13 全天 branchId=30840，11-12/11-14 都是 37219；30840 属另一租户 264828",
+    "missing": false,
+    "material": "189-            if (details != null && !details.isEmpty()) {\n190-                details.forEach(detail -> {\n191-                    // 组装库存任务\n192-                    stockList.add(JacksonUtil.obj2Json(this.saleStock(detail)));\n193-                    if (isScore) {\n",
+    "provenance": {
+      "kind": "verbatim",
+      "segment": "segment_027.md",
+      "section": "Verbatim turns",
+      "hit_index": 1300,
+      "hits": 1,
+      "anchors": [
+        "store_account",
+        "branchId=30840",
+        "库存"
+      ],
+      "lines": [
+        "189-            if (details != null && !details.isEmpty()) {\n190-                details.forEach(detail -> {\n191-                    // 组装库存任务\n192-                    stockList.add(JacksonUtil.obj2Json(this.saleStock(detail)));\n193-                    if (isScore) {"
+      ],
+      "bullets": [
+        "189-            if (details != null && !details.isEmpty()) {",
+        "190-                details.forEach(detail -> {",
+        "191-                    // 组装库存任务",
+        "192-                    stockList.add(JacksonUtil.obj2Json(this.saleStock(detail)));",
+        "193-                    if (isScore) {"
+      ],
+      "matched": "191-                    // 组装库存任务"
+    }
+  },
+  {
+    "idx": 4,
+    "lens": "logic",
+    "what": "改库存台账归属后按 (goods_id, occur_at, id) 顺序重算 5 个结余列，不能只改 branch_id",
+    "evidence_issue": "CHGJ-3955",
+    "evidence_quote": "30840 链结余 -1/-2/-3，37219 链 8→6；只改 branch_id 会让两链交错",
+    "missing": true,
+    "material": "",
+    "provenance": null
+  },
+  {
+    "idx": 5,
+    "lens": "index",
+    "what": "评估库存数据修复范围前先读 StoreComputeImpl，确认它写的是五张表",
+    "evidence_issue": "CHGJ-3955",
+    "evidence_quote": "store / store_account / store_batch_in / store_batch_out / goods_invoicing 五张",
+    "missing": false,
+    "material": "smartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\online\\OnlineGoodsService.java:973: goodsIds.add(goodsEntity.getMainId() == null ? goodsEntity.getId() : goodsEntity.getMainId());\nsmartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:96: if (goods.getMainId() != null && goods.getMainId() != 0) {\nsmartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:97: params.put(\"id\", goods.getMainId());\n",
+    "provenance": {
+      "kind": "verbatim",
+      "segment": "segment_013.md",
+      "section": "Verbatim turns",
+      "hit_index": 7020,
+      "hits": 1,
+      "anchors": [
+        "StoreComputeImpl"
+      ],
+      "lines": [
+        "smartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\online\\OnlineGoodsService.java:973: goodsIds.add(goodsEntity.getMainId() == null ? goodsEntity.getId() : goodsEntity.getMainId());\nsmartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:96: if (goods.getMainId() != null && goods.getMainId() != 0) {\nsmartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:97: params.put(\"id\", goods.getMainId());"
+      ],
+      "bullets": [
+        "smartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\online\\OnlineGoodsService.java:973: goodsIds.add(goodsEntity.getMainId() == null ? goodsEntity.getId() : goodsEntity.getMainId());",
+        "smartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:96: if (goods.getMainId() != null && goods.getMainId() != 0) {",
+        "smartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:97: params.put(\"id\", goods.getMainId());"
+      ],
+      "matched": "smartpos-erp-pos\\src\\main\\java\\smartpos\\erp\\pos\\service\\supply\\store\\impl\\StoreComputeImpl.java:96: if (goods.getMainId() != null && goods.getMainId() != 0) {"
+    }
+  },
+  {
+    "idx": 6,
+    "lens": "logic",
+    "what": "重放库存消息前先删除 bas_interface_log 中对应的防重记录",
+    "evidence_issue": "CHGJ-3955",
+    "evidence_quote": "接口日志 452 条、status 全 1，必须先清理否则重放被「重复数据」拦",
+    "missing": false,
+    "material": "3. **门店↔小精灵是\"一店一商户号\"**：61832 ↔ `merchant_no=EW_N6089990267`（app_id EW_N6298938197），该绑定 **2023-11-08 14:18:53 建档后从未更新**，而 `branch.last_update_at=2025-09-04 18:56:39`（裴西洲）——绑定行早于改名 22 个月。另：61832 销售起点 2025-08-23、会员消费起点 2025-09-07，但小精灵商户号 2023-11-08 就建好了（建号早于开业）。\n- **A 6/13 推了什么**：只能到\"推送发生过且成功\"——`bas_interface_log` 3 条（relation_id = 该单 3 个 sale_detail.id，11:55:32，type=0/status=1/error_count=0）+ `vip_store_history` 1 条（id 79278286，45.000，11:55:30）。**无报文字段**；`lian_tuo_*` 只有 `lian_tuo_branch` 一张表（无 member/record/log）；无 CRM 推送日志表。\n- **B branchName 来源**：见上第 2 点，附文件:行号完整清单（VipBaseServiceImpl.L1103-1117 会写 `vip_trade_history.trade_branch_name` 快照，但本租户该表 0 行；MemberStoreServiceImpl.L364 是实时 `branch.getName()`）。\n",
+    "provenance": {
+      "kind": "verbatim",
+      "segment": "segment_001.md",
+      "section": "Verbatim turns",
+      "hit_index": 5829,
+      "hits": 1,
+      "anchors": [
+        "bas_interface_log"
+      ],
+      "lines": [
+        "3. **门店↔小精灵是\"一店一商户号\"**：61832 ↔ `merchant_no=EW_N6089990267`（app_id EW_N6298938197），该绑定 **2023-11-08 14:18:53 建档后从未更新**，而 `branch.last_update_at=2025-09-04 18:56:39`（裴西洲）——绑定行早于改名 22 个月。另：61832 销售起点 2025-08-23、会员消费起点 2025-09-07，但小精灵商户号 2023-11-08 就建好了（建号早于开业）。\n- **A 6/13 推了什么**：只能到\"推送发生过且成功\"——`bas_interface_log` 3 条（relation_id = 该单 3 个 sale_detail.id，11:55:32，type=0/status=1/error_count=0）+ `vip_store_history` 1 条（id 79278286，45.000，11:55:30）。**无报文字段**；`lian_tuo_*` 只有 `lian_tuo_branch` 一张表（无 member/record/log）；无 CRM 推送日志表。\n- **B branchName 来源**：见上第 2 点，附文件:行号完整清单（VipBaseServiceImpl.L1103-1117 会写 `vip_trade_history.trade_branch_name` 快照，但本租户该表 0 行；MemberStoreServiceImpl.L364 是实时 `branch.getName()`）。"
+      ],
+      "bullets": [
+        "3. **门店↔小精灵是\"一店一商户号\"**：61832 ↔ `merchant_no=EW_N6089990267`（app_id EW_N6298938197），该绑定 **2023-11-08 14:18:53 建档后从未更新**，而 `branch.last_update_at=2025-09-04 18:56:39`（裴西洲）——绑定行早于改名 22 个月。另：61832 销售起点 2025-08-23、会员消费起点 2025-09-07，但小精灵商户号 2023-11-08 就建好了（建号早于开业）。",
+        "- **A 6/13 推了什么**：只能到\"推送发生过且成功\"——`bas_interface_log` 3 条（relation_id = 该单 3 个 sale_detail.id，11:55:32，type=0/status=1/error_count=0）+ `vip_store_history` 1 条（id 79278286，45.000，11:55:30）。**无报文字段**；`lian_tuo_*` 只有 `lian_tuo_branch` 一张表（无 member/record/log）；无 CRM 推送日志表。",
+        "- **B branchName 来源**：见上第 2 点，附文件:行号完整清单（VipBaseServiceImpl.L1103-1117 会写 `vip_trade_history.trade_branch_name` 快照，但本租户该表 0 行；MemberStoreServiceImpl.L364 是实时 `branch.getName()`）。"
+      ],
+      "matched": "- **A 6/13 推了什么**：只能到\"推送发生过且成功\"——`bas_interface_log` 3 条（relation_id = 该单 3 个 sale_detail.id，11:55:32，type=0/status=1/error_count=0）+ `vip_store_history` 1 条（id 79278286，45.000，11:55:30）。**无报文字段**；`li"
+    }
+  },
+  {
+    "idx": 7,
+    "lens": "index",
+    "what": "手工投递 Redis Stream 后，用 XINFO STREAM 的 last-generated-id 判断投递，不要看 XLEN",
+    "evidence_issue": "CHGJ-3955",
+    "evidence_quote": "XLEN 不增长正常；要看 XINFO STREAM entries-added / last-generated-id 与消费组 last-delivered-id",
+    "missing": true,
+    "material": "",
+    "provenance": null
+  },
+  {
+    "idx": 8,
+    "lens": "logic",
+    "what": "批量重放前先投 1 条并核对台账与余量，确认后再放量",
+    "evidence_issue": "CHGJ-3955",
+    "evidence_quote": "先只投这 1 条，30 秒内可在日志和库看到结果；对了再投剩下 451 条",
+    "missing": true,
+    "material": "",
+    "provenance": null
+  },
+  {
+    "idx": 9,
+    "lens": "logic",
+    "what": "两条产品线各自新建了同名类时，按已发版修复逐个 cherry-pick，禁止全分支 merge",
+    "evidence_issue": "SPLAT-5627",
+    "evidence_quote": "9 文件 16 冲突解决后 ~200 编译错误（SpecDescFormatter、PackageFeeRecalculateService 同路径）",
+    "missing": false,
+    "material": "### [segment_032.md] Errors and Fixes\n- Full-branch merge of master-5.0.x into 5.2.3 → 9 files/16 conflicts resolved but **~200 compile errors** (156 找不到符号, 30 OrderSourceEnum 构造器, 2 duplicate `rewriteDetailPackageFees`) because both lines independently created `SpecDescFormatter`, `PackageFeeRecalculateService(+Impl+Test)` at identical paths. `git merge --abort`; switched to per-feature cherry-pick.\n- `git cherry-pick 719a003b` (CHGJ-3693) looked needed but **5.2.3's `OrderPrintTicketAssembler` already calls `SpecDescFormatter.format(...)`** → skip; an earlier resolve wrongly dropped it, worktree reset.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Errors and Fixes",
+      "hit_index": 1,
+      "hits": 3,
+      "anchors": [
+        "200 compile",
+        "SpecDescFormatter",
+        "merge --abort"
+      ],
+      "lines": null,
+      "bullets": [
+        "Full-branch merge of master-5.0.x into 5.2.3 → 9 files/16 conflicts resolved but **~200 compile errors** (156 找不到符号, 30 OrderSourceEnum 构造器, 2 duplicate `rewriteDetailPackageFees`) because both lines independently created `SpecDescFormatter`, `PackageFeeRecalculateService(+Impl+Test)` at identical paths. `git merge --abort`; switched to per-feature cherry-pick.",
+        "`git cherry-pick 719a003b` (CHGJ-3693) looked needed but **5.2.3's `OrderPrintTicketAssembler` already calls `SpecDescFormatter.format(...)`** → skip; an earlier resolve wrongly dropped it, worktree reset."
+      ],
+      "matched": "Full-branch merge of master-5.0.x into 5.2.3 → 9 files/16 conflicts resolved but **~200 compile errors** (156 找不到符号, 30 OrderSourceEnum 构造器, 2 duplicate `rewriteDetailPackageFees`) because both lines "
+    }
+  },
+  {
+    "idx": 10,
+    "lens": "index",
+    "what": "需要让分支成为祖先但代码逐字节不变时，用 git merge -s ours",
+    "evidence_issue": "SPLAT-5627",
+    "evidence_quote": "31a34cff merge -s ours origin/master-5.0.x，tree 逐字节一致，5.0.x 成为祖先",
+    "missing": false,
+    "material": "### [segment_032.md] Critical Context\n- Not ported deliberately: CHGJ-3494/3638/3654 (5.2.3 already has), SPLAT-5316 backport `c7f63424` (5.2.3 is the original), 5.0-line settings.gradle/project.properties/CHANGELOG.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Critical Context",
+      "hit_index": 0,
+      "hits": 2,
+      "anchors": [
+        "-s ours",
+        "31a34cff"
+      ],
+      "lines": null,
+      "bullets": [
+        "Not ported deliberately: CHGJ-3494/3638/3654 (5.2.3 already has), SPLAT-5316 backport `c7f63424` (5.2.3 is the original), 5.0-line settings.gradle/project.properties/CHANGELOG."
+      ],
+      "matched": "crm-order 5.2.3 port result (pushed to fork, MR **!337** “移植 master-5.0.x（v5.0.23）已发版修复到 5.2.3” → target `5.2.3` in project 572): `63fec4f7` SPLAT-5627 self-heal, `ad9e8d0d` CHGJ-3700, `61c10f2c` CHGJ"
+    }
+  },
+  {
+    "idx": 11,
+    "lens": "logic",
+    "what": "cherry-pick 冲突解决后要确认真的产生了提交，没有就手工重贴该次意图",
+    "evidence_issue": "SPLAT-5627",
+    "evidence_quote": "resolve 等于 HEAD 时 nothing to commit，pick 被静默丢弃",
+    "missing": false,
+    "material": "### [segment_032.md] Errors and Fixes\n- `git cherry-pick 719a003b` (CHGJ-3693) looked needed but **5.2.3's `OrderPrintTicketAssembler` already calls `SpecDescFormatter.format(...)`** → skip; an earlier resolve wrongly dropped it, worktree reset.\n- `git cherry-pick --continue` with a resolve equal to HEAD → “nothing to commit”, pick silently dropped; fixed by re-applying intent manually per file.\n- `gradlew` in MSYS: `./gradlew` → exit 126; `sh ./gradlew` → path mangled to `D;/Code/...`; `cmd //c run.bat` opened interactive shell; **working form: `JAVA_HOME=C:/Users/leganck/.jdks/azul-21.0.11; \"$JAVA_HOME/bin/java\" -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <tasks> --offline --console=plain`**.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Errors and Fixes",
+      "hit_index": 3,
+      "hits": 1,
+      "anchors": [
+        "nothing to commit"
+      ],
+      "lines": null,
+      "bullets": [
+        "`git cherry-pick 719a003b` (CHGJ-3693) looked needed but **5.2.3's `OrderPrintTicketAssembler` already calls `SpecDescFormatter.format(...)`** → skip; an earlier resolve wrongly dropped it, worktree reset.",
+        "`git cherry-pick --continue` with a resolve equal to HEAD → “nothing to commit”, pick silently dropped; fixed by re-applying intent manually per file.",
+        "`gradlew` in MSYS: `./gradlew` → exit 126; `sh ./gradlew` → path mangled to `D;/Code/...`; `cmd //c run.bat` opened interactive shell; **working form: `JAVA_HOME=C:/Users/leganck/.jdks/azul-21.0.11; \"$JAVA_HOME/bin/java\" -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <tasks> --offline --console=plain`**."
+      ],
+      "matched": "`git cherry-pick --continue` with a resolve equal to HEAD → “nothing to commit”, pick silently dropped; fixed by re-applying intent manually per file."
+    }
+  },
+  {
+    "idx": 12,
+    "lens": "index",
+    "what": "查 POS/ERP 生产业务日志用 devops 的 default 环境，不要用 www_ali",
+    "evidence_issue": "",
+    "evidence_quote": "日志在 default 环境（44 主题）：default-<group>-smartpos-svc-erp-pos",
+    "missing": false,
+    "material": "### [segment_032.md] Key Technical Concepts\n- Log topics live in env `default` (44 topics), NOT `www_ali`(17 topics, pos topics there contain only lettuce heartbeats).** Naming: `default-<group>-smartpos-svc-erp-pos|-erp-chain|-router|-router-app|-router-o2o|-web-erp|-web-b2c|-o2o-wx|-saas-business|...`; groups: za1..za5, zb1, zd1, ze1, zf1, zg1, z1, z2, z3, z5, z0, global.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Key Technical Concepts",
+      "hit_index": 2,
+      "hits": 3,
+      "anchors": [
+        "default",
+        "www_ali",
+        "44 topics"
+      ],
+      "lines": null,
+      "bullets": [
+        "Log topics live in env `default` (44 topics), NOT `www_ali`(17 topics, pos topics there contain only lettuce heartbeats).** Naming: `default-<group>-smartpos-svc-erp-pos|-erp-chain|-router|-router-app|-router-o2o|-web-erp|-web-b2c|-o2o-wx|-saas-business|...`; groups: za1..za5, zb1, zd1, ze1, zf1, zg1, z1, z2, z3, z5, z0, global."
+      ],
+      "matched": "Log topics live in env `default` (44 topics), NOT `www_ali`(17 topics, pos topics there contain only lettuce heartbeats).** Naming: `default-<group>-smartpos-svc-erp-pos|-erp-chain|-router|-router-app"
+    }
+  },
+  {
+    "idx": 13,
+    "lens": "index",
+    "what": "在 Git Bash 里构建用 JAVA_HOME 下的 java 直调 gradle-wrapper.jar",
+    "evidence_issue": "",
+    "evidence_quote": "\"$JAVA_HOME/bin/java\" -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <task> --offline",
+    "missing": false,
+    "material": "### [segment_032.md] Errors and Fixes\n- `git cherry-pick --continue` with a resolve equal to HEAD → “nothing to commit”, pick silently dropped; fixed by re-applying intent manually per file.\n- `gradlew` in MSYS: `./gradlew` → exit 126; `sh ./gradlew` → path mangled to `D;/Code/...`; `cmd //c run.bat` opened interactive shell; **working form: `JAVA_HOME=C:/Users/leganck/.jdks/azul-21.0.11; \"$JAVA_HOME/bin/java\" -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <tasks> --offline --console=plain`**.\n- checkstyle ImportOrder warning: `smartpos.core.redis.PartitionStringRedisTemplate` must sort **before** `smartpos.crm.*` (core < crm); fixed → 0 warnings.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Errors and Fixes",
+      "hit_index": 4,
+      "hits": 3,
+      "anchors": [
+        "gradle-wrapper",
+        "126",
+        "JAVA_HOME"
+      ],
+      "lines": null,
+      "bullets": [
+        "`git cherry-pick --continue` with a resolve equal to HEAD → “nothing to commit”, pick silently dropped; fixed by re-applying intent manually per file.",
+        "`gradlew` in MSYS: `./gradlew` → exit 126; `sh ./gradlew` → path mangled to `D;/Code/...`; `cmd //c run.bat` opened interactive shell; **working form: `JAVA_HOME=C:/Users/leganck/.jdks/azul-21.0.11; \"$JAVA_HOME/bin/java\" -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain <tasks> --offline --console=plain`**.",
+        "checkstyle ImportOrder warning: `smartpos.core.redis.PartitionStringRedisTemplate` must sort **before** `smartpos.crm.*` (core < crm); fixed → 0 warnings."
+      ],
+      "matched": "`gradlew` in MSYS: `./gradlew` → exit 126; `sh ./gradlew` → path mangled to `D;/Code/...`; `cmd //c run.bat` opened interactive shell; **working form: `JAVA_HOME=C:/Users/leganck/.jdks/azul-21.0.11; \""
+    }
+  },
+  {
+    "idx": 14,
+    "lens": "index",
+    "what": "用 sp-devops 执行 SQL 时库名一律走 -d 参数，语句里不要带库名前缀",
+    "evidence_issue": "",
+    "evidence_quote": "执行 sql 越权…请不要带数据库前缀",
+    "missing": false,
+    "material": "### [segment_032.md] Errors and Fixes\n- checkstyle ImportOrder warning: `smartpos.core.redis.PartitionStringRedisTemplate` must sort **before** `smartpos.crm.*` (core < crm); fixed → 0 warnings.\n- `ipconfig //all` mangled by MSYS → use `MSYS_NO_PATHCONV=1 ipconfig /all`.\n- devops `sql` refuses cross-DB prefixes (`执行sql越权…请不要带数据库前缀`) and `SHOW COLUMNS`; use `sql tables -e ... -d ...` and `INFORMATION_SCHEMA`-free probing via `SELECT *` + `--json`.\n- `sql exec ... --all` is parsed as SQL token (error `token ALL`); `logs query --help` requires `-e/-g/-a`.\n- Earlier wrong conclusions corrected by user: (a) “日志超保留期/不可用” → logs exist but in **default** env; (b) for CHGJ-3943 “数据从未落库” → **data exists, in the wrong tenant**.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_032.md",
+      "section": "Errors and Fixes",
+      "hit_index": 7,
+      "hits": 3,
+      "anchors": [
+        "数据库前缀",
+        "越权",
+        "SHOW COLUMNS"
+      ],
+      "lines": null,
+      "bullets": [
+        "checkstyle ImportOrder warning: `smartpos.core.redis.PartitionStringRedisTemplate` must sort **before** `smartpos.crm.*` (core < crm); fixed → 0 warnings.",
+        "`ipconfig //all` mangled by MSYS → use `MSYS_NO_PATHCONV=1 ipconfig /all`.",
+        "devops `sql` refuses cross-DB prefixes (`执行sql越权…请不要带数据库前缀`) and `SHOW COLUMNS`; use `sql tables -e ... -d ...` and `INFORMATION_SCHEMA`-free probing via `SELECT *` + `--json`.",
+        "`sql exec ... --all` is parsed as SQL token (error `token ALL`); `logs query --help` requires `-e/-g/-a`.",
+        "Earlier wrong conclusions corrected by user: (a) “日志超保留期/不可用” → logs exist but in **default** env; (b) for CHGJ-3943 “数据从未落库” → **data exists, in the wrong tenant**."
+      ],
+      "matched": "devops `sql` refuses cross-DB prefixes (`执行sql越权…请不要带数据库前缀`) and `SHOW COLUMNS`; use `sql tables -e ... -d ...` and `INFORMATION_SCHEMA`-free probing via `SELECT *` + `--json`."
+    }
+  },
+  {
+    "idx": 15,
+    "lens": "logic",
+    "what": "发布清单里判断工单能否进补丁版本，先确认它属于哪条版本线、目标线是否已含该修复",
+    "evidence_issue": "CHGJ-3735",
+    "evidence_quote": "CHGJ-3735/SPLAT-5584 只属 5.2 线且 5.0.x 已含修复，必须从 5.0 补丁清单剔除",
+    "missing": false,
+    "material": "[tool-call: ops_bash] {\"command\":\"cd /d/work/smartpos-delivery-ledger && PYTHONIOENCODING=utf-8 python - << 'PY'\\nimport io, json\\n\\ndraft = r'''# 产品迭代发版上线审批 · 完整草稿（v5.0.57）\\n\\n- 模板：产品迭代发版上线审批（`PROC-5355B765-EEC4-4A43-991A-91C8FE5D7DD3`）\\n- 参照样例：**smartpos-svc-erp-chain-5.0.55**（2026-11-10 已审批通过，同产品线修复发版）\\n- 目标：ERP 主链 5.0 正式线（production）v5.0.57\\n- 更新：2026-11-17 14:15（加入 SPLAT-5316 backport；移除不适用于 5.0 的 CHGJ-3735/SPLAT-5584）\\n\\n## 一、历史修复发版是怎么提交的（erp-chain 5.0.55 原文）\\n\\n```text\\n类型             惠管家修复发版\\n产品             smartpos-svc-erp-chain-5.0.55\\n是否存在依赖版本   不存在\\n发版影响范围       [\\\"POS端\\\"]\\n发版影响内容       POS 商品资料下载不完整修复。促销增量下载时后台报的条数和实际下发条数\\n                  对不齐（CHGJ-3802/3807/3808）；资料分页没有固定排序，翻页会重复或\\n                  漏行，终端插入失败（CHGJ-3804）。本次把促销计数和分页对齐，并给资料\\n                  分页补上按主键排序。\\n上线计划  \n",
+    "provenance": {
+      "kind": "verbatim",
+      "segment": "segment_029.md",
+      "section": "Verbatim turns",
+      "hit_index": 10524,
+      "hits": 2,
+      "anchors": [
+        "5.2 线",
+        "补丁清单",
+        "CHGJ-3735"
+      ],
+      "lines": [
+        "[tool-call: ops_bash] {\"command\":\"cd /d/work/smartpos-delivery-ledger && PYTHONIOENCODING=utf-8 python - << 'PY'\\nimport io, json\\n\\ndraft = r'''# 产品迭代发版上线审批 · 完整草稿（v5.0.57）\\n\\n- 模板：产品迭代发版上线审批（`PROC-5355B765-EEC4-4A43-991A-91C8FE5D7DD3`）\\n- 参照样例：**smartpos-svc-erp-chain-5.0.55**（2026-11-10 已审批通过，同产品线修复发版）\\n- 目标：ERP 主链 5.0 正式线（production）v5.0.57\\n- 更新：2026-11-17 14:15（加入 SPLAT-5316 backport；移除不适用于 5.0 的 CHGJ-3735/SPLAT-5584）\\n\\n## 一、历史修复发版是怎么提交的（erp-chain 5.0.55 原文）\\n\\n```text\\n类型             惠管家修复发版\\n产品             smartpos-svc-erp-chain-5.0.55\\n是否存在依赖版本   不存在\\n发版影响范围       [\\\"POS端\\\"]\\n发版影响内容       POS 商品资料下载不完整修复。促销增量下载时后台报的条数和实际下发条数\\n                  对不齐（CHGJ-3802/3807/3808）；资料分页没有固定排序，翻页会重复或\\n                  漏行，终端插入失败（CHGJ-3804）。本次把促销计数和分页对齐，并给资料\\n                  分页补上按主键排序。\\n上线计划  "
+      ],
+      "bullets": [
+        "[tool-call: ops_bash] {\"command\":\"cd /d/work/smartpos-delivery-ledger && PYTHONIOENCODING=utf-8 python - << 'PY'\\nimport io, json\\n\\ndraft = r'''# 产品迭代发版上线审批 · 完整草稿（v5.0.57）\\n\\n- 模板：产品迭代发版上线审批（`PROC-5355B765-EEC4-4A43-991A-91C8FE5D7DD3`）\\n- 参照样例：**smartpos-svc-erp-chain-5.0.55**（2026-11-10 已审批通过，同产品线修复发版）\\n- 目标：ERP 主链 5.0 正式线（production）v5.0.57\\n- 更新：2026-11-17 14:15（加入 SPLAT-5316 backport；移除不适用于 5.0 的 CHGJ-3735/SPLAT-5584）\\n\\n## 一、历史修复发版是怎么提交的（erp-chain 5.0.55 原文）\\n\\n```text\\n类型             惠管家修复发版\\n产品             smartpos-svc-erp-chain-5.0.55\\n是否存在依赖版本   不存在\\n发版影响范围       [\\\"POS端\\\"]\\n发版影响内容       POS 商品资料下载不完整修复。促销增量下载时后台报的条数和实际下发条数\\n                  对不齐（CHGJ-3802/3807/3808）；资料分页没有固定排序，翻页会重复或\\n                  漏行，终端插入失败（CHGJ-3804）。本次把促销计数和分页对齐，并给资料\\n                  分页补上按主键排序。\\n上线计划          审批通过后低峰部署\\n修复版本性质       普通迭代修复\\n是否有遗留或风险    否\\n迭代特性           修复 CHGJ-3802/3807/3808 促销增量下载 Count 与分页不一致；修复\\n                  CHGJ-3804 及同类资料分页缺少 ORDER BY 导致翻页重复\\n                  （ERP POS 5.0.35 已包含在 ERP Chain 5.0.55 中）。\\n部署清单           1. smartpos-svc-erp-chain-5.0.55.jar\\n```\\n\\n关键口径：**部署清单只写包名、不写生产实例**；模块版本用「已包含在 ERP Chain 中」表述，不单列依赖；风险统一填「否」。\\n\\n## 二、本次 v5.0.57 完整草稿\\n\\n| 字段 | 取值 |\\n|---|---|\\n| 类型 | `惠管家修复发版` |\\n| 产品 | `smartpos-svc-erp-chain-5.0.57` |\\n| 是否存在依赖版本 | `不存在` |\\n| 发版影响范围 | `[\\\"POS端\\\", \\\"页面端\\\"]` |\\n| 上线计划 | `审批通过后低峰部署` |\\n| 修复版本性质 | `普通迭代修复` |\\n| 是否有遗留或风险问题 | `否` |\\n\\n### 发版影响内容\\n\\n```text\\nPOS 扫码点餐、支付结账与报表修复。扫码点餐：先付后吃同一张桌的历史残留订单会一直挡住\\n新顾客扫码，本次给先付共享查询加 2 小时时间窗、建单时自动关闭超期未支付单\\n（SPLAT-5627）；小程序结账可在支付时切换堂食/店内自提/外卖，按新就餐方式重算包装费\\n（SPLAT-5316）；云打印口味重复选择不再重复罗列、配送单补上门牌号、打印完成回写不再\\n覆盖支付状态（CHGJ-3693/3494/3875）；报表：选上级区域查不到下级门店、选了机构后区域\\n条件失效（SPLAT-5595~5598），营业概况漏统计门店通桌台结账（CHGJ-3639）；桌台码下载错图\\n（CHGJ-3761）；必点商品状态变更后 POS 不实时刷新（ZJEG-4611）；储值整笔退后冲正误报\\n（CHGJ-3700）；门店通流水实收少计（CHGJ-3638）；金额商品改价小票单价显示负数\\n（CHGJ-3731）。\\n```\\n\\n### 迭代特性\\n\\n```text\\n1. 修复 SPLAT-5627 先付后吃同桌历史残留订单阻塞新顾客扫码，先付共享查询加 2 小时时间窗、\\n   建单时自动关闭超期未支付扫码单；\\n2. 新增 SPLAT-5316 结账支持按请求切换就餐方式：小程序在线支付与 POS 支付可携带 orderMode，\\n   切换堂食/店内自提/外卖时就地重算明细包装费再进入促销计算（backport 自 5.2 线）；\\n3. 修复 SPLAT-5595/5596/5597/5598 报表区域与机构组合过滤：选上级区域查不到下级门店、\\n   选择机构后区域条件失效，统一改为「区域子树 ∩ 机构」；\\n4. 修复 CHGJ-3875 云打印完成回写用打印前快照覆盖支付状态，导致惠支付记录已付、订单显示\\n   未付；修复 CHGJ-3693 口味重复选择打印重复罗列、CHGJ-3494 配送单不打印门牌号；\\n5. 修复 CHGJ-3639 营业概况不统计门店通桌台结账；\\n6. 修复 CHGJ-3700 储值整笔退后冲正误报金额超限、CHGJ-3638 门店通流水实收少计、\\n   CHGJ-3731 金额商品改价小票单价显示负数；\\n7. 修复 CHGJ-3761 桌台码缓存按编码命中旧图、ZJEG-4611 必点商品方案状态变更未推送 POS。\\n   （ERP POS 5.0.37、CRM Order 5.0.23、CRM Policy 5.0.17 已包含在 ERP Chain 5.0.57 中）\\n```\\n\\n### 部署清单\\n\\n```text\\n1. smartpos-svc-erp-chain-5.0.57.jar\\n```\\n\\n## 三、本次发版包含的提交\\n\\n| 仓库 | 版本 | 关键提交 |\\n|---|---|---|\\n| smartpos-crm-policy | 5.0.17 | f7ef0220 CHGJ-3700 储值冲正退满判断 |\\n| smartpos-crm-order | 5.0.23 | 8bb12823 SPLAT-5627；719a003b CHGJ-3693；b8965282 CHGJ-3494；4fb97e53 CHGJ-3700；49da01a2 CHGJ-3731；0b92dcb4 CHGJ-3638；69072e10 CHGJ-3875；ac3548fb @Lazy 修复；**c7f63424 SPLAT-5316 backport** |\\n| smartpos-erp-pos | 5.0.37 | 0f9c84140 SPLAT-5595~5598；dc09124c6+149cbe7e6 CHGJ-3761；ecee58f7a CHGJ-3639；8dbf96e2a ZJEG-4611 |\\n| smartpos-svc-erp-chain | 5.0.57 | 版本号与依赖锁定 |\\n\\n## 四、dev1 验证状态\\n\\n```text\\n✅ 2026-11-17 14:09:36 部署 5.0.57-SNAPSHOT.jar → status=4 部署完成，程序已启动\\n✅ 14:12:18 Tomcat started on port 8080，context path /zd1/erp\\n✅ 启动后无 APPLICATION FAILED TO START、无 Bean 循环\\n待验证：SPLAT-5316 支付切换就餐方式（堂食↔自提包装费变化）\\n待验证：其余 7 组修复回归\\n```\\n\\n## 五、提交前待办\\n\\n```text\\n1. dev1 验证通过（含 SPLAT-5316 支付切换就餐方式场景）\\n2. 各仓 hotfix 分支合主线：\\n   crm-policy hotfix/5.0.17 → main\\n   crm-order  hotfix/5.0.23 → master-5.0.x\\n   erp-pos    hotfix/5.0.37 → main-5.0.x\\n   erp-chain  hotfix/5.0.57 → main-5.0.x\\n3. 打 tag：v5.0.17 / v5.0.23 / v5.0.37 / v5.0.57\\n4. tag 后由流水线产出正式包到 release 共享目录（不需人工打包）\\n5. 提交本审批\\n```\\n\\n> 审批通过 ≠ 已发版；发版判据是主线 tag。\\n'''\\np = r'D:\\\\work\\\\smartpos-delivery-ledger\\\\releases\\\\2026-11\\\\5.0.57-发版审批草稿.md'\\nio.open(p, 'w', encoding='utf-8', newline='').write(draft)\\n\\nfv = {\\n    \\\"类型\\\": \\\"惠管家修复发版\\\",\\n    \\\"产品\\\": \\\"smartpos-svc-erp-chain-5.0.57\\\",\\n    \\\"是否存在依赖版本\\\": \\\"不存在\\\",\\n    \\\"发版影响范围\\\": json.dumps([\\\"POS端\\\", \\\"页面端\\\"], ensure_ascii=False),\\n    \\\"发版影响内容\\\": \\\"POS 扫码点餐、支付结账与报表修复。扫码点餐：先付后吃同一张桌的历史残留订单会一直挡住新顾客扫码，本次给先付共享查询加 2 小时时间窗、建单时自动关闭超期未支付单（SPLAT-5627）；小程序结账可在支付时切换堂食/店内自提/外卖，按新就餐方式重算包装费（SPLAT-5316）；云打印口味重复选择不再重复罗列、配送单补上门牌号、打印完成回写不再覆盖支付状态（CHGJ-3693/3494/3875）；报表：选上级区域查不到下级门店、选了机构后区域条件失效（SPLAT-5595~5598），营业概况漏统计门店通桌台结账（CHGJ-3639）；桌台码下载错图（CHGJ-3761）；必点商品状态变更后 POS 不实时刷新（ZJEG-4611）；储值整笔退后冲正误报（CHGJ-3700）；门店通流水实收少计（CHGJ-3638）；金额商品改价小票单价显示负数（CHGJ-3731）。\\\",\\n    \\\"上线计划\\\": \\\"审批通过后低峰部署\\\",\\n    \\\"修复版本性质\\\": \\\"普通迭代修复\\\",\\n    \\\"是否有遗留或风险问题\\\": \\\"否\\\",\\n    \\\"迭代特性\\\": \\\"\\\"\\\"1. 修复 SPLAT-5627 先付后吃同桌历史残留订单阻塞新顾客扫码，先付共享查询加 2 小时时间窗、建单时自动关闭超期未支付扫码单；\\n2. 新增 SPLAT-5316 结账支持按请求切换就餐方式：小程序在线支付与 POS 支付可携带 orderMode，切换堂食/店内自提/外卖时就地重算明细包装费再进入促销计算（backport 自 5.2 线）；\\n3. 修复 SPLAT-5595/5596/5597/5598 报表区域与机构组合过滤：选上级区域查不到下级门店、选择机构后区域条件失效，统一改为「区域子树 ∩ 机构」；\\n4. 修复 CHGJ-3875 云打印完成回写用打印前快照覆盖支付状态，导致惠支付记录已付、订单显示未付；修复 CHGJ-3693 口味重复选择打印重复罗列、CHGJ-3494 配送单不打印门牌号；\\n5. 修复 CHGJ-3639 营业概况不统计门店通桌台结账；\\n6. 修复 CHGJ-3700 储值整笔退后冲正误报金额超限、CHGJ-3638 门店通流水实收少计、CHGJ-3731 金额商品改价小票单价显示负数；\\n7. 修复 CHGJ-3761 桌台码缓存按编码命中旧图、ZJEG-4611 必点商品方案状态变更未推送 POS。\\n（ERP POS 5.0.37、CRM Order 5.0.23、CRM Policy 5.0.17 已包含在 ERP Chain 5.0.57 中）\\\"\\\"\\\",\\n    \\\"部署清单\\\": \\\"1. smartpos-svc-erp-chain-5.0.57.jar\\\",\\n}\\np2 = r'D:\\\\work\\\\smartpos-delivery-ledger\\\\releases\\\\2026-11\\\\5.0.57-form-values.draft.json'\\nio.open(p2, 'w', encoding='utf-8', newline='').write(json.dumps(fv, ensure_ascii=False, indent=1))\\nprint('草稿与 form-values 已更新')\\nPY\\ncd /d/work/smartpos-delivery-ledger && git add releases && git commit -m \\\"releases: 5.0.57 发版审批草稿更新（加 SPLAT-5316 backport，移除不适用 5.0 的 3735/5584）\\\" 2>&1 | tail -1 && git push origin main 2>&1 | tail -1\",\"description\":\"Regenerate release approval draft\",\"timeoutMs\":300000}"
+      ],
+      "matched": "[tool-call: ops_bash] {\"command\":\"cd /d/work/smartpos-delivery-ledger && PYTHONIOENCODING=utf-8 python - << 'PY'\\nimport io, json\\n\\ndraft = r'''# 产品迭代发版上线审批 · 完整草稿（v5.0.57）\\n\\n- 模板：产品迭代发版上线审批（`PROC-5"
+    }
+  },
+  {
+    "idx": 16,
+    "lens": "jargon",
+    "what": "看到「可摘/不可摘」理解为「该工单能否移植到目标补丁线」",
+    "evidence_issue": "CHGJ-2979",
+    "evidence_quote": "文件与 5.0.x 一致 = 可摘",
+    "missing": false,
+    "material": "### [segment_029.md] Errors and Fixes\n- `search_workitems` ignores `serialNumber` filter and requires `category`; returned unrelated list.\n- CHGJ-3735/SPLAT-5584 were wrongly included in the first approval draft — verified they are **5.2-line-only bugs** (5.0 line has had `ORDER BY checkout_at DESC` since 2024-03-04 commit `13d8a74d9`); removed from draft.\n- Earlier claim “文件与 5.0.x 一致 = 可摘” was wrong — file identical means **5.0.x already contains the fix**; CHGJ-2979/goodsId cherry-picks were empty for this reason.\n",
+    "provenance": {
+      "kind": "summary",
+      "segment": "segment_029.md",
+      "section": "Errors and Fixes",
+      "hit_index": 8,
+      "hits": 1,
+      "anchors": [
+        "可摘"
+      ],
+      "lines": null,
+      "bullets": [
+        "`search_workitems` ignores `serialNumber` filter and requires `category`; returned unrelated list.",
+        "CHGJ-3735/SPLAT-5584 were wrongly included in the first approval draft — verified they are **5.2-line-only bugs** (5.0 line has had `ORDER BY checkout_at DESC` since 2024-03-04 commit `13d8a74d9`); removed from draft.",
+        "Earlier claim “文件与 5.0.x 一致 = 可摘” was wrong — file identical means **5.0.x already contains the fix**; CHGJ-2979/goodsId cherry-picks were empty for this reason."
+      ],
+      "matched": "Earlier claim “文件与 5.0.x 一致 = 可摘” was wrong — file identical means **5.0.x already contains the fix**; CHGJ-2979/goodsId cherry-picks were empty for this reason."
+    }
+  }
+]

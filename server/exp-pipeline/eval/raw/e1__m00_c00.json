@@ -1,0 +1,79 @@
+{
+  "key": "e1__m00_c00",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 0,
+  "chars": 386,
+  "status": "ok",
+  "elapsed_s": 75.0,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1843,
+    "tokens_out": 6946,
+    "ms": 75000,
+    "candidates": 2,
+    "blocked": 0,
+    "created_n": 2,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 0,
+      "kept": 2
+    }
+  ],
+  "candidates": [
+    {
+      "what": "用已知正常的控制交易确认该租户正常分区名，再核对上传流水实际落库分区；不要只查默认分区",
+      "when_expr": "客户上传成功但后台查不到流水，且能定位到同笔控制交易",
+      "why": "上传可能因租户路由错误写入相邻分区，客户端仍返回成功；只查默认分区会把跨分区落库误判为数据丢失",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "CHGJ-3943",
+      "audit": {
+        "reusable_because": "用确认过的正常交易作基准，能发现跨分区路由错位",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "control sale at 16:39:41 found in `default-za4-smartpos-svc-erp-pos`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "定位到流水落入错误租户分区后，先执行台账重同步把数据补回正确分区，再提交代码修复",
+      "when_expr": "已确认根因是错误租户路由，且缺失流水能在非正常分区中查到",
+      "why": "错误路由写入的数据不会随代码发布自动迁移，不重同步则用户侧账目持续缺失",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "CHGJ-3943",
+      "audit": {
+        "reusable_because": "补数据与改代码分离，防止只修码不补账的遗漏",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "re-sync ledger + git commit",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

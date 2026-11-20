@@ -1,0 +1,86 @@
+{
+  "key": "e1__m13_c00",
+  "exp": "e1",
+  "segment": "segment_029.md/summary",
+  "chunk_idx": 0,
+  "chars": 320,
+  "status": "ok",
+  "elapsed_s": 222.7,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 1,
+    "tokens_in": 1823,
+    "tokens_out": 10377,
+    "ms": 222657,
+    "candidates": 2,
+    "blocked": 0,
+    "created_n": 2,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": "truncated:1/1"
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 0,
+      "kept": 2,
+      "truncated": true
+    }
+  ],
+  "candidates": [
+    {
+      "what": "调用 search_workitems 时先传 category，再在返回结果里按 serialNumber 二次筛选，不能只依赖 serialNumber 过滤",
+      "when_expr": "想用 search_workitems 按 serialNumber 精确查一条工单/流水时",
+      "why": "search_workitems 内部只按 category 拼条件，serialNumber 参数不参与过滤；不传 category 会返回无关列表，直接依赖该参数会把非目标项当命中",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把接口预期从过滤参数修正为必填+二次筛选，避免基于错误列表下结论",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "`search_workitems` ignores `serialNumber` filter and requires `category`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "把 5.2 修复的工单纳入 5.0 审批单前，先在 5.0 分支搜索修复关键代码（如 ORDER BY checkout_at DESC），已存在就剔除",
+      "when_expr": "从 5.2 修复清单挑工单补进 5.0 发布/审批单时",
+      "why": "同一问题可能只存在于 5.2，5.0 早已有等价实现；按工单号照搬会把非 5.0 bug 带进审批，造成错误发布和返工",
+      "lens": "logic",
+      "category": "repo",
+      "evidence_issue": "CHGJ-3735",
+      "audit": {
+        "reusable_because": "把行专属 bug 判断从工单号改为查目标分支关键代码，防止误收录",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "5.0 line has had `ORDER BY checkout_at DESC` since 2024-03-04 commit `13d8a74d9`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": [
+    {
+      "segmentId": "segment_001.md",
+      "warning": "truncated",
+      "message": "模型返回 warning=truncated"
+    }
+  ]
+}

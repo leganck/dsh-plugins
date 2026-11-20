@@ -1,0 +1,237 @@
+{
+  "exp": "e3",
+  "policy": {
+    "what_max": 90,
+    "when_max": 70,
+    "why_max": 140,
+    "when_min": 10,
+    "sim_what_why": 0.75,
+    "verify_symbols": true,
+    "check_skill_covered": true
+  },
+  "negatives": [
+    {
+      "id": "N1",
+      "what": "多试几次就好了",
+      "garbage_class": "common-sense / one-off",
+      "ok": false,
+      "reason": "garbage-2-common-sense",
+      "detail": "通用常识前缀：多试几次",
+      "garbageFlag": true,
+      "skillCovered": false
+    },
+    {
+      "id": "N2",
+      "what": "遇到复杂问题多收集上下文",
+      "garbage_class": "common-sense / not-actionable",
+      "ok": false,
+      "reason": "garbage-6-missing-context",
+      "detail": "when 仅 9 字（<10，无法判定触发）",
+      "garbageFlag": true,
+      "skillCovered": false
+    },
+    {
+      "id": "N3",
+      "what": "超时就调大超时参数",
+      "garbage_class": "factual-error",
+      "ok": false,
+      "reason": "invalid-field",
+      "detail": "lens 非法：'tool'",
+      "garbageFlag": true,
+      "skillCovered": false
+    },
+    {
+      "id": "N4",
+      "what": "先沟通再动手",
+      "garbage_class": "user-preference / skill-covered",
+      "ok": false,
+      "reason": "skill-covered",
+      "detail": "category=process（交付流程由 skill 覆盖）",
+      "garbageFlag": false,
+      "skillCovered": true
+    },
+    {
+      "id": "N5",
+      "what": "本次改了 7 个文件、跑了 3 次测试",
+      "garbage_class": "dialogue-summary",
+      "ok": false,
+      "reason": "garbage-3-dialogue-summary",
+      "detail": "只复述过程：本次",
+      "garbageFlag": true,
+      "skillCovered": false
+    },
+    {
+      "id": "N6",
+      "what": "已经部署到 dev1 了",
+      "garbage_class": "one-off",
+      "ok": false,
+      "reason": "garbage-3-dialogue-summary",
+      "detail": "只复述过程：已经部署",
+      "garbageFlag": true,
+      "skillCovered": false
+    },
+    {
+      "id": "N7",
+      "what": "CHGJ-3735 涉及 3 笔共 34 元",
+      "garbage_class": "mixed-granularity",
+      "ok": false,
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "case 明细进 what：涉及 3 笔",
+      "garbageFlag": true,
+      "skillCovered": false
+    },
+    {
+      "id": "N8",
+      "what": "只推个人 fork、不直推 origin",
+      "garbage_class": "skill-covered（不算垃圾但重复入库无收益）",
+      "ok": false,
+      "reason": "skill-covered",
+      "detail": "命中 skill 已覆盖的团队规范（重复入库无收益）",
+      "garbageFlag": false,
+      "skillCovered": true
+    }
+  ],
+  "golden": [
+    {
+      "idx": 0,
+      "lens": "logic",
+      "what": "上传流水后台查不到时，先比对同机同收银员相邻流水的落库分区，不要只查客户自己的库",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 1,
+      "lens": "index",
+      "what": "确认错写分区后，在该分区的 pos 表按 posId 查真实归属租户与门店号",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 2,
+      "lens": "logic",
+      "what": "跨租户错写的修复同时准备源库软删与目标库按原 payload 补录，一次提审批",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 3,
+      "lens": "logic",
+      "what": "客户报有销售但库存没扣时，按 tenant_id 查 store_account 的 branch_id 分布，而不是按门店号查",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 4,
+      "lens": "logic",
+      "what": "改库存台账归属后按 (goods_id, occur_at, id) 顺序重算 5 个结余列，不能只改 branch_id",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 5,
+      "lens": "index",
+      "what": "评估库存数据修复范围前先读 StoreComputeImpl，确认它写的是五张表",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 6,
+      "lens": "logic",
+      "what": "重放库存消息前先删除 bas_interface_log 中对应的防重记录",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 7,
+      "lens": "index",
+      "what": "手工投递 Redis Stream 后，用 XINFO STREAM 的 last-generated-id 判断投递，不要看 XLEN",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 8,
+      "lens": "logic",
+      "what": "批量重放前先投 1 条并核对台账与余量，确认后再放量",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 9,
+      "lens": "logic",
+      "what": "两条产品线各自新建了同名类时，按已发版修复逐个 cherry-pick，禁止全分支 merge",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 10,
+      "lens": "index",
+      "what": "需要让分支成为祖先但代码逐字节不变时，用 git merge -s ours",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 11,
+      "lens": "logic",
+      "what": "cherry-pick 冲突解决后要确认真的产生了提交，没有就手工重贴该次意图",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 12,
+      "lens": "index",
+      "what": "查 POS/ERP 生产业务日志用 devops 的 default 环境，不要用 www_ali",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 13,
+      "lens": "index",
+      "what": "在 Git Bash 里构建用 JAVA_HOME 下的 java 直调 gradle-wrapper.jar",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 14,
+      "lens": "index",
+      "what": "用 sp-devops 执行 SQL 时库名一律走 -d 参数，语句里不要带库名前缀",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 15,
+      "lens": "logic",
+      "what": "发布清单里判断工单能否进补丁版本，先确认它属于哪条版本线、目标线是否已含该修复",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    },
+    {
+      "idx": 16,
+      "lens": "jargon",
+      "what": "看到「可摘/不可摘」理解为「该工单能否移植到目标补丁线」",
+      "ok": true,
+      "reason": "",
+      "detail": ""
+    }
+  ],
+  "negatives_blocked": 8,
+  "negatives_total": 8,
+  "negatives_skill_covered": 2,
+  "golden_pass": 17,
+  "golden_total": 17
+}

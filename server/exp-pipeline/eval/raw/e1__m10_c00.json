@@ -1,0 +1,63 @@
+{
+  "key": "e1__m10_c00",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 0,
+  "chars": 152,
+  "status": "ok",
+  "elapsed_s": 60.4,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1711,
+    "tokens_out": 4001,
+    "ms": 60390,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "解冲突后执行 git diff HEAD 确认有实际改动；若为空，按目标提交逐文件重放改动后再 --continue",
+      "when_expr": "cherry-pick 解冲突后 git 提示 nothing to commit，或 git diff HEAD 为空",
+      "why": "git 把与 HEAD 相同的解决结果视为空提交，--continue 会静默丢弃该 pick；命令看似成功，目标补丁实际未合入",
+      "lens": "logic",
+      "category": "repo",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把空解决识别为丢 pick 信号，并给出逐文件重放动作",
+        "exclusions": "2,3,4,5,6,7,8,9",
+        "evidence_quote": "with a resolve equal to HEAD → “nothing to commit”, pick silently dropped",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

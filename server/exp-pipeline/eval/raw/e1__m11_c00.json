@@ -1,0 +1,63 @@
+{
+  "key": "e1__m11_c00",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 0,
+  "chars": 233,
+  "status": "ok",
+  "elapsed_s": 67.6,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1748,
+    "tokens_out": 4837,
+    "ms": 67636,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "在 MSYS/Git Bash 调用 ipconfig 时，改用 MSYS_NO_PATHCONV=1 ipconfig /all，不要传 //all",
+      "when_expr": "在 MSYS/Git Bash 里执行 ipconfig /all 或 //all 参数被改写、输出异常",
+      "why": "MSYS 会把斜杠参数当路径做转换，Windows 命令收不到 /all；禁用路径转换后原生命令才能正确解析参数",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把参数被改写的失败命令替换成可执行的正确调用方式",
+        "exclusions": "2,3,4,6,8",
+        "evidence_quote": "`ipconfig //all` mangled by MSYS → use `MSYS_NO_PATHCONV=1 ipconfig /all`",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

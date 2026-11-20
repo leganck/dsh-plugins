@@ -1,0 +1,79 @@
+{
+  "key": "digest__s09",
+  "exp": "e2",
+  "segment": "segment_023.md~3",
+  "chunk_idx": 9,
+  "chars": 263,
+  "status": "ok",
+  "elapsed_s": 109.0,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1754,
+    "tokens_out": 7500,
+    "ms": 109009,
+    "candidates": 2,
+    "blocked": 0,
+    "created_n": 2,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 0,
+      "kept": 2
+    }
+  ],
+  "candidates": [
+    {
+      "what": "需要确认表是否存在或有数据时，对候选表执行 select count(1) 探测；需要样本时改查确定有数据的表并 select * ... limit 1",
+      "when_expr": "只读库禁用 show tables/information_schema，或 select * 返回零行无法判断表状态时",
+      "why": "元数据查询被限制，空表的 select * 没有结果行，仅凭零行会把表不存在、空表和查询失败混在一起",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "给出受限库中可执行的表存在性与空表探测动作，避免误判",
+        "exclusions": "1,2,3,4,5,6,7,8,9",
+        "evidence_quote": "`select *` often no rows for empty tables → use `select count(1)` probes",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "sql",
+      "excerptHitFound": true
+    },
+    {
+      "what": "PowerShell 输出中文乱码时，先设 `$env:PYTHONIOENCODING='utf-8'`，并把脚本输出写入 UTF-8 文件而非直接打印",
+      "when_expr": "在 PowerShell 中运行 Python 脚本，控制台中文显示为乱码",
+      "why": "控制台默认编码与 Python 输出编码不一致，直接打印会乱码；环境变量和 UTF-8 文件可绕过该差异",
+      "lens": "logic",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把乱码定位到输出编码而非数据损坏，给出可复现的修复参数",
+        "exclusions": "1,2,3,4,5,6,7,8,9",
+        "evidence_quote": "`$env:PYTHONIOENCODING='utf-8'`, write output to files/UTF8",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "sql",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

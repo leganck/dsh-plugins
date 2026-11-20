@@ -1,0 +1,78 @@
+{
+  "key": "e1__m05_c01",
+  "exp": "e1",
+  "segment": "segment_001.md/verbatim",
+  "chunk_idx": 1,
+  "chars": 268,
+  "status": "ok",
+  "elapsed_s": 222.3,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 1,
+    "tokens_in": 1863,
+    "tokens_out": 9399,
+    "ms": 222332,
+    "candidates": 2,
+    "blocked": 1,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 1,
+    "skill_covered": 0,
+    "garbage_rate": 0.5,
+    "reasons": {
+      "garbage-7-mixed-granularity": 1
+    },
+    "error": "truncated:1/1"
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 1,
+      "kept": 1,
+      "truncated": true
+    }
+  ],
+  "candidates": [
+    {
+      "what": "排查 lian_tuo 相关推送时，只找 lian_tuo_branch 表，不要查 member/record/log 等同名子表",
+      "when_expr": "涉及 lian_tuo 推送链路的调查或需要从 lian_tuo 表取数时",
+      "why": "命名上像有完整子表族，实际只有 branch 一张表；按惯性去找其他表会得零结果，并可能误判推送链路缺失",
+      "lens": "index",
+      "category": "debug",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "纠正对表命名族谱的预期，避免在不存在子表上做无效查询",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "lian_tuo_* 只有 lian_tuo_branch 一张表（无 member/record/log）",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [
+    {
+      "what": "核查某单是否推送成功时，查 bas_interface_log 按 relation_id=sale_detail.id 且 type=0/status=1/error_count=0 过滤，并用 vip_store_history 对照金额；不要找推送报文字段",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=131>90"
+    }
+  ],
+  "errors": [],
+  "warnings": [
+    {
+      "segmentId": "segment_001.md",
+      "warning": "truncated",
+      "message": "模型返回 warning=truncated"
+    }
+  ]
+}

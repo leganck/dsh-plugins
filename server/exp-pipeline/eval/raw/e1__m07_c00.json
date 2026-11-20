@@ -1,0 +1,61 @@
+{
+  "key": "e1__m07_c00",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 0,
+  "chars": 178,
+  "status": "ok",
+  "elapsed_s": 208.3,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 1,
+    "tokens_in": 1798,
+    "tokens_out": 8225,
+    "ms": 208283,
+    "candidates": 1,
+    "blocked": 1,
+    "created_n": 0,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 1,
+    "skill_covered": 0,
+    "garbage_rate": 1.0,
+    "reasons": {
+      "garbage-7-mixed-granularity": 1
+    },
+    "error": "truncated:1/1"
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 1,
+      "kept": 0,
+      "truncated": true
+    }
+  ],
+  "candidates": [],
+  "blocked": [
+    {
+      "what": "先核对目标分支是否已含相应修复；backport 提交按原始分支归属判定，并排除目标分支的 settings.gradle/project.properties/CHANGELOG。",
+      "reason": "garbage-7-mixed-granularity",
+      "detail": "超长：what=91>90"
+    }
+  ],
+  "errors": [],
+  "warnings": [
+    {
+      "segmentId": "segment_001.md",
+      "warning": "truncated",
+      "message": "模型返回 warning=truncated"
+    }
+  ]
+}

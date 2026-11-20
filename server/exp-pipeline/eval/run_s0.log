@@ -1,0 +1,15 @@
+nohup: ignoring input
+E2: digest 共 112 chunk，抽样 13 个（每 9 取 1）
+shard 2/3: 本片 13 个 chunk
+[01] digest__s03                  status=failed 240.0s cand=0 blocked=0 job_err=extrac[02] digest__s[02] digest__s06                  status=ok     176.8s cand=1 blocked=1 [03] digest__s[03] digest__s09                  status=ok     109.0s cand=2 blocked=0 [04] digest__s[04] digest__s12                  status=ok     229.0s cand=1 blocked=0 [05] e1__m02_c00       [05] e1__m01_c00                  status=ok     160.5s cand=1 blocked=0 job_err=None
+[06] e1__m04_c00                  status=ok     160.5s cand=2 blocked=0 job_err=None
+[07] e1__m05_c01                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+[08] e1__m06_c01                  status=ok     199.9s cand=1 blocked=0 job_err=None
+[09] e1__m10_c01                  status=ok     176.0s cand=0 blocked=1 job_err=truncated:1/1
+[10] e1__m11_c01                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+E3: 负例拦截 8/8，其中 skill-covered 2；黄金通过 17/17
+
+本轮调用=10 落盘=10 跳过(已存在)=3 用时=1932s
+负例拦截 8/8，其中 skill-covered 2；黄金通过 17/17
+
+本轮调用=12 落盘=12 跳过(已存在)=1 用时=1683s

@@ -1,0 +1,63 @@
+{
+  "key": "e1__m00_c01",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 1,
+  "chars": 293,
+  "status": "ok",
+  "elapsed_s": 199.6,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1827,
+    "tokens_out": 7144,
+    "ms": 199648,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "合并含 ours-merge bookkeeping commit 的 MR 时使用 merge 而非 squash，保留全部提交",
+      "when_expr": "在补丁分支（如 5.2.3）上集成已移植的修复 MR",
+      "why": "bookkeeping commit 是移植来源的记账标记，squash 会将其折叠进单个提交，后续补丁线合回 master 时丢失移植关系，冲突排查和变更追溯失去依据",
+      "lens": "logic",
+      "category": "repo",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "阻止 Agent 对移植 MR 使用默认 squash，保留记账提交以维护移植链路",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "ours-merge bookkeeping commit) awaiting CI then merge **without squash**",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

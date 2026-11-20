@@ -1,0 +1,108 @@
+{
+  "material_chunks": 13,
+  "digest_total_chunks": 112,
+  "chars": 4351,
+  "candidates": 36,
+  "what_why_sim_gt_075": 34,
+  "what_why_ratio": 0.9444,
+  "what_equals_why_prefix": 1,
+  "generic_when": 30,
+  "issue_when": 6,
+  "lens": {
+    "logic": 4,
+    "jargon": 9,
+    "index": 23
+  },
+  "review_blocked": 36,
+  "review_blocked_rate": 1.0,
+  "review_reasons": {
+    "garbage-7-mixed-granularity": 22,
+    "unrefined-what-equals-why": 14
+  },
+  "sample": [
+    {
+      "what": "`DSH workspace preparation failed … Workspace ancestry contains a reparse point` (all shell calls): root cause 飞牛同步 `fn-sync-client.exe` marks `D:\\work` + `D:\\work\\bug-analysis` with reparse tags `0x9",
+      "when_expr": "处理digest时",
+      "why": "`DSH workspace preparation failed … Workspace ancestry contains a reparse point` (all shell calls): root cause 飞牛同步 `fn-sync-client.exe` marks `D:\\work` + `D:\\work\\bug-analysis` with reparse tags `0x9000301a/0x9000601a` (`{\"task_id\":1,\"node_id\":\"/vol2/1000/文件/工作/bug-analysis\"}`); only Windows PowerShell 5.1/`fsutil reparsepoint query` show it. Fixed by user switching session to **danger-full-acc",
+      "lens": "logic",
+      "repo": "global"
+    },
+    {
+      "what": "云效评论/附件下载需用 `get_workitem_file --id <fileIdentifier>`；评论图片从 content htmlValue 里正则取 `fileIdentifier`。",
+      "when_expr": "处理digest时",
+      "why": "云效评论/附件下载需用 `get_workitem_file --id <fileIdentifier>`；评论图片从 content htmlValue 里正则取 `fileIdentifier`",
+      "lens": "jargon",
+      "repo": "global"
+    },
+    {
+      "what": "`logs query --thread`/`--query` 在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*` 等（`logs projects -e default` 43 个）。",
+      "when_expr": "处理digest时",
+      "why": "`logs query --thread`/`--query` 在 `www_ali` 下对 pay 项目 count=0；正常日志项目为 `default-*`/`www_local-*`/`dev2-*` 等（`logs projects -e default` 43 个）",
+      "lens": "jargon",
+      "repo": "global"
+    },
+    {
+      "what": "SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失 → 报表失败根因不可见（建议改为带 `e.getMessage()`）。",
+      "when_expr": "处理digest时",
+      "why": "SLS 只存日志首行，`log.error(..., e)` 的异常堆栈丢失 → 报表失败根因不可见（建议改为带 `e.getMessage()`）",
+      "lens": "logic",
+      "repo": "global"
+    },
+    {
+      "what": "dev2 login via CDP with 61010554/aa123456 failed: form submit triggered no network request; session invalid; user then supplied curl cookie for dev2 API.",
+      "when_expr": "处理digest时",
+      "why": "dev2 login via CDP with 61010554/aa123456 failed: form submit triggered no network request; session invalid; user then supplied curl cookie for dev2 API",
+      "lens": "index",
+      "repo": "global"
+    },
+    {
+      "what": "`fetch-workitem.ps1` param is `-OutFile`, not `-OutDir`.",
+      "when_expr": "处理digest时",
+      "why": "`fetch-workitem.ps1` param is `-OutFile`, not `-OutDir`",
+      "lens": "index",
+      "repo": "global"
+    },
+    {
+      "what": "`projex list_work_item_comments` needs `--page 1 --perPage N`.",
+      "when_expr": "处理digest时",
+      "why": "`projex list_work_item_comments` needs `--page 1 --perPage N`",
+      "lens": "jargon",
+      "repo": "global"
+    },
+    {
+      "what": "`projex get_workitem_file` needs `--workitemId` + `--id` (lowercase); returns JSON with signed OSS `url` → `Invoke-WebRequest -Uri $o.url -OutFile`.",
+      "when_expr": "处理digest时",
+      "why": "`projex get_workitem_file` needs `--workitemId` + `--id` (lowercase); returns JSON with signed OSS `url` → `Invoke-WebRequest -Uri $o.url -OutFile`",
+      "lens": "index",
+      "repo": "global"
+    },
+    {
+      "what": "board.md edits hit \"file changed since read\" → re-read tail then edit.",
+      "when_expr": "处理digest时",
+      "why": "board.md edits hit \"file changed since read\" → re-read tail then edit",
+      "lens": "jargon",
+      "repo": "global"
+    },
+    {
+      "what": "Two separate `doJsApiPay` at 11:43:18 and 11:43:26; first success callback 11:43:34; second 11:43:42.",
+      "when_expr": "处理digest时",
+      "why": "Two separate `doJsApiPay` at 11:43:18 and 11:43:26; first success callback 11:43:34; second 11:43:42",
+      "lens": "jargon",
+      "repo": "global"
+    },
+    {
+      "what": "POS one整单退款 (`ORDERSTATUS_CHARGEBACK`) at 11:52:21 looped both paid records, refunding both.",
+      "when_expr": "处理digest时",
+      "why": "POS one整单退款 (`ORDERSTATUS_CHARGEBACK`) at 11:52:21 looped both paid records, refunding both",
+      "lens": "index",
+      "repo": "global"
+    },
+    {
+      "what": "Root cause: second payment queried first payment too early; first not paid yet. Logged query at 11:43:26:",
+      "when_expr": "处理digest时",
+      "why": "Root cause: second payment queried first payment too early; first not paid yet. Logged query at 11:43:26",
+      "lens": "logic",
+      "repo": "global"
+    }
+  ]
+}

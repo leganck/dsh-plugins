@@ -1,0 +1,185 @@
+{
+  "cost": {
+    "e1": {
+      "calls": 26,
+      "failed": 3,
+      "truncated": 4,
+      "cand": 19,
+      "blocked": 6,
+      "s": 3299.6,
+      "tin": 41517,
+      "tout": 123627,
+      "chars": 7217
+    },
+    "e2": {
+      "calls": 13,
+      "failed": 4,
+      "truncated": 2,
+      "cand": 13,
+      "blocked": 1,
+      "s": 2074.6,
+      "tin": 16297,
+      "tout": 55836,
+      "chars": 3954
+    },
+    "all": {
+      "calls": 39,
+      "failed": 7,
+      "truncated": 6,
+      "cand": 32,
+      "blocked": 7,
+      "s": 5374.200000000001,
+      "tin": 57814,
+      "tout": 179463,
+      "chars": 11171
+    },
+    "avg_s": 137.8,
+    "fail_rate": 0.1795,
+    "trunc_rate": 0.1538
+  },
+  "recall": {
+    "denom": 14,
+    "missing": [
+      4,
+      7,
+      8
+    ],
+    "strict_hit": 4,
+    "strict_pass": 2,
+    "lenient_hit": 8,
+    "lenient_pass": 6,
+    "strict_hit_rate": 0.2857,
+    "strict_pass_rate": 0.1429,
+    "lenient_hit_rate": 0.5714,
+    "lenient_pass_rate": 0.4286,
+    "rows": [
+      {
+        "idx": 0,
+        "level": "lenient",
+        "passed": true,
+        "why": "同机制（分区路由错→流水落到别的租户库，不能只查自己的/默认分区）；动作不同（控制交易定位 vs 相邻流水比对）"
+      },
+      {
+        "idx": 1,
+        "level": "lenient",
+        "passed": true,
+        "why": "同为 posId 跨分区撞号问题；黄金给的是用 pos 表反查，产出给的是三元组+路由日志核对，动作不同但结论同向"
+      },
+      {
+        "idx": 9,
+        "level": "lenient",
+        "passed": true,
+        "why": "同为跨线移植前的 pick 判定；黄金要求逐特性 cherry-pick，产出讲的是 pick 前先 grep 目标分支"
+      },
+      {
+        "idx": 11,
+        "level": "strict",
+        "passed": false,
+        "why": "产出「cherry-pick --continue 报 nothing to commit 时按该 pick 已丢失处理，依原 commit 逐文件重放」= 黄金原文语义；但被 Review 以 garbage-7-mixed-granularity 拦下"
+      },
+      {
+        "idx": 12,
+        "level": "strict",
+        "passed": true,
+        "why": "产出「查 smartpos 日志 topic 先到 env=default…不要用 www_ali」与黄金一致"
+      },
+      {
+        "idx": 13,
+        "level": "strict",
+        "passed": false,
+        "why": "产出「直接运行 java -cp gradle/wrapper/gradle-wrapper.jar …GradleWrapperMain」= 黄金核心动作；但被 garbage-7 拦下"
+      },
+      {
+        "idx": 15,
+        "level": "strict",
+        "passed": true,
+        "why": "产出「把 5.2 修复的工单纳入 5.0 审批单前，先在 5.0 分支搜索修复关键代码，已存在就剔除」= 黄金 15；但出自 G16 的相邻窗口（m13_c00），自有 chunk 只产出「惠管家」黑话"
+      },
+      {
+        "idx": 16,
+        "level": "lenient",
+        "passed": true,
+        "why": "产出提到「不要标记可摘」并解释 5.0.x 已含修复，接近黑话映射但未直接给「可摘=能否移植」的映射句"
+      }
+    ]
+  },
+  "lens": {
+    "pairs": [
+      {
+        "idx": 0,
+        "gold": "logic",
+        "cand": "logic",
+        "ok": true
+      },
+      {
+        "idx": 1,
+        "gold": "index",
+        "cand": "logic",
+        "ok": false
+      },
+      {
+        "idx": 9,
+        "gold": "logic",
+        "cand": "logic",
+        "ok": true
+      },
+      {
+        "idx": 11,
+        "gold": "logic",
+        "cand": "?",
+        "ok": false
+      },
+      {
+        "idx": 12,
+        "gold": "index",
+        "cand": "index",
+        "ok": true
+      },
+      {
+        "idx": 13,
+        "gold": "index",
+        "cand": "?",
+        "ok": false
+      },
+      {
+        "idx": 15,
+        "gold": "logic",
+        "cand": "jargon",
+        "ok": false
+      },
+      {
+        "idx": 16,
+        "gold": "jargon",
+        "cand": "logic",
+        "ok": false
+      }
+    ],
+    "acc": 3,
+    "n": 6,
+    "unknown_lens": 2,
+    "rate": 0.5
+  },
+  "garbage": {
+    "neg_total": 8,
+    "neg_garbage": 7,
+    "n3_leak": 1,
+    "e2_garbage": 0,
+    "leak_of_garbage": 0.1429,
+    "leak_of_output": 0.0256,
+    "precision_e2": 1.0
+  },
+  "review": {
+    "blocked_total": 7,
+    "false_blocked": 7,
+    "cand_total": 39,
+    "intercept_rate": 0.1795,
+    "false_block_rate": 0.1795
+  },
+  "e3": {
+    "blocked": 8,
+    "total": 8,
+    "skill_covered": 2,
+    "golden_pass": 17,
+    "golden_total": 17
+  }
+}

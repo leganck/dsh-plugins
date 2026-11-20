@@ -1,0 +1,10 @@
+keys 过滤：本片 10 个 chunk
+[01] e1__m01_c00                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+[02] e1__m02_c00                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+[03] e1__m04_c00                  status=ok      61.0s cand=1 blocked=0 job_err=None
+[04] e1__m05_c01                  status=ok     222.3s cand=1 blocked=1 job_err=truncated:1/1
+[05] e1__m09_c00                  status=failed 243.0s cand=0 blocked=0 job_err=extract-failed:1/1
+[06] e1__m10_c01                  status=ok      93.7s cand=0 blocked=1 job_err=None
+[07] e1__m11_c01                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+
+本轮调用=7 落盘=7 跳过(已存在)=3 用时=1340s

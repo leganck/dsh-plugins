@@ -1,0 +1,7 @@
+keys 过滤：本片 5 个 chunk
+[01] e1__m08_c01                  status=ok      45.9s cand=0 blocked=1 job_err=None
+[02] e1__m10_c02                  status=ok      38.6s cand=1 blocked=0 job_err=None
+[03] e1__m11_c02                  status=ok     106.8s cand=2 blocked=0 job_err=None
+[04] e1__m12_c01                  status=ok     229.2s cand=1 blocked=0 job_err=truncated:1/1
+
+本轮调用=4 落盘=4 跳过(已存在)=1 用时=421s

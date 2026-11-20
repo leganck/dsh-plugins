@@ -1,0 +1,79 @@
+{
+  "key": "e1__m11_c02",
+  "exp": "e1",
+  "segment": "segment_032.md/summary",
+  "chunk_idx": 2,
+  "chars": 167,
+  "status": "ok",
+  "elapsed_s": 105.3,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1732,
+    "tokens_out": 7140,
+    "ms": 105331,
+    "candidates": 2,
+    "blocked": 0,
+    "created_n": 2,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 0,
+      "kept": 2
+    }
+  ],
+  "candidates": [
+    {
+      "what": "当前环境查不到日志时，改查 default 环境，不要先按超保留期或不可用下结论",
+      "when_expr": "当前环境日志为空且准备按超保留期/不可用处理",
+      "why": "可查的日志被放在 default，只在当前环境查会把环境错位误判成日志已过期或缺失",
+      "lens": "index",
+      "category": "tool",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把查日志的环境从当前环境切到 default，避免把环境错位当成日志缺失",
+        "exclusions": "1,2,3,4,5,6,7,8",
+        "evidence_quote": "“日志超保留期/不可用” → logs exist but in **default** env",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "查不到数据时，先扩展到其他租户/tenant 查询，确认是否落在错误租户",
+      "when_expr": "按目标租户查询为空、准备判定数据从未落库时",
+      "why": "数据可能已写进错误租户，限定目标租户的查询必然为空，会把已存在数据误判为未落库",
+      "lens": "logic",
+      "category": "debug",
+      "evidence_issue": "CHGJ-3943",
+      "audit": {
+        "reusable_because": "把“未落库”结论改成先找错误租户，避免漏查已存在数据",
+        "exclusions": "1,2,3,4,5,6,7,8",
+        "evidence_quote": "“数据从未落库” → **data exists, in the wrong tenant**",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

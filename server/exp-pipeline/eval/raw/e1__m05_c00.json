@@ -1,0 +1,79 @@
+{
+  "key": "e1__m05_c00",
+  "exp": "e1",
+  "segment": "segment_001.md/verbatim",
+  "chunk_idx": 0,
+  "chars": 259,
+  "status": "ok",
+  "elapsed_s": 135.3,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1897,
+    "tokens_out": 3305,
+    "ms": 135338,
+    "candidates": 2,
+    "blocked": 0,
+    "created_n": 2,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 2,
+      "blocked": 0,
+      "kept": 2
+    }
+  ],
+  "candidates": [
+    {
+      "what": "核对门店与小精灵商户号对应关系时，按门店 ID 一对一取绑定行，不要用 branch.last_update_at 判断绑定是否过期",
+      "when_expr": "门店改名后，小精灵商户号绑定行的建档时间仍停在改名前的日期",
+      "why": "绑定行建档后从不随门店改名更新，branch 的更新时间反映不了绑定变化，拿它比对会把正常绑定误判成过期数据",
+      "lens": "logic",
+      "category": "business",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "把判断绑定新旧的数据源从门店表换成绑定行本身，避免误判",
+        "exclusions": "2,3,4,7",
+        "evidence_quote": "该绑定 2023-11-08 14:18:53 建档后从未更新，而 branch.last_update_at=2025-09-04 18:56:39",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    },
+    {
+      "what": "小精灵商户号建档时间早于门店销售起点时，按开业前预建号处理，不要作为数据异常排查",
+      "when_expr": "商户号建档日期早于该门店销售起点或会员消费起点",
+      "why": "商户号允许在门店开业前预先建好，建号时间与销售起点本就不同步，按时间先后判定异常会白查一轮",
+      "lens": "logic",
+      "category": "business",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "知道建号可早于开业，能直接排除一类时间倒挂的假异常",
+        "exclusions": "2,3,4,7",
+        "evidence_quote": "61832 销售起点 2025-08-23、会员消费起点 2025-09-07，但小精灵商户号 2023-11-08 就建好了（建号早于开业）",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

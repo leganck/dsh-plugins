@@ -1,0 +1,63 @@
+{
+  "key": "e1__m12_c01",
+  "exp": "e1",
+  "segment": "segment_029.md/verbatim",
+  "chunk_idx": 1,
+  "chars": 398,
+  "status": "ok",
+  "elapsed_s": 79.4,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1927,
+    "tokens_out": 7185,
+    "ms": 79403,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "将发版单类型「惠管家修复发版」映射为 smartpos-svc-erp-chain 产品线的 POS 端修复发版",
+      "when_expr": "看到发版记录/发布单里类型一栏填的是「惠管家修复发版」",
+      "why": "「惠管家」是内部产品代称，字面推不出对应服务；按字面理解会找不到 smartpos-svc-erp-chain 产物，并误判影响范围",
+      "lens": "jargon",
+      "category": "repo",
+      "evidence_issue": "CHGJ-3735/SPLAT-5584",
+      "audit": {
+        "reusable_because": "给内部黑话建立产物线映射，后续看到该类型可直接定位发布产物与影响范围",
+        "exclusions": "1,2,3,4,6,8",
+        "evidence_quote": "类型 惠管家修复发版\n产品 smartpos-svc-erp-chain-5.0.55\n发版影响范围 [\"POS端\"]",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": false
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

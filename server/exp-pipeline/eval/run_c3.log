@@ -1,0 +1,5 @@
+keys 过滤：本片 2 个 chunk
+[01] e1__m11_c01                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+[02] e1__m12_c01                  status=ok      79.4s cand=1 blocked=0 job_err=None
+
+本轮调用=2 落盘=2 跳过(已存在)=0 用时=319s

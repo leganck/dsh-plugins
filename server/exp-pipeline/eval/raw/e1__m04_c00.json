@@ -1,0 +1,63 @@
+{
+  "key": "e1__m04_c00",
+  "exp": "e1",
+  "segment": "segment_013.md/verbatim",
+  "chunk_idx": 0,
+  "chars": 345,
+  "status": "ok",
+  "elapsed_s": 61.0,
+  "job": {
+    "session_id": "eval:4ff93b80",
+    "mode": "server",
+    "status": "done",
+    "model": "auto/deepseek-v4.1-flash",
+    "prompt_version": "exp-v2.0",
+    "segments": 1,
+    "failed_segments": 0,
+    "truncated": 0,
+    "tokens_in": 1796,
+    "tokens_out": 6646,
+    "ms": 60950,
+    "candidates": 1,
+    "blocked": 0,
+    "created_n": 1,
+    "updated_n": 0,
+    "skipped_n": 0,
+    "contradicted_n": 0,
+    "garbage_blocked": 0,
+    "skill_covered": 0,
+    "garbage_rate": 0.0,
+    "reasons": {},
+    "error": null
+  },
+  "segments": [
+    {
+      "segmentId": "segment_001.md",
+      "topic": "",
+      "candidates": 1,
+      "blocked": 0,
+      "kept": 1
+    }
+  ],
+  "candidates": [
+    {
+      "what": "判断商品 mainId 是否有效时，把 null 和 0 都判为无效，不能只判 null",
+      "when_expr": "代码只对 mainId 判 null 就用于归集、供应计算或库存分组",
+      "why": "mainId=0 是无效占位；漏掉会把 0 当成真实主商品 ID 或误判为有主商品，导致归集或查询结果错",
+      "lens": "logic",
+      "category": "business",
+      "evidence_issue": "",
+      "audit": {
+        "reusable_because": "补上 0 这个隐性空值，避免照常见写法只判 null",
+        "exclusions": "2,3,4,5,6,7,8",
+        "evidence_quote": "if (goods.getMainId() != null && goods.getMainId() != 0) {",
+        "prompt_version": "exp-v2.0"
+      },
+      "excerptKind": "quote",
+      "excerptHitFound": true
+    }
+  ],
+  "blocked": [],
+  "errors": [],
+  "warnings": []
+}

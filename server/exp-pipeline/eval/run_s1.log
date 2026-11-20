@@ -1,0 +1,14 @@
+E2: digest 共 112 chunk，抽样 13 个（每 9 取 1）
+shard 1/3: 本片 13 个 chunk
+[01] digest__s04                  status=ok      75.7s cand=2 blocked=0 job_err=None
+[02] digest__s07                  status=ok     231.1s cand=1 blocked=0 job_err=truncated:1/1
+[03] digest__s10                  status=failed 240.0s cand=0 blocked=0 job_err=extract-failed:1/1
+[04] e1__m02_c00                  status=ok     210.6s cand=1 blocked=0 job_err=None
+[05] e1__m05_c02                  status=ok     142.9s cand=0 blocked=1 job_err=None
+[06] e1__m07_c00                  status=ok     208.3s cand=0 blocked=1 job_err=truncated:1/1
+[07] e1__m09_c00                  status=ok     223.2s cand=1 blocked=1 job_err=truncated:1/1
+[08] e1__m11_c02                  status=ok     105.3s cand=2 blocked=0 job_err=None
+[09] e1__m13_c00                  status=ok     222.7s cand=2 blocked=0 job_err=truncated:1/1
+E3: 负例拦截 7/8，其中 skill-covered 2；黄金通过 17/17
+
+本轮调用=9 落盘=9 跳过(已存在)=4 用时=1660s
