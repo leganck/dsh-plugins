@@ -687,7 +687,13 @@ def main():
     st, html_slash, _ = req_raw("/admin/")
     check("/admin/ 同样可用", st == 200 and "storage-hub" in html_slash)
     check("页面不再内嵌 API-Key 输入逻辑（改走 HTTP Basic）",
-          "dshAdminKey" not in html and "localStorage" not in html)
+          "dshAdminKey" not in html and "X-Admin-Key" not in html)
+    # v4：经验页卡片/表格切换用 localStorage（纯 UI 偏好）。这里钉住"密钥绝不进 localStorage"。
+    check("localStorage 只存视图偏好（dsh-mem-view），不承载密钥",
+          "dsh-mem-view" in html and "localStorage.setItem(MEM_VIEW_KEY, MEM_VIEW)" in html
+          and "localStorage.setItem('apiKey" not in html
+          and 'localStorage.setItem("apiKey' not in html
+          and "localStorage.getItem('apiKey" not in html)
     st, fav, fav_ctype = req_raw("/favicon.svg")
     check("站点图标 /favicon.svg → 200 svg 且页面已声明",
           st == 200 and "svg" in fav_ctype and "<svg" in fav and 'rel="icon"' in html, (st, fav_ctype))

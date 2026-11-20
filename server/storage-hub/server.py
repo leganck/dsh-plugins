@@ -147,10 +147,14 @@ def _endpoint_group(path):
         return "bodies"
     if path.startswith("/v1/namespaces/") and path.endswith("/embed"):
         return "embed-queue"
+    if path.startswith("/v1/admin/settings/"):
+        return "settings"
     if path.startswith("/v1/admin/"):
         return "admin"
     if path.startswith("/v1/scopes") or path.startswith("/v1/spaces") or path.startswith("/v1/lineages/"):
         return "scopes"
+    if path.startswith("/v1/exp/"):
+        return "exp"
     if path.startswith("/v1/memories"):
         return "memories"
     if path in ("/", "/health", "/v1/status", "/log"):
@@ -614,6 +618,38 @@ ADMIN_HTML = r"""<!doctype html>
   .funnel-row:last-child{border-bottom:0}
   .funnel-step{display:inline-flex;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums}
   .funnel-step .arrow{color:var(--faint)}
+  /* 经验页 v4：抽取进度 / 卡片流 / 阶段 / 类型分布 / 抽取配置 */
+  .exp-progress{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:12.5px}
+  .exp-progress .seg{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .mem-viewbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .mem-viewbar button.on{background:var(--blue-bg);border-color:transparent;color:var(--blue);font-weight:600}
+  .mem-cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .mem-card{border:1px solid var(--line);border-radius:11px;padding:11px 13px;background:var(--card);cursor:pointer;min-width:0}
+  .mem-card:hover{border-color:var(--muted)}
+  .mem-card .what{font-weight:600;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .mem-card .tags{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:7px 0 6px}
+  .cat-chip,.mem-stage{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;font-size:11.5px;background:var(--bg);border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .mem-stage{font-weight:600}
+  .mem-stage.open{color:var(--bad);background:var(--bad-bg);border-color:transparent}
+  .mem-stage.recalled{color:var(--blue);background:var(--blue-bg);border-color:transparent}
+  .mem-stage.adopted{color:var(--ok);background:var(--ok-bg);border-color:transparent}
+  .mem-stage.retirable{color:var(--warn);background:var(--warn-bg);border-color:transparent}
+  .mem-stage.archived{color:var(--faint)}
+  .adopt-bar{display:inline-flex;gap:2px;align-items:center}
+  .adopt-bar i{width:9px;height:9px;border-radius:2px;background:var(--line)}
+  .adopt-bar i.on{background:var(--ok)}
+  .mem-card .meta{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--faint);margin-top:6px;flex-wrap:wrap;min-width:0}
+  .mem-card details.ev{margin-top:6px;font-size:11.5px;color:var(--muted)}
+  .mem-card details.ev pre{margin:5px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:11px}
+  .cat-dist{display:grid;gap:6px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .cat-dist .row{display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer}
+  .cat-dist .row .n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--muted)}
+  .llm-grid{display:grid;gap:9px 14px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+  .llm-grid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted);min-width:0}
+  .llm-grid input,.llm-grid select{width:100%}
+  .llm-grid .row-check{flex-direction:row;align-items:center;gap:8px}
+  .llm-ok{color:var(--ok)}.llm-bad{color:var(--bad)}.llm-warn{color:var(--warn)}
+  @media (max-width:640px){.mem-cards{grid-template-columns:1fr}.exp-progress{font-size:12px}.llm-grid{grid-template-columns:1fr}}
   .gov-run-detail{margin-top:4px;padding:8px 10px;border:1px dashed var(--line);border-radius:9px;font-size:12px;color:var(--muted)}
   .cmp-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));margin:10px 0}
   .cmp-col{border:1px solid var(--line);border-radius:11px;padding:11px 13px;min-width:0;background:var(--card)}
@@ -739,6 +775,29 @@ ADMIN_HTML = r"""<!doctype html>
         </table>
       </div>
       <p class="section-note">切换嵌入模型会改变向量 tag：旧向量保留但检索不到，客户端下次同步会按新 tag 全量重嵌（覆盖率从 0 恢复）。切换失败会自动保留原模型。</p>
+    </section>
+    <section class="card wide" id="llm-settings">
+      <h2>经验抽取 <span class="tail faint">LLM 配置 · 连通性由服务端代理测试</span></h2>
+      <div class="llm-grid">
+        <label class="row-check"><input type="checkbox" id="llm-enabled"><span>启用经验抽取</span></label>
+        <label>Base URL<input id="llm-base-url" placeholder="http://host.docker.internal:3425/v1"></label>
+        <label>模型名<input id="llm-model" placeholder="auto/deepseek-v4.1-flash"></label>
+        <label>API Key（只写不读，回显掩码）<input id="llm-api-key" type="password" autocomplete="off" placeholder="留空 = 不修改现有 key"></label>
+        <label>max_tokens<input id="llm-max-tokens" type="number" min="0" step="500"></label>
+        <label>超时 ms<input id="llm-timeout-ms" type="number" min="1000" step="1000"></label>
+        <label>日 token 上限<input id="llm-daily-token-cap" type="number" min="0" step="10000"></label>
+        <label>mode<select id="llm-mode"><option value="server">server</option><option value="client">client</option></select></label>
+        <label>evidence<select id="llm-evidence"><option value="excerpt">excerpt</option><option value="digest">digest</option></select></label>
+        <label>prompt 版本（只读）<input id="llm-prompt-version" readonly></label>
+      </div>
+      <div class="toolbar" style="margin-top:10px">
+        <button class="primary" id="llm-save">保存配置</button>
+        <button id="llm-test">测试连通性</button>
+        <span class="faint" id="llm-key-masked" style="font-size:11.5px"></span>
+        <span class="spacer"></span>
+        <span id="llm-test-out" class="faint" style="font-size:12px"></span>
+      </div>
+      <div class="faint" id="llm-test-detail" style="font-size:11.5px;margin-top:4px"></div>
     </section>
     <section class="card wide">
       <h2>可下载模型 <span class="tail faint">白名单目录 · 下载完成后可热切换</span></h2>
@@ -1031,25 +1090,43 @@ ADMIN_HTML = r"""<!doctype html>
     </section>
   </section>
 
-  <!-- ============================ 经验（v3：Inbox / 治理流水 / 四键裁决 / what 首列） ============================ -->
+  <!-- ============================ 经验（v4：抽取进度 / 卡片流 / 阶段徽标 / 类型分布 / 治理流水） ============================ -->
   <section id="tab-memories" class="panel">
     <section class="card wide">
+      <h2>本轮抽取 <span class="tail faint" id="exp-progress-at"></span></h2>
+      <div id="exp-progress" class="exp-progress"><div class="faint">加载中…</div></div>
+      <div class="toolbar" style="margin:8px 0 0">
+        <button class="small" id="exp-refresh">刷新进度</button>
+        <button class="small" id="exp-replay">重放历史会话…</button>
+        <span class="faint" id="exp-replay-hint" style="font-size:11.5px"></span>
+      </div>
+    </section>
+    <section class="card wide">
       <h2>Review Inbox <span class="tail faint">待办收件箱 · 点击卡片过滤下方列表</span></h2>
-      <div class="inbox-grid" id="mem-inbox"><div class="faint">加载中…</div></div>
+      <div class="cmp-grid" style="margin:0">
+        <div class="inbox-grid" id="mem-inbox"><div class="faint">加载中…</div></div>
+        <div>
+          <div class="faint" style="font-size:11.5px;margin-bottom:6px">类型分布（按类型计数 · 点一下只看该类型）</div>
+          <div id="cat-dist" class="cat-dist"><div class="faint">加载中…</div></div>
+        </div>
+      </div>
+      <div class="faint" id="mem-lens-legend" style="font-size:11.5px;margin-top:8px">镜头：{{LENS_LEGEND}}　类型：{{CATEGORY_LEGEND}}</div>
     </section>
     <section class="card wide">
       <h2>治理流水 <span class="tail faint" id="gov-runs-at"></span></h2>
-      <div id="gov-runs"><div class="empty">加载中…</div></div>
+      <div id="gov-timeline"><div class="empty">加载中…</div></div>
     </section>
     <section class="card wide">
-      <h2>冲突裁决 <span class="tail faint">contradict 不自动决断，走人工四键：保留新 / 保留旧 / 都保留 / 融合</span></h2>
+      <h2>冲突裁决 <span class="tail faint">人工四键：保留新 / 保留旧 / 都保留 / 融合</span></h2>
       <div id="mem-conflicts"><div class="empty">加载中…</div></div>
     </section>
     <section class="card wide">
       <h2>经验条目 <span class="tail" id="mem-count"></span></h2>
       <div class="mem-toolbar">
         <input id="mem-q" type="search" placeholder="搜索 what / when / why…">
-        <select id="mem-lens-filter"><option value="">全部 lens</option></select>
+        <select id="mem-cat-filter"><option value="">全部类型</option></select>
+        <select id="mem-lens-filter"><option value="">全部镜头</option></select>
+        <select id="mem-stage-filter"><option value="">全部阶段</option></select>
         <select id="mem-repo-filter"><option value="">全部仓库</option></select>
         <select id="mem-status-filter">
           <option value="">全部状态</option>
@@ -1057,7 +1134,7 @@ ADMIN_HTML = r"""<!doctype html>
           <option value="conflicting">conflicting</option>
           <option value="retired">retired</option>
         </select>
-        <span class="stale-chip" id="mem-stale-chip" style="display:none" title="当前列表只看 90 天未命中的 active 条目（stale_days=90）；点击退出">90 天未命中 ×</span>
+        <span class="stale-chip" id="mem-stale-chip" style="display:none" title="只看 90 天未命中的 active；点击退出">90 天未命中 ×</span>
         <button class="primary small" id="btn-mem-new">＋ 新建</button>
         <button class="small" id="btn-mem-import">⤒ 批量导入(JSON)</button>
         <input id="mem-import-file" type="file" accept="application/json,.json" style="display:none">
@@ -1065,11 +1142,17 @@ ADMIN_HTML = r"""<!doctype html>
         <button class="small" id="btn-mem-export">导出 CSV</button>
         <button class="small" id="btn-mem-refresh">刷新</button>
       </div>
-      <div class="table-wrap">
+      <div class="mem-viewbar">
+        <button class="small on" id="mem-view-cards">卡片视图</button>
+        <button class="small" id="mem-view-table">表格视图</button>
+        <span class="faint" style="font-size:11.5px">卡片流默认；表格留给批量退役/导出</span>
+      </div>
+      <div id="mem-cards" class="mem-cards"><div class="empty">加载中…</div></div>
+      <div class="table-wrap" id="mem-table-wrap" style="display:none">
         <table>
-          <thead><tr><th>what（经验）</th><th>lens</th><th>repo</th><th>状态</th>
+          <thead><tr><th>what（经验）</th><th>类型</th><th>镜头</th><th>阶段</th><th>repo</th><th>状态</th>
             <th class="num">命中/采纳</th><th style="width:190px;text-align:right">操作</th></tr></thead>
-          <tbody id="mem-rows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+          <tbody id="mem-rows"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div class="scope-pager">
@@ -1081,14 +1164,7 @@ ADMIN_HTML = r"""<!doctype html>
         <span class="faint" id="mem-page"></span>
         <button id="mem-next" class="small">下一页</button>
       </div>
-      <details class="help">
-        <summary>说明</summary>
-        <div class="grid">
-          <div><b>检索测试</b>：在「代码资产」页的检索测试里切到「经验」即可对照试两类资产的召回（/v1/memories/search，active + conflicting 都参与召回，冲突命中带 ⚠️）。</div>
-          <div><b>待退役</b>：Inbox「待退役」卡按 stale_days=90 过滤（90 天未命中的 active 条目），选中后可逐条退役或撤销。</div>
-          <div><b>融合裁决</b>：冲突四键之一——人工写和解条目（POST 新 active + 双方 resolve retired），回执可撤销。</div>
-        </div>
-      </details>
+      <div class="faint" style="font-size:11.5px;margin-top:8px">阶段（服务端派生）：待裁决 / 未召回 / 已召回 / 已采纳 / 可退役 / 已归档；进度取最近一条 exp_jobs。</div>
     </section>
     <section class="card wide">
       <h2>打点与生命周期统计</h2>
@@ -1207,7 +1283,7 @@ function showTab(name) {
   if (!TABS.includes(name)) name = 'overview';
   $$('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
-  if (name === 'models') loadModels();
+  if (name === 'models') { loadModels(); loadLlmSettings(); }
   if (name === 'keys') loadKeys();
   if (name === 'stats') { loadStats(STATS_DAYS); startStatsTimer(); } else { stopStatsTimer(); }
   if (name === 'logs') loadLogs();
@@ -2708,10 +2784,28 @@ let MEM_CONFLICTS = [];
 let MEM_STATS = null;
 let MEM_INBOX = { pending: 0, stale: 0, vecNote: '' };
 let MEM_STALE_MODE = false;
+// 中文标签一律由服务端下发（index_store.LENS_LABELS / CATEGORY_LABELS），前端不维护第二份映射
+let MEM_LABELS = { lens: {}, category: {}, stage: [] };
+const MEM_STAGE_CLASS = { '待裁决': 'open', '未召回': 'unrecalled', '已召回': 'recalled', '已采纳': 'adopted', '可退役': 'retirable', '已归档': 'archived' };
+function catChip(code) {
+  const c = String(code || '');
+  return '<span class="cat-chip" title="类型 ' + escapeHtml(c) + '">' + escapeHtml((MEM_LABELS.category || {})[c] || c || '—') + '</span>';
+}
 function lensChip(lens) {
   const l = String(lens || '—');
   const cls = LENS_CLASS[l] || 'other';
-  return '<span class="lens-chip ' + cls + '" title="镜头 ' + escapeHtml(l) + '">' + escapeHtml(l) + '</span>';
+  return '<span class="lens-chip ' + cls + '" title="镜头 ' + escapeHtml(l) + '">' + escapeHtml((MEM_LABELS.lens || {})[l] || l) + '</span>';
+}
+function memStageChip(stage) {
+  const st = String(stage || '');
+  return '<span class="mem-stage ' + (MEM_STAGE_CLASS[st] || '') + '" title="阶段（服务端派生）">' + escapeHtml(st || '—') + '</span>';
+}
+function adoptBar(hits, adopted) {
+  const h = Number(hits || 0), a = Number(adopted || 0);
+  const on = h ? Math.min(10, Math.round(a * 10 / h)) : 0;
+  let cells = '';
+  for (let i = 0; i < 10; i++) cells += '<i' + (i < on ? ' class="on"' : '') + '></i>';
+  return '<span class="adopt-bar" title="采纳 ' + a + ' / 命中 ' + h + '（10 格 = 采纳率）">' + cells + '</span>';
 }
 function memStatusChip(s) {
   const st = String(s || 'active');
@@ -2722,12 +2816,56 @@ function truncate(v, n) { const s = String(v || ''); return s.length > n ? s.sli
 function memQuery() {
   return {
     q: ($('#mem-q').value || '').trim(),
-    lens: ($('#mem-lens-filter').value || ''),
-    repo: ($('#mem-repo-filter').value || ''),
-    status: ($('#mem-status-filter').value || ''),
-    limit: Number($('#mem-page-size').value || 50),
+    category: ($('#mem-cat-filter') || {}).value || '',
+    lens: ($('#mem-lens-filter') || {}).value || '',
+    repo: ($('#mem-repo-filter') || {}).value || '',
+    stage: ($('#mem-stage-filter') || {}).value || '',
+    status: ($('#mem-status-filter') || {}).value || '',
+    limit: Number(($('#mem-page-size') || {}).value || 50),
     offset: Number(MEM.offset || 0),
   };
+}
+const MEM_VIEW_KEY = 'dsh-mem-view';
+let MEM_VIEW = (localStorage.getItem(MEM_VIEW_KEY) === 'table') ? 'table' : 'cards';
+function renderMemView() {
+  const cards = MEM_VIEW !== 'table', box = $('#mem-cards'), table = $('#mem-table-wrap');
+  if (box) box.style.display = cards ? '' : 'none';
+  if (table) table.style.display = cards ? 'none' : '';
+  const bc = $('#mem-view-cards'), bt = $('#mem-view-table');
+  if (bc) bc.classList.toggle('on', cards);
+  if (bt) bt.classList.toggle('on', !cards);
+}
+function setMemView(view) {
+  MEM_VIEW = view === 'table' ? 'table' : 'cards';
+  try { localStorage.setItem(MEM_VIEW_KEY, MEM_VIEW); } catch (e) { /* 隐私模式忽略 */ }
+  renderMemView();
+}
+function renderMemCards() {
+  const el = $('#mem-cards'); if (!el) return;
+  const rows = MEM.rows || [];
+  if (!rows.length) { el.innerHTML = '<div class="empty">没有匹配的经验条目</div>'; return; }
+  el.innerHTML = rows.map((x) => {
+    const ev = Array.isArray(x.evidence) ? x.evidence : [];
+    const evHtml = ev.length
+      ? '<details class="ev"><summary>证据 ' + ev.length + ' 条</summary>'
+        + ev.slice(0, 3).map((e) => '<pre>' + escapeHtml(truncate(e.text || e.archive_ref || '', 400)) + '</pre>').join('') + '</details>'
+      : '';
+    return '<article class="mem-card" data-mem-card="' + escapeHtml(x.id) + '">'
+      + '<div class="what">' + escapeHtml(x.what || '—') + '</div>'
+      + '<div class="tags">' + catChip(x.category) + lensChip(x.lens) + memStageChip(x.stage) + '</div>'
+      + '<div class="meta">' + adoptBar(x.stats_hits, x.stats_adopted)
+      + '<span>命中 ' + fmtNum(x.stats_hits) + ' · 采纳 ' + fmtNum(x.stats_adopted) + '</span>'
+      + '<span class="spacer"></span><span title="' + absTime(x.created_at) + '">' + rel(x.created_at) + '</span>'
+      + '<span class="mono">' + escapeHtml(x.id) + '</span>'
+      + (x.repo ? '<span class="mono">' + escapeHtml(x.repo) + '</span>' : '') + '</div>' + evHtml + '</article>';
+  }).join('');
+  $$('#mem-cards [data-mem-card]').forEach((card) => {
+    card.onclick = (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('details')) return;
+      const m = MEM.rows.find((x) => x.id === card.dataset.memCard);
+      if (m) openMemDrawer(m);
+    };
+  });
 }
 function renderMemRows() {
   const rows = MEM.rows || [];
@@ -2737,18 +2875,18 @@ function renderMemRows() {
   $('#mem-page').textContent = rows.length ? (Math.floor(MEM.offset / MEM.limit) + 1 + ' / ' + Math.max(1, Math.ceil(MEM.total / MEM.limit))) : '0 / 0';
   $('#mem-prev').disabled = MEM.offset <= 0;
   $('#mem-next').disabled = MEM.offset + rows.length >= MEM.total;
-  if (!rows.length) { $('#mem-rows').innerHTML = '<tr><td colspan="6" class="empty">没有匹配的经验条目</td></tr>'; return; }
+  if (!rows.length) { $('#mem-rows').innerHTML = '<tr><td colspan="8" class="empty">没有匹配的经验条目</td></tr>'; return; }
   $('#mem-rows').innerHTML = rows.map((x) => '<tr class="clickable-row" data-mem-id="' + escapeHtml(x.id) + '">'
     + '<td class="mem-what-cell" title="点击展开详情"><b style="font-weight:600">' + escapeHtml(truncate(x.what, 80)) + '</b>'
     + '<div class="idline mono">' + escapeHtml(x.id) + '</div></td>'
-    + '<td>' + lensChip(x.lens) + '</td>'
+    + '<td>' + catChip(x.category) + '</td><td>' + lensChip(x.lens) + '</td><td>' + memStageChip(x.stage) + '</td>'
     + '<td class="mono" style="font-size:11.5px">' + escapeHtml(x.repo || '—') + '</td>'
     + '<td>' + memStatusChip(x.status) + '</td>'
     + '<td class="num" title="最后命中 ' + absTime(x.last_hit_at) + '">' + fmtNum(x.stats_hits) + ' / ' + fmtNum(x.stats_adopted) + '</td>'
     + '<td class="scope-actions">'
     + '<button class="ghost small" data-mem-hit="' + escapeHtml(x.id) + '" title="命中 +1">hit+1</button>'
     + '<button class="ghost small" data-mem-edit="' + escapeHtml(x.id) + '">编辑</button>'
-    + '<button class="ghost small" data-mem-retire="' + escapeHtml(x.id) + '" title="软删（status=retired，可再恢复）">退役</button>'
+    + '<button class="ghost small" data-mem-retire="' + escapeHtml(x.id) + '" title="软删（retired，可再恢复）">退役</button>'
     + '</td></tr>').join('');
   $$('#mem-rows [data-mem-hit]').forEach((b) => { b.onclick = async (ev) => { ev.stopPropagation();
     const r = await api('/v1/memories/' + encodeURIComponent(b.dataset.memHit) + '/hit', { method: 'POST', body: '{}' });
@@ -2763,25 +2901,33 @@ function renderMemRows() {
     const tid = b.dataset.memRetire;
     toastReceipt('退役', tid, async () => {
       await api('/v1/memories/' + encodeURIComponent(tid) + '/resolve', { method: 'POST', body: JSON.stringify({ status: 'active' }) });
-      toast('已撤销退役：恢复 active');
-      loadMemories(); loadAssetCards();
+      toast('已撤销退役：恢复 active'); loadMemories(); loadAssetCards();
     });
     loadMemories(); }; });
 }
 function renderMemFacets() {
-  const lenses = new Map(), repos = new Map();
+  const lenses = new Map(), cats = new Map(), repos = new Map();
   for (const x of MEM.rows || []) {
     if (x.lens) lenses.set(x.lens, (lenses.get(x.lens) || 0) + 1);
+    if (x.category) cats.set(x.category, (cats.get(x.category) || 0) + 1);
     if (x.repo) repos.set(x.repo, (repos.get(x.repo) || 0) + 1);
   }
-  const fill = (sel, map, allLabel) => {
+  const fill = (sel, map, allLabel, labeller) => {
+    if (!sel) return;
     const cur = sel.value;
     sel.innerHTML = '<option value="">' + allLabel + '</option>' + [...map.keys()].sort()
-      .map((v) => '<option value="' + escapeHtml(v) + '">' + escapeHtml(v) + '（' + map.get(v) + '）</option>').join('');
+      .map((v) => '<option value="' + escapeHtml(v) + '">' + escapeHtml(labeller ? labeller(v) : v) + '（' + map.get(v) + '）</option>').join('');
     if (cur) sel.value = cur;
   };
-  fill($('#mem-lens-filter'), lenses, '全部 lens');
+  fill($('#mem-lens-filter'), lenses, '全部镜头', (v) => MEM_LABELS.lens[v] || v);
+  fill($('#mem-cat-filter'), cats, '全部类型', (v) => MEM_LABELS.category[v] || v);
   fill($('#mem-repo-filter'), repos, '全部仓库');
+  const stageSel = $('#mem-stage-filter');
+  if (stageSel && !stageSel.dataset.filled) {
+    stageSel.innerHTML = '<option value="">全部阶段</option>'
+      + (MEM_LABELS.stage || []).map((v) => '<option value="' + escapeHtml(v) + '">' + escapeHtml(v) + '</option>').join('');
+    stageSel.dataset.filled = '1';
+  }
 }
 function renderMemStats() {
   const m = MEM_STATS || {};
@@ -2831,38 +2977,48 @@ async function loadInbox() {
   renderInbox();
 }
 let GOV_RUNS = [];
+function govStatusChip(st) {
+  const s = String(st || '');
+  const cls = s === 'done' ? 'ok' : (s === 'failed' ? 'bad' : (s === 'skipped' ? 'warn' : 'blue'));
+  return '<span class="chip small ' + cls + '">' + escapeHtml(s || '?') + '</span>';
+}
 function renderGovRuns() {
-  const el = $('#gov-runs'); if (!el) return;
-  if (!(GOV_RUNS || []).length) { el.innerHTML = '<div class="empty">还没有跑批留痕 ✓（POST /v1/admin/pipeline-runs 上报后展示）</div>'; return; }
+  const el = $('#gov-timeline'); if (!el) return;
+  if (!(GOV_RUNS || []).length) {
+    el.innerHTML = '<div class="empty">还没有抽取流水 ✓（extract / 重放后逐段留痕）</div>';
+    return;
+  }
   el.innerHTML = GOV_RUNS.map((r, i) => {
-    const acts = Object.entries(r.actions || {});
-    const actHtml = acts.length
-      ? acts.map(([k, v]) => '<span class="chip small' + (Number(v) > 0 && /contradict|block|error|conflict/i.test(k) ? ' warn' : '') + '">' + escapeHtml(k) + '=' + escapeHtml(String(v)) + '</span>').join(' ')
-      : '<span class="faint">无四判计数</span>';
-    return '<div class="funnel-row">'
-      + '<span class="faint" title="' + absTime(r.started_at) + '">' + rel(r.started_at) + '</span>'
-      + '<span class="chip small">' + escapeHtml(r.engine || 'pipeline') + (r.dry_run ? ' · dry' : '') + '</span>'
+    const tok = Number(r.tokens_in || 0) + Number(r.tokens_out || 0);
+    const chips = Object.entries(r.reasons || {}).filter(([k]) => k !== 'segmentsTotal')
+      .map(([k, v]) => '<span class="chip small warn">' + escapeHtml(k) + '=' + escapeHtml(String(v)) + '</span>').join(' ');
+    return '<div class="funnel-row" data-gov-job="' + i + '" style="cursor:pointer" title="点开看 reasons">'
+      + '<span class="faint" title="' + absTime(r.created_at) + '">' + rel(r.created_at) + '</span>'
+      + '<span class="chip small">' + escapeHtml(r.workflow || '—') + '</span>'
       + '<span class="funnel-step">候选 <b>' + fmtNum(r.candidates) + '</b><span class="arrow">→</span></span>'
-      + '<span class="funnel-step">' + actHtml + '<span class="arrow">→</span></span>'
-      + '<span class="funnel-step">拦截 <b class="' + (r.review_blocked ? 'funnel-num warn' : 'funnel-num') + '">' + fmtNum(r.review_blocked) + '</b><span class="arrow">→</span></span>'
-      + '<span class="funnel-step">合并去重 <b class="funnel-num ok">' + fmtNum(r.dedup_merged) + '</b></span>'
-      + '<span class="spacer"></span><button class="ghost small" data-run-detail="' + i + '">明细 ▾</button></div>'
-      + '<div class="gov-run-detail" id="gov-run-detail-' + i + '" style="display:none">'
-      + '<div>review 通过 ' + fmtNum(r.review_passed) + ' · dedup 保留 ' + fmtNum(r.dedup_kept) + ' · 耗时 ' + Math.max(0, Number(r.finished_at || 0) - Number(r.started_at || 0)) + 's</div>'
-      + (r.details ? '<pre class="mono" style="margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;color:var(--muted)">' + escapeHtml(JSON.stringify(r.details, null, 1)) + '</pre>' : '<div class="faint" style="margin-top:4px">无明细（details 为空）</div>')
+      + '<span class="funnel-step">拦截 <b class="' + (r.blocked ? 'funnel-num warn' : 'funnel-num') + '">' + fmtNum(r.blocked) + '</b><span class="arrow">→</span></span>'
+      + '<span class="funnel-step">入库 <b class="funnel-num ok">' + fmtNum(r.created_n) + '</b></span>'
+      + '<span class="faint">tokens ' + fmtNum(tok) + '</span>' + govStatusChip(r.status)
+      + '<span class="spacer"></span><span class="faint mono" style="font-size:11px">' + escapeHtml(String(r.model || '').slice(0, 26)) + '</span></div>'
+      + '<div class="gov-run-detail" id="gov-run-detail-' + i + '" style="display:none;padding:2px 2px 8px">'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap">' + (chips || '<span class="faint">无拦截计数</span>') + '</div>'
+      + '<div class="faint" style="margin-top:4px">段 ' + escapeHtml(String(r.segment_no === null || r.segment_no === undefined ? '—' : r.segment_no))
+      + ' · 更新 ' + fmtNum(r.updated_n) + ' · 跳过 ' + fmtNum(r.skipped_n) + ' · 冲突 ' + fmtNum(r.contradicted_n)
+      + ' · 用时 ' + Math.round(Number(r.ms || 0)) + ' ms'
+      + (r.error ? ' · <span class="llm-bad">' + escapeHtml(truncate(r.error, 120)) + '</span>' : '') + '</div>'
+      + (r.session_id ? '<div class="faint mono" style="margin-top:2px">session ' + escapeHtml(r.session_id) + '</div>' : '')
       + '</div>';
   }).join('');
-  $$('#gov-runs [data-run-detail]').forEach((b) => {
-    b.onclick = () => {
-      const d = $('#gov-run-detail-' + b.dataset.runDetail), open = d.style.display !== 'none';
-      d.style.display = open ? 'none' : 'block';
-      b.textContent = open ? '明细 ▾' : '明细 ▴';
+  $$('#gov-timeline [data-gov-job]').forEach((row) => {
+    row.onclick = () => {
+      const d = $('#gov-run-detail-' + row.dataset.govJob);
+      if (d) d.style.display = d.style.display === 'none' ? 'block' : 'none';
     };
   });
 }
 async function loadGovRuns() {
-  const el = $('#gov-runs'); if (!el) return;
-  const r = await api('/v1/admin/pipeline-runs?limit=5');
+  const el = $('#gov-timeline'); if (!el) return;
+  const r = await api('/v1/exp/jobs?limit=8');
   if (r.status !== 200 || !r.body) { el.innerHTML = '<div class="empty">治理流水加载失败：' + r.status + '</div>'; return; }
   GOV_RUNS = r.body.items || [];
   $('#gov-runs-at').textContent = '最近 ' + GOV_RUNS.length + ' 次 · 共 ' + fmtNum(r.body.total || 0) + ' 次';
@@ -3057,33 +3213,165 @@ async function loadMemories() {
   MEM.limit = q.limit; MEM.offset = q.offset;
   const params = new URLSearchParams({ limit: q.limit, offset: q.offset });
   if (q.q) params.set('q', q.q);
+  if (q.category) params.set('category', q.category);
   if (q.lens) params.set('lens', q.lens);
   if (q.repo) params.set('repo', q.repo);
-  if (q.status && !MEM_STALE_MODE) params.set('status', q.status);
+  if (q.stage) params.set('stage', q.stage);
+  // 阶段是服务端派生的过滤口径：选中阶段时不再叠加 status（否则 已归档 永远查不到）
+  if (q.status && !MEM_STALE_MODE && !q.stage) params.set('status', q.status);
   if (MEM_STALE_MODE) params.set('stale_days', '90');
   if (MEM.inflight) return MEM.inflight;
   MEM.inflight = (async () => {
-    // 顺序执行：MemoryStore 是单连接 sqlite，并发 HTTP 线程会撞 InterfaceError
+    // 顺序执行：单连接 sqlite 并发会撞 InterfaceError
     const lr = await api('/v1/memories?' + params.toString());
     const cr = await api('/v1/memories/conflicts?limit=100');
-    const sr = await api('/v1/admin/stats?days=7');
-    const str = await api('/v1/memories?limit=1&stale_days=90');
-    if (lr.status !== 200) { $('#mem-rows').innerHTML = '<tr><td colspan="6" class="empty">加载失败：' + lr.status + '</td></tr>'; return; }
+    const sr = await api('/v1/memories/stats');
+    if (lr.status !== 200) {
+      $('#mem-cards').innerHTML = '<div class="empty">加载失败：' + lr.status + '</div>';
+      $('#mem-rows').innerHTML = '<tr><td colspan="8" class="empty">—</td></tr>';
+      return;
+    }
     const b = lr.body || {};
     MEM.rows = b.items || []; MEM.total = Number(b.total || 0);
     MEM_CONFLICTS = (cr.status === 200 && cr.body ? cr.body.items : []) || [];
-    MEM_STATS = (sr.status === 200 && sr.body ? sr.body.memories : null) || {};
     MEM_INBOX.pending = (cr.status === 200 && cr.body) ? Number(cr.body.total || 0) : 0;
-    MEM_INBOX.stale = (str.status === 200 && str.body) ? Number(str.body.total || 0) : 0;
-    renderMemRows(); renderMemFacets(); renderConflicts(); renderMemStats(); renderInbox();
+    const s = (sr.status === 200 && sr.body) ? sr.body : null;
+    if (s) {
+      MEM_LABELS.lens = s.lensLabels || MEM_LABELS.lens;
+      MEM_LABELS.category = s.categoryLabels || MEM_LABELS.category;
+      MEM_LABELS.stage = s.stageLabels || MEM_LABELS.stage;
+      const t = s.totals || {};
+      MEM_STATS = { total: t.total, hits: t.hits, adopted: t.adopted, retired: t.retired,
+        conflictsOpen: t.conflictsOpen, stale: t.stale, excerpts: t.excerpts, jobs: t.jobs,
+        hits7d: t.hits7d, adopted7d: t.adopted7d, funnel: s.funnel, byCategory: s.byCategory,
+        byStage: s.byStage, adoptRate7d: s.adoptRate7d, trend: s.trend };
+      MEM_INBOX.stale = Number(t.stale || 0);
+    }
+    renderMemRows(); renderMemCards(); renderMemView(); renderMemFacets();
+    renderConflicts(); renderMemStats(); renderInbox(); renderCatDist();
   })().finally(() => { MEM.inflight = null; });
   return MEM.inflight;
 }
 async function loadMemoriesChain() {
-  // 经验 tab 打开时的 MemoryStore 读全串行：列表→conflicts→stats→stale→runs→向量探针
+  // 经验 tab 的读操作全串行（单连接 sqlite）
   await loadMemories();
+  loadExpProgress();
   loadGovRuns();
   loadInbox();
+}
+function renderCatDist() {
+  const el = $('#cat-dist'); if (!el) return;
+  const entries = Object.entries((MEM_STATS && MEM_STATS.byCategory) || {}).sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0));
+  const total = entries.reduce((sum, x) => sum + Number(x[1] || 0), 0);
+  if (!entries.length) { el.innerHTML = '<div class="faint">还没有入库经验</div>'; return; }
+  el.innerHTML = entries.map(([code, n]) => {
+    const pct = total ? Math.round(Number(n) * 100 / total) : 0;
+    return '<div class="row" data-cat="' + escapeHtml(code) + '" title="点击只看该类型"><span>'
+      + escapeHtml((MEM_LABELS.category || {})[code] || code) + '</span><span class="bar blue" style="flex:1;width:auto"><i style="width:' + pct + '%"></i></span>'
+      + '<span class="n">' + fmtNum(n) + '</span></div>';
+  }).join('');
+  $$('#cat-dist [data-cat]').forEach((row) => {
+    row.onclick = () => { const sel = $('#mem-cat-filter'); if (sel) sel.value = row.dataset.cat; resetMemOffset(); };
+  });
+}
+// ---------------- 本轮抽取进度（最近一条 exp_jobs；进行中自动轮询） ----------------
+let EXP_LAST = null;
+let EXP_TIMER = null;
+function renderExpProgress() {
+  const el = $('#exp-progress'); if (!el) return;
+  const j = EXP_LAST;
+  if (!j) {
+    el.className = 'exp-progress';
+    el.innerHTML = '<div class="faint">还没有抽取记录：先在「模型 → 经验抽取」启用并保存</div>';
+    return;
+  }
+  const total = Number((j.reasons || {}).segmentsTotal || 0);
+  const seg = String(j.segment_no === null || j.segment_no === undefined ? '—' : j.segment_no) + (total ? '/' + total : '');
+  const pct = total && j.segment_no ? Math.min(100, Math.round(Number(j.segment_no) * 100 / total))
+    : (j.status === 'done' || j.status === 'skipped' ? 100 : 12);
+  const tokens = Number(j.tokens_in || 0) + Number(j.tokens_out || 0);
+  const live = j.status === 'running' || j.status === 'queued';
+  el.className = 'exp-progress' + (j.status === 'failed' ? ' warn' : '');
+  el.innerHTML = '<span class="seg">段 <b>' + escapeHtml(seg) + '</b></span>'
+    + '<span class="seg">候选 <b>' + fmtNum(j.candidates) + '</b></span>'
+    + '<span class="seg">拦截 <b>' + fmtNum(j.blocked) + '</b></span>'
+    + '<span class="seg">入库 <b>' + fmtNum(j.created_n) + '</b></span>'
+    + '<span class="seg">用时 <b>' + Math.round(Number(j.ms || 0)) + ' ms</b></span>'
+    + '<span class="seg">tokens <b>' + fmtNum(tokens) + '</b></span>'
+    + '<span class="bar ' + (j.status === 'failed' ? 'warn' : 'blue') + '" style="flex:1;width:auto;height:8px"><i style="width:' + pct + '%"></i></span>'
+    + '<span class="chip small ' + (live ? 'blue' : (j.status === 'failed' ? 'bad' : (j.status === 'skipped' ? 'warn' : 'ok'))) + '">'
+    + escapeHtml(j.status || '?') + '</span>';
+  const at = $('#exp-progress-at');
+  if (at) at.textContent = (j.workflow ? j.workflow + ' · ' : '') + rel(j.created_at) + (j.error ? ' · ' + truncate(j.error, 40) : '');
+}
+async function loadExpProgress() {
+  const r = await api('/v1/exp/jobs?limit=1');
+  EXP_LAST = (r.status === 200 && r.body && (r.body.items || [])[0]) || null;
+  renderExpProgress();
+  if (EXP_TIMER) { clearTimeout(EXP_TIMER); EXP_TIMER = null; }
+  const st = EXP_LAST && EXP_LAST.status;
+  if (st === 'running' || st === 'queued') EXP_TIMER = setTimeout(loadExpProgress, 3000);
+}
+async function replayExp() {
+  const hint = $('#exp-replay-hint');
+  const r = await api('/v1/admin/exp/replay', { method: 'POST', body: JSON.stringify({ all: true, apply: true }) });
+  if (r.status !== 200 || !r.body) { toast('重放失败：' + r.status); return; }
+  const b = r.body;
+  if (hint) hint.textContent = b.status === 'queued' ? ('已排队 ' + b.queued + ' 段 / ' + b.sessions + ' 个会话') : ('未重放：' + (b.reason || b.status || '—'));
+  toast('重放：' + (b.status || 'queued'));
+  loadExpProgress();
+}
+// ---------------- 经验抽取 LLM 配置（模型 tab 下的卡片） ----------------
+let LLM = null;
+async function loadLlmSettings() {
+  const r = await api('/v1/admin/settings/llm');
+  const out = $('#llm-test-out');
+  if (r.status !== 200 || !r.body) { if (out) out.textContent = '配置加载失败：' + r.status; return; }
+  LLM = r.body;
+  const box = $('#llm-enabled'); if (box) box.checked = !!LLM.enabled;
+  const map = { '#llm-base-url': 'baseUrl', '#llm-model': 'model', '#llm-max-tokens': 'maxTokens',
+    '#llm-timeout-ms': 'timeoutMs', '#llm-daily-token-cap': 'dailyTokenCap', '#llm-mode': 'mode',
+    '#llm-evidence': 'evidenceMode', '#llm-prompt-version': 'promptVersion' };
+  Object.keys(map).forEach((sel) => { const el = $(sel); if (el) el.value = LLM[map[sel]] === null || LLM[map[sel]] === undefined ? '' : LLM[map[sel]]; });
+  const key = $('#llm-api-key');
+  if (key) key.placeholder = LLM.apiKeyConfigured ? ('已配置 ' + (LLM.apiKeyMasked || '') + '，留空 = 不改') : '留空 = 不配 key';
+  const masked = $('#llm-key-masked');
+  if (masked) masked.textContent = (LLM.apiKeyConfigured ? 'key：' + LLM.apiKeyMasked : '未配置 key') + ' · prompt ' + LLM.promptVersion;
+}
+async function saveLlmSettings() {
+  const val = (sel) => String(($(sel) || {}).value || '').trim();
+  const patch = { enabled: !!(($('#llm-enabled') || {}).checked), baseUrl: val('#llm-base-url'),
+    model: val('#llm-model'), maxTokens: Number(val('#llm-max-tokens') || 0),
+    timeoutMs: Number(val('#llm-timeout-ms') || 0), dailyTokenCap: Number(val('#llm-daily-token-cap') || 0),
+    mode: val('#llm-mode'), evidenceMode: val('#llm-evidence') };
+  const key = val('#llm-api-key');
+  if (key) patch.apiKey = key;  // 空串 = 不改（页面只回显掩码）
+  const r = await api('/v1/admin/settings/llm', { method: 'PUT', body: JSON.stringify(patch) });
+  if (r.status !== 200) { toast('保存失败：' + ((r.body && (r.body.detail || r.body.error)) || r.status)); return; }
+  $('#llm-api-key').value = '';
+  LLM = r.body;
+  toast('已保存抽取配置');
+  loadLlmSettings();
+}
+async function testLlm() {
+  const out = $('#llm-test-out'), detail = $('#llm-test-detail');
+  if (out) { out.className = 'faint'; out.textContent = '服务端测试中…'; }
+  if (detail) detail.textContent = '';
+  const body = {}, val = (sel) => String(($(sel) || {}).value || '').trim();
+  if (val('#llm-base-url')) body.baseUrl = val('#llm-base-url');
+  if (val('#llm-model')) body.model = val('#llm-model');
+  if (val('#llm-api-key')) body.apiKey = val('#llm-api-key');
+  const r = await api('/v1/admin/settings/llm-test', { method: 'POST', body: JSON.stringify(body) });
+  if (r.status !== 200 || !r.body) { if (out) { out.className = 'llm-bad'; out.textContent = '测试请求失败：' + r.status; } return; }
+  const b = r.body;
+  const warnText = b.warning === 'reasoning-model' ? '推理型模型（content 空 / reasoning 有内容）'
+    : (b.warning === 'unreachable' ? '容器侧连不上' : String(b.warning || ''));
+  if (out) {
+    out.className = b.ok && !b.warning ? 'llm-ok' : 'llm-warn';
+    out.textContent = (b.ok ? '✓ 通' : '✗ 不通') + ' · ' + (b.ms || 0) + ' ms · ' + (b.modelEcho || '—') + (warnText ? ' · ' + warnText : '');
+  }
+  if (detail) detail.textContent = [b.baseUrl ? '容器→ ' + b.baseUrl : '', b.httpStatus ? 'HTTP ' + b.httpStatus : '',
+    b.error || '', b.detail || '', b.contentPreview ? '回复：' + b.contentPreview : ''].filter(Boolean).join(' · ');
 }
 function resetMemOffset() { MEM.offset = 0; loadMemories(); }
 let ASSET_CODE = { scopes: 0, lineages: 0, chunks: 0, cov: null, pending: 0, pendingRepos: [] };
@@ -3308,6 +3596,14 @@ $('#mem-q').oninput = () => { clearTimeout(MEM.searchTimer); MEM.searchTimer = s
 $('#mem-lens-filter').onchange = resetMemOffset;
 $('#mem-repo-filter').onchange = resetMemOffset;
 $('#mem-status-filter').onchange = resetMemOffset;
+$('#mem-cat-filter').onchange = resetMemOffset;
+$('#mem-stage-filter').onchange = resetMemOffset;
+$('#mem-view-cards').onclick = () => setMemView('cards');
+$('#mem-view-table').onclick = () => setMemView('table');
+$('#exp-refresh').onclick = loadMemoriesChain;
+$('#exp-replay').onclick = replayExp;
+$('#llm-save').onclick = saveLlmSettings;
+$('#llm-test').onclick = testLlm;
 $('#mem-page-size').onchange = resetMemOffset;
 $('#btn-mem-refresh').onclick = loadMemories;
 $('#btn-mem-new').onclick = () => openMemForm(null);
@@ -3451,6 +3747,23 @@ $('#f').onsubmit = async (ev) => {
 
 
 # ---------------- 模型热切换（供 /v1/admin/models/activate 调用） ----------------
+# 页面要展示中文枚举（例如「黑话镜头」），但不能在前端维护第二份映射：
+# 服务端发送前用 index_store 的标签表填充占位符，标签只有一处定义。
+_ADMIN_HTML_CACHE = {}
+
+
+def _admin_html():
+    """ADMIN_HTML + 镜头/类型图例（单一事实源 = index_store.LENS_LABELS / CATEGORY_LABELS）。"""
+    cached = _ADMIN_HTML_CACHE.get("html")
+    if cached:
+        return cached
+    lens = " / ".join(index_store.LENS_LABELS[k] for k in index_store.LENSES)
+    cats = " / ".join(index_store.CATEGORY_LABELS[k] for k in index_store.CATEGORIES_STORED)
+    html = ADMIN_HTML.replace("{{LENS_LEGEND}}", lens).replace("{{CATEGORY_LEGEND}}", cats)
+    _ADMIN_HTML_CACHE["html"] = html
+    return html
+
+
 def _load_ort():
     import onnxruntime as ort
     return ort
@@ -4175,10 +4488,12 @@ def memory_get_payload(memory_id):
 
 
 def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, offset=None,
-                        stale_days=None, category=None, workflow=None):
-    """GET /v1/memories：过滤 + 分页（limit clamp [1,200]，offset >= 0）。
+                        stale_days=None, category=None, workflow=None, stage=None):
+    """GET /v1/memories：过滤 + 分页（limit clamp [1,200]，offset >= 0），条目带派生 stage。
 
     stale_days（正整数）：只看 active 且 last_hit_at 早于 N 天前（或从未命中）的陈旧条目。
+    stage：待裁决 / 未召回 / 已召回 / 已采纳 / 可退役 / 已归档（也接受英文别名）。
+    stage 一律服务端算（规则见 `_memory_stage_sql`），前端只渲染、不重算。
     """
     ms, err = _memory_store()
     if err:
@@ -4193,8 +4508,17 @@ def memory_list_payload(repo=None, lens=None, status=None, q=None, limit=None, o
         return {"error": "bad-pagination", "detail": "stale_days must be >= 0"}, 400
     limit = max(1, min(limit, index_store.MEMORY_LIST_MAX_LIMIT))
     offset = max(0, offset)
-    return ms.list(repo, lens, status, q, limit, offset, stale_days=stale,
-                   category=category or None, workflow=workflow or None), 200
+    want_stage = exp_stage_value(stage)
+    if str(stage or "").strip() and not want_stage:
+        return {"error": "bad-stage",
+                "detail": "stage 必须是 " + " / ".join(EXP_STAGES)}, 400
+    if want_stage:
+        return _memory_stage_list(want_stage, repo, lens, status, q, category, workflow,
+                                  limit, offset, stale), 200
+    page = ms.list(repo, lens, status, q, limit, offset, stale_days=stale,
+                   category=category or None, workflow=workflow or None)
+    _attach_memory_stage(page.get("items"))
+    return page, 200
 
 
 def memory_search_payload(req):
@@ -4375,6 +4699,784 @@ def exp_jobs_stats_payload():
     if err:
         return err
     return js.job_stats(), 200
+
+
+# ---------------------------------------------------------------- 经验抽取（exp v2）
+# 存储层是 index_store 的 MemoryStore / JobsStore（schema v2），抽取核心是 exp_prompt /
+# exp_llm / exp_pipeline。本段只做 HTTP 层接线：settings 透传、pipeline 注入、落库，
+# 以及"进度可见"需要的可观测字段（funnel / reasons / jobs / 服务端派生 stage）。
+EXP_STAGES = ("待裁决", "未召回", "已召回", "已采纳", "可退役", "已归档")
+EXP_STAGE_FRESH_DAYS = 30      # 入库 <30 天且从未命中 = 未召回（先给它被召回的机会）
+EXP_STAGE_STALE_DAYS = 90      # 90 天没被命中 = 可退役（与 Inbox「待退役」同口径）
+EXP_TEST_MAX_TOKENS = 16       # 连通性测试只要一个 token 级回复
+EXP_TEST_TIMEOUT_MS = 20000    # 测试必须有上限：不能让页面等满 240s
+EXP_TEST_PROMPT = "回复 OK"  # 最小探针：只发一个机器可判的短问句
+EXP_EXTRACT_MATERIAL_MAX = 200_000
+EXP_MERGE_TOPK = 5             # 合并判定只看最相近的 5 条（宁严勿宽）
+EXP_IMPORT_MAX_CANDIDATES = 200
+EXP_JOB_LIST_DEFAULT = 20
+EXP_REPLAY_MAX_SEGMENTS = 400  # 单次重放上限（防手滑把整机归档灌进来）
+_STAGE_ALIASES = {
+    "open": "待裁决", "conflicted": "待裁决", "conflict": "待裁决",
+    "unrecalled": "未召回", "new": "未召回",
+    "recalled": "已召回",
+    "adopted": "已采纳",
+    "retirable": "可退役", "stale": "可退役",
+    "archived": "已归档", "retired": "已归档",
+}
+# 自测注入点：非 None 时抽取一律用它当客户端（不读真实模型网关）。
+EXP_LLM_STUB = None
+# 自测注入点：llm-test 的传输层（覆盖 成功 / 推理型 / 不可达 三种结论，不依赖真实网关）。
+EXP_LLM_TEST_TRANSPORT = None
+# 后台重放进度（jobs 是权威进度，这里只用于"同一次重放不要并发两次"与回归排查）。
+EXP_REPLAY_STATE = {"running": False, "startedAt": None, "sessions": 0, "segments": 0,
+                    "done": 0, "failed": 0, "doneAt": None, "lastError": None}
+
+
+def exp_core():
+    """惰性导入抽取核心（不做模块级 import：不抽取的部署也能照常启动）。"""
+    return {"prompt": _load("exp_prompt"), "llm": _load("exp_llm"),
+            "pipeline": _load("exp_pipeline")}
+
+
+def _exp_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _exp_int(value, default=None):
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _exp_day_ts(value):
+    """`yyyy-mm-dd` → 时间戳（重放 since 用）；解析不了当没给。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return int(time.mktime(time.strptime(text, fmt)))
+        except ValueError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------- 派生 stage（服务端唯一口径）
+def exp_stage_value(value):
+    """stage 入参归一：接受中文 stage 或英文别名；未知返回 None。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text in EXP_STAGES:
+        return text
+    return _STAGE_ALIASES.get(text.lower())
+
+
+def _memory_stage_sql(alias="m"):
+    """派生 stage 的 SQL CASE：列表过滤、条目徽标、stats 分组**共用这一份口径**。
+
+    优先级就是 WHEN 的顺序（先命中先归位，六类互斥且覆盖全集）：
+      ①已归档 status=retired
+      ②待裁决 参与任一 open 冲突
+      ③已采纳 adopted>0
+      ④未召回 active 且从未命中且入库 <30 天
+      ⑤可退役 active 且（从未命中 or 上次命中 >90 天）
+      ⑥已召回 其余：近期命中过但还没被采纳
+    """
+    now = int(time.time())
+    fresh = now - EXP_STAGE_FRESH_DAYS * 86400
+    stale = now - EXP_STAGE_STALE_DAYS * 86400
+    a = alias
+    return (
+        "case"
+        f" when {a}.status = 'retired' then '已归档'"
+        f" when exists(select 1 from memory_conflicts c where c.status = 'open'"
+        f" and (c.memory_a = {a}.id or c.memory_b = {a}.id)) then '待裁决'"
+        f" when {a}.adopted > 0 then '已采纳'"
+        f" when {a}.status = 'active' and {a}.hits = 0 and {a}.created_at >= {fresh}"
+        f" then '未召回'"
+        f" when {a}.status = 'active'"
+        f" and ({a}.last_hit_at is null or {a}.last_hit_at < {stale}) then '可退役'"
+        f" when {a}.hits > 0 then '已召回'"
+        f" else '未召回' end"
+    )
+
+
+def _memory_stage_map(ids):
+    """批量取 stage（一条 SQL，避免列表 N+1）：{整数主键: 中文 stage}。"""
+    ints = [int(x) for x in ids or [] if x is not None]
+    if not ints or not memories_store:
+        return {}
+    marks = ",".join("?" * len(ints))
+    sql = (f"select m.id as id, {_memory_stage_sql('m')} as stage from memories m"
+           f" where m.id in ({marks})")
+    with memories_store.lock:
+        rows = memories_store.db.execute(sql, ints).fetchall()
+    return {int(r["id"]): r["stage"] for r in rows}
+
+
+def _attach_memory_stage(items):
+    """给列表条目补 stage / stageLabel（前端只渲染，不重算规则）。"""
+    items = list(items or [])
+    ints, keys = [], []
+    for item in items:
+        try:
+            ints.append(index_store.parse_memory_id(item.get("id")))
+            keys.append(item)
+        except (TypeError, ValueError, AttributeError):
+            continue
+    stages = _memory_stage_map(ints)
+    for item, mid in zip(keys, ints):
+        stage = stages.get(mid)
+        if stage:
+            item["stage"] = stage
+            item["stageLabel"] = stage
+    return items
+
+
+def _memory_stage_list(stage, repo=None, lens=None, status=None, q=None, category=None,
+                       workflow=None, limit=50, offset=0, stale_days=None):
+    """按派生 stage 过滤（分页与总数都在 SQL 里算完，口径同 MemoryStore.list）。"""
+    where, params = [], []
+    if repo:
+        where.append("m.repo = ?")
+        params.append(str(repo))
+    if lens:
+        where.append("m.lens = ?")
+        params.append(str(lens))
+    if category:
+        where.append("m.category = ?")
+        params.append(str(category))
+    if workflow:
+        where.append("m.workflow = ?")
+        params.append(str(workflow))
+    if status:
+        where.append("m.status = ?")
+        params.append(str(status))
+    if q:
+        where.append("(m.what like ? or m.when_expr like ? or m.why like ?)")
+        params.extend([f"%{q}%"] * 3)
+    if stale_days:
+        where.append("m.status = 'active' and (m.last_hit_at is null or m.last_hit_at < ?)")
+        params.append(int(time.time()) - int(stale_days) * 86400)
+    cond = (" where " + " and ".join(where)) if where else ""
+    inner = f"select m.*, {_memory_stage_sql('m')} as stage from memories m{cond}"
+    with memories_store.lock:
+        total = int(memories_store.db.execute(
+            f"select count(*) from ({inner}) where stage = ?", [*params, stage]
+        ).fetchone()[0])
+        rows = memories_store.db.execute(
+            f"select * from ({inner}) where stage = ?"
+            f" order by created_at desc, id desc limit ? offset ?",
+            [*params, stage, int(limit), int(offset)],
+        ).fetchall()
+        items = memories_store._hydrate(rows)
+    for item, row in zip(items, rows):
+        item["stage"] = row["stage"]
+        item["stageLabel"] = row["stage"]
+    return {"items": items, "total": total, "stage": stage, "stages": list(EXP_STAGES)}
+
+
+def memory_stats_payload():
+    """GET /v1/memories/stats：漏斗 / 类型分布 / 阶段分布 / 7 日采纳率与趋势。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    base = ms.stats()
+    jobs = {"byStatus": {}, "total": 0, "totals": {}, "last": None}
+    js, jerr = _jobs_store()
+    if not jerr:
+        try:
+            jobs = js.job_stats()
+        except Exception as e:  # noqa: BLE001 —— 漏斗失败不该拖垮统计接口
+            log(f"memories/stats: job_stats 失败（忽略）{type(e).__name__}: {e}")
+    totals = jobs.get("totals") or {}
+    funnel = {
+        "candidates": int(totals.get("candidates") or 0),
+        "blocked": int(totals.get("blocked") or 0),
+        "merged": int(totals.get("updated") or 0),
+        "created": int(totals.get("created") or 0),
+    }
+    with ms.lock:
+        stage_rows = ms.db.execute(
+            f"select {_memory_stage_sql('m')} as stage, count(*) as n from memories m"
+            f" group by 1"
+        ).fetchall()
+        since = int(time.time()) - 7 * 86400
+        event_rows = ms.db.execute(
+            "select strftime('%Y-%m-%d', at, 'unixepoch', 'localtime') as day,"
+            " sum(case when event = 'created' then 1 else 0 end) as created,"
+            " sum(case when event = 'hit' then 1 else 0 end) as hits,"
+            " sum(case when event = 'adopted' then 1 else 0 end) as adopted"
+            " from memory_events where at >= ? group by 1 order by 1",
+            (since,),
+        ).fetchall()
+    by_stage = {name: 0 for name in EXP_STAGES}
+    for row in stage_rows:
+        by_stage[row["stage"]] = int(row["n"] or 0)
+    daily = {r["day"]: r for r in event_rows}
+    trend, hits7, adopted7 = [], 0, 0
+    today = int(time.time())
+    for back in range(6, -1, -1):
+        day = time.strftime("%Y-%m-%d", time.localtime(today - back * 86400))
+        row = daily.get(day)
+        hits = int(row["hits"] or 0) if row else 0
+        adopted = int(row["adopted"] or 0) if row else 0
+        trend.append({"day": day, "created": int(row["created"] or 0) if row else 0,
+                      "hits": hits, "adopted": adopted})
+        hits7 += hits
+        adopted7 += adopted
+    recalls7 = hits7 + adopted7  # 采纳也是一次命中（record_hit 只记 adopted 事件）
+    return {
+        "funnel": funnel,
+        "byCategory": {item["category"]: int(item["count"])
+                       for item in base.get("byCategory") or []},
+        "byStage": by_stage,
+        "adoptRate7d": round(adopted7 / recalls7, 4) if recalls7 else 0.0,
+        "trend": trend,
+        "stageLabels": list(EXP_STAGES),
+        # 中文标签一律来自存储层（决策 7）：前端不再自己维护枚举到中文的映射。
+        "categoryLabels": dict(index_store.CATEGORY_LABELS),
+        "lensLabels": dict(index_store.LENS_LABELS),
+        "totals": {
+            "total": int(base.get("total") or 0), "active": int(base.get("active") or 0),
+            "retired": int(base.get("retired") or 0), "hits": int(base.get("hits") or 0),
+            "adopted": int(base.get("adopted") or 0),
+            "conflictsOpen": int(base.get("conflictsOpen") or 0),
+            "stale": int(base.get("stale") or 0), "excerpts": int(base.get("excerpts") or 0),
+            "jobs": int(base.get("jobs") or 0), "hits7d": hits7, "adopted7d": adopted7,
+        },
+        "jobs": {"byStatus": jobs.get("byStatus") or {}, "total": int(jobs.get("total") or 0),
+                 "totals": jobs.get("totals") or {}, "last": jobs.get("last")},
+        "generatedAt": int(time.time()),
+    }, 200
+
+
+# ---------------------------------------------------------------- LLM 设置（模型 tab → 经验抽取）
+def llm_settings_payload():
+    """GET /v1/admin/settings/llm：只回掩码，明文永不出响应。"""
+    return adm.get_llm_settings(), 200
+
+
+def llm_settings_update_payload(req):
+    """PUT|POST /v1/admin/settings/llm：局部更新（api_key 空串 = 不改动）。"""
+    req = dict(req or {})
+    clear = _exp_bool(req.pop("clear_api_key", req.pop("clearApiKey", None)), False)
+    if not req and not clear:
+        return {"error": "empty-patch", "detail": "没有可写入的字段"}, 400
+    try:
+        out = adm.set_llm_settings(req, clear_api_key=clear)
+    except ValueError as e:
+        return {"error": "bad-llm-settings", "detail": str(e)}, 400
+    log(f"llm settings updated: {sorted(req)}" + (" (+清空 api_key)" if clear else ""))
+    return out, 200
+
+
+def _exp_configured(settings=None):
+    """是否已配置到"可以真的发起抽取"：启用 + 有 Base URL + 有模型名（本地网关可无 key）。"""
+    s = settings or adm.get_llm_settings()
+    return bool(s.get("enabled")) and bool(str(s.get("baseUrl") or "").strip()) \
+        and bool(str(s.get("model") or "").strip())
+
+
+def _exp_make_llm(settings=None, *, transport=None, max_tokens=None, timeout_ms=None,
+                  retries=None):
+    """按 settings 造客户端。明文 key 只在这里取一次（不进任何返回值/日志）。"""
+    core = exp_core()
+    s = dict(settings or adm.get_llm_settings())
+    s["apiKeyPlain"] = adm.get_llm_secret()
+    if max_tokens is not None:
+        s["maxTokens"] = int(max_tokens)
+    if timeout_ms is not None:
+        s["timeoutMs"] = int(timeout_ms)
+    client = core["llm"].LLMClient.from_settings(s, transport=transport)
+    if retries is not None:
+        client.max_retries = max(0, int(retries))
+    return client
+
+
+def llm_test_payload(req=None):
+    """POST /v1/admin/settings/llm-test：**由容器自己**发一次最小请求。
+
+    浏览器能通 ≠ 容器能通（容器里的 127.0.0.1 是容器自己，宿主机网关要走可达地址），
+    所以连通性必须服务端代理验证。始终 200：这是诊断结论，不是业务失败。
+    `warning` 区分：reasoning-model（content 空但 reasoning 有）/ unreachable（连不上）。
+    """
+    core = exp_core()
+    req = dict(req or {})
+    settings = adm.get_llm_settings()
+    probe = dict(settings)
+    # 页面上"还没保存就想试一下"：这三个字段允许临时覆盖（只用于本次，不落库）
+    for key in ("baseUrl", "model"):
+        if str(req.get(key) or "").strip():
+            probe[key] = str(req[key]).strip()
+    timeout_ms = min(int(settings.get("timeoutMs") or EXP_TEST_TIMEOUT_MS), EXP_TEST_TIMEOUT_MS)
+    probe["timeoutMs"] = timeout_ms
+    probe["maxTokens"] = EXP_TEST_MAX_TOKENS
+    if str(req.get("apiKey") or "").strip():
+        probe["apiKeyPlain"] = str(req["apiKey"]).strip()
+    else:
+        probe["apiKeyPlain"] = adm.get_llm_secret()
+    t0 = time.time()
+    client = None
+    try:
+        client = core["llm"].LLMClient.from_settings(probe, transport=EXP_LLM_TEST_TRANSPORT)
+        client.max_retries = 0          # 连通性测试不重试：失败就立刻报，别让页面等 3 轮
+        result = client.chat([{"role": "user", "content": EXP_TEST_PROMPT}],
+                             max_tokens=EXP_TEST_MAX_TOKENS, temperature=0)
+    except Exception as exc:  # noqa: BLE001 —— 诊断接口要把任何异常都变成结构化结论
+        elapsed = int(round((time.time() - t0) * 1000))
+        reason = getattr(exc, "reason", None) or type(exc).__name__
+        status = getattr(exc, "status", None)
+        warning = "unreachable" if reason in ("network", "timeout", "http-5xx", "http-429") \
+            else (reason or "error")
+        out = {"ok": False, "httpStatus": int(status or 0), "ms": elapsed,
+               "modelEcho": probe.get("model"), "baseUrl": client.base_url if client else probe.get("baseUrl"),
+               "warning": warning, "error": f"{type(exc).__name__}: {str(exc)[:400]}",
+               "reason": reason, "attempts": getattr(exc, "attempts", 0),
+               "hint": "容器侧发起失败：确认 Base URL 在容器内可达（本机网关用 host.docker.internal 或宿主 IP）"}
+        return out, 200
+    elapsed = int(round((time.time() - t0) * 1000))
+    content = str(result.get("content") or "").strip()
+    reasoning = str(result.get("reasoning") or "").strip()
+    warning = result.get("warning")
+    if not content and reasoning:
+        warning = core["llm"].WARN_REASONING_MODEL
+    out = {"ok": True, "httpStatus": 200, "ms": elapsed,
+           "modelEcho": result.get("model") or probe.get("model"),
+           "baseUrl": client.base_url, "contentPreview": content[:80],
+           "reasoningChars": len(reasoning), "usage": result.get("usage") or {},
+           "attempts": result.get("attempts"), "warning": warning}
+    if warning:
+        out["detail"] = ("内容是空的但 reasoning 有内容：推理型模型把预算花在思考上"
+                         "（抽取时同样会这样，建议换非推理模型或调大 max_tokens）"
+                         if warning == core["llm"].WARN_REASONING_MODEL
+                         else "模型返回 warning=" + str(warning))
+    return out, 200
+
+
+# ---------------------------------------------------------------- 抽取：管道 + 落库
+def _exp_material(req):
+    """summary / verbatim 拼成管道素材（verbatim 优先保留原文行，便于证据片段定位）。"""
+    parts = []
+    for key in ("summary", "verbatim"):
+        text = str((req or {}).get(key) or "").strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)[:EXP_EXTRACT_MATERIAL_MAX]
+
+
+def _exp_search_callback(ms):
+    """合并判定的"已有同向条目"查询（analyze_merge 的 search_memories 注入点）。"""
+    def search_memories(candidate):
+        cand = candidate or {}
+        query = str(cand.get("what") or "").strip()
+        if not query:
+            return []
+        hits, _channels = ms.search(
+            query, None, None, None, EXP_MERGE_TOPK, 20, "active",
+            cand.get("category") or None, cand.get("workflow") or None,
+        )
+        out = []
+        for hit in hits:
+            out.append({
+                "id": hit.get("id"),
+                "what": hit.get("what"),
+                "when_expr": hit.get("when_expr"),
+                "why": hit.get("why"),
+                "audit": hit.get("audit"),
+                # 管道按 `excerpts` 读证据文本；存储层的字段名是 evidence
+                "excerpts": hit.get("evidence") or [],
+            })
+        return out
+    return search_memories
+
+
+def _exp_apply(out, job_id, workflow=None, repo=None):
+    """把管道决定真正落库：create/update 走 upsert，contradict 走 upsert+冲突登记。"""
+    ms, err = _memory_store()
+    if err:
+        return {"created": 0, "updated": 0, "skipped": 0, "contradicted": 0, "errors": [err[0]]}
+    counts = {"created": 0, "updated": 0, "skipped": 0, "contradicted": 0, "errors": []}
+
+    def write(cand):
+        cand = cand or {}
+        evidence = []
+        snippet = cand.get("excerpt")
+        if isinstance(snippet, dict) and str(snippet.get("text") or "").strip():
+            evidence = [{k: snippet.get(k) for k in ("text", "kind") if snippet.get(k)}]
+        elif isinstance(snippet, str) and snippet.strip():
+            evidence = [{"text": snippet.strip()}]
+        return ms.upsert(
+            cand.get("repo") or repo, cand.get("lens"), cand.get("what"),
+            cand.get("when_expr"), cand.get("why"), evidence,
+            cand.get("source") or "exp", "active",
+            category=cand.get("category"), workflow=cand.get("workflow") or workflow,
+            audit=cand.get("audit"), exp_job_id=job_id,
+        )
+
+    def note(action, exc, what=None):
+        counts["errors"].append({"action": action, "error": f"{type(exc).__name__}: {exc}",
+                                 "what": str(what or "")[:80]})
+
+    for cand in (out or {}).get("created") or []:
+        try:
+            _res, action = write(cand)
+            counts["created" if action == "created" else "updated"] += 1
+        except Exception as exc:  # noqa: BLE001 —— 单条失败不拖垮整批
+            note("create", exc, cand.get("what"))
+    for item in (out or {}).get("updated") or []:
+        cand = (item or {}).get("candidate") or {}
+        try:
+            write(cand)
+            counts["updated"] += 1
+        except Exception as exc:  # noqa: BLE001
+            note("update", exc, cand.get("what"))
+    for item in (out or {}).get("contradictions") or []:
+        cand = (item or {}).get("candidate") or {}
+        target = (item or {}).get("target") or {}
+        try:
+            res, _action = write(cand)
+            counts["contradicted"] += 1
+            target_id = str(target.get("id") or "").strip()
+            if target_id:
+                ms.link_conflict(res["id"], target_id,
+                                 [str(cand.get("what") or "")[:24]] if cand.get("what") else None)
+        except Exception as exc:  # noqa: BLE001
+            note("contradict", exc, cand.get("what"))
+    counts["skipped"] = len((out or {}).get("skipped") or [])
+    return counts
+
+
+def _exp_extract_run(req, *, llm=None, transport=None, mode="server", segments_total=None):
+    """抽取主路径（HTTP /v1/exp/extract 与后台重放共用）：跑管道 → 落库 → 写 exp_jobs。
+
+    未配置 LLM：200 + status=skipped + reason=llm-not-configured（**绝不 5xx**）。
+    """
+    ms, err = _memory_store()
+    if err:
+        return err
+    js, jerr = _jobs_store()
+    if jerr:
+        return jerr
+    core = exp_core()
+    req = dict(req or {})
+    material = _exp_material(req)
+    if not material:
+        return {"error": "bad-extract", "detail": "summary / verbatim 至少给一个"}, 400
+    session_id = str(req.get("session_id") or "").strip()[:200] or None
+    segment_no = _exp_int(req.get("segment_no"))
+    workflow = str(req.get("workflow") or "").strip()[:64] or None
+    repo = str(req.get("repo") or "").strip()[:200] or None
+    apply_writes = _exp_bool(req.get("apply"), True)
+    base = {"session_id": session_id, "segment_no": segment_no, "workflow": workflow}
+    funnel0 = {"candidates": 0, "blocked": 0, "created": 0, "updated": 0,
+               "skipped": 0, "contradicted": 0}
+    settings = adm.get_llm_settings()
+    if llm is None:
+        llm = EXP_LLM_STUB
+    if llm is None:
+        if not _exp_configured(settings):
+            reasons = {"llm-not-configured": 1}
+            if segments_total:
+                reasons["segmentsTotal"] = int(segments_total)
+            rec = js.record({**base, "mode": mode, "status": "skipped",
+                             "prompt_version": core["prompt"].PROMPT_VERSION, "reasons": reasons})
+            return {"job_id": rec["id"], "status": "skipped", "reason": "llm-not-configured",
+                    "funnel": funnel0, "reasons": reasons, "ms": 0, "warnings": [],
+                    "applied": False,
+                    "detail": "未配置/未启用：去「模型 → 经验抽取」勾选启用并填 Base URL + 模型名"}, 200
+        llm = _exp_make_llm(settings, transport=transport)
+    t0 = time.time()
+    job = js.record({**base, "mode": mode, "status": "running",
+                     "model": getattr(llm, "model", None),
+                     "prompt_version": core["prompt"].PROMPT_VERSION,
+                     "reasons": {"segmentsTotal": int(segments_total)} if segments_total else None})
+    try:
+        out = core["pipeline"].run_pipeline(
+            material, llm, search_memories=_exp_search_callback(ms), session_id=session_id,
+            mode=mode, workflow=workflow, repo=repo, dry_run=not apply_writes,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 管道级异常也要留一条 failed 任务，不能 500
+        elapsed = int(round((time.time() - t0) * 1000))
+        log(f"exp extract failed: {type(exc).__name__}: {exc}")
+        js.finish(job["id"], status="failed", ms=elapsed,
+                  error=f"{type(exc).__name__}: {exc}"[:2000])
+        return {"job_id": job["id"], "status": "failed", "funnel": funnel0, "reasons": {},
+                "ms": elapsed, "warnings": [], "applied": False,
+                "error": f"{type(exc).__name__}: {exc}"[:400]}, 200
+    job_info = out.get("job") or {}
+    if apply_writes:
+        applied = _exp_apply(out, job["id"], workflow=workflow, repo=repo)
+    else:
+        applied = {"created": len(out.get("created") or []),
+                   "updated": len(out.get("updated") or []),
+                   "skipped": len(out.get("skipped") or []),
+                   "contradicted": len(out.get("contradictions") or []), "errors": []}
+    funnel = {
+        "candidates": int(job_info.get("candidates") or 0),
+        "blocked": int(job_info.get("blocked") or 0),
+        "created": int(applied.get("created") or 0),
+        "updated": int(applied.get("updated") or 0),
+        "skipped": int(applied.get("skipped") or 0),
+        "contradicted": int(applied.get("contradicted") or 0),
+    }
+    elapsed = int(round((time.time() - t0) * 1000))
+    reasons = dict(job_info.get("reasons") or {})
+    if segments_total:
+        reasons["segmentsTotal"] = int(segments_total)
+    status = str(job_info.get("status") or "done")
+    try:
+        js.finish(job["id"], status=status, tokens_in=int(job_info.get("tokens_in") or 0),
+                  tokens_out=int(job_info.get("tokens_out") or 0), ms=elapsed,
+                  candidates=funnel["candidates"], blocked=funnel["blocked"],
+                  created_n=funnel["created"], updated_n=funnel["updated"],
+                  skipped_n=funnel["skipped"], contradicted_n=funnel["contradicted"],
+                  reasons=reasons, error=job_info.get("error"))
+    except Exception as exc:  # noqa: BLE001 —— 收尾失败不影响已经落库的经验
+        log(f"exp job finish failed: {type(exc).__name__}: {exc}")
+    payload = {"job_id": job["id"], "status": status, "funnel": funnel, "reasons": reasons,
+               "ms": elapsed, "warnings": out.get("warnings") or [],
+               "segments": out.get("segments") or [], "applied": bool(apply_writes),
+               "tokens": {"in": int(job_info.get("tokens_in") or 0),
+                          "out": int(job_info.get("tokens_out") or 0)},
+               "model": job_info.get("model"), "promptVersion": job_info.get("prompt_version"),
+               "segmentsTotal": int(segments_total) if segments_total else None,
+               "blocked": [{"reason": b.get("reason"), "detail": b.get("detail")}
+                           for b in (out.get("blocked") or [])[:20]]}
+    if applied.get("errors"):
+        payload["writeErrors"] = applied["errors"][:10]
+    return payload, 200
+
+
+def exp_extract_payload(req):
+    """POST /v1/exp/extract：服务端调 LLM + 三层治理管道，结果落库。"""
+    return _exp_extract_run(req)
+
+
+def exp_import_payload(req):
+    """POST /v1/exp/import：跳过 LLM，直接走 Review/Dedup/Merge（插件侧自抽时的降级通道）。"""
+    ms, err = _memory_store()
+    if err:
+        return err
+    js, jerr = _jobs_store()
+    if jerr:
+        return jerr
+    core = exp_core()
+    req = dict(req or {})
+    raw_candidates = req.get("candidates")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        return {"error": "bad-import", "detail": "candidates 必须是非空数组"}, 400
+    session_id = str(req.get("session_id") or "").strip()[:200] or None
+    segment_no = _exp_int(req.get("segment_no"))
+    workflow = str(req.get("workflow") or "").strip()[:64] or None
+    repo = str(req.get("repo") or "").strip()[:200] or None
+    apply_writes = _exp_bool(req.get("apply"), True)
+    policy = core["pipeline"].default_policy()
+    session_tag = session_id or "local"
+    t0 = time.time()
+    job = js.record({"session_id": session_id, "segment_no": segment_no, "workflow": workflow,
+                     "mode": "client", "status": "running", "model": "plugin",
+                     "prompt_version": core["prompt"].PROMPT_VERSION})
+    kept, blocked, reasons = [], [], {}
+    for raw in raw_candidates[:EXP_IMPORT_MAX_CANDIDATES]:
+        if not isinstance(raw, dict):
+            blocked.append({"candidate": {}, "reason": "invalid-field", "detail": "候选不是对象"})
+            reasons["invalid-field"] = reasons.get("invalid-field", 0) + 1
+            continue
+        cand = core["pipeline"].normalize_candidate(
+            raw, policy=policy, segment_id=raw.get("segment_id") or "import",
+            source=f"import:{session_tag}", workflow=workflow, repo=repo or raw.get("repo"),
+        )
+        verdict = core["pipeline"].review_candidate(cand, policy=policy)
+        if not verdict["ok"]:
+            blocked.append({"candidate": cand, "reason": verdict["reason"],
+                            "detail": verdict["detail"]})
+            reasons[verdict["reason"]] = reasons.get(verdict["reason"], 0) + 1
+            continue
+        snippet = raw.get("excerpt") or raw.get("evidence") or ""
+        if snippet:
+            cand["excerpt"] = snippet
+            if isinstance(snippet, dict) and str(snippet.get("text") or "").strip():
+                cand.setdefault("audit", {})["evidence_quote"] = str(snippet["text"])[:200]
+            elif isinstance(snippet, str):
+                cand.setdefault("audit", {})["evidence_quote"] = snippet[:200]
+        kept.append(cand)
+    dedup = core["pipeline"].dedup_candidates(kept)
+    search = _exp_search_callback(ms)
+    created, updated, skipped, contradictions = [], [], [], []
+    for cand in dedup["kept"]:
+        decision = core["pipeline"].analyze_merge(cand, search(cand))
+        cand["mergeReason"] = decision["reason"]
+        cand["mergeAction"] = decision["action"]
+        if decision["action"] == "skip":
+            skipped.append({"candidate": cand, "target": decision.get("target")})
+        elif decision["action"] == "contradict":
+            contradictions.append({"candidate": cand, "target": decision.get("target")})
+        elif decision["action"] == "update":
+            updated.append({"candidate": cand, "target": decision.get("target")})
+        else:
+            created.append(cand)
+    out = {"created": created, "updated": updated, "skipped": skipped,
+           "contradictions": contradictions}
+    if apply_writes:
+        applied = _exp_apply(out, job["id"], workflow=workflow, repo=repo)
+    else:
+        applied = {"created": len(created), "updated": len(updated),
+                   "skipped": len(skipped), "contradicted": len(contradictions), "errors": []}
+    funnel = {"candidates": len(raw_candidates[:EXP_IMPORT_MAX_CANDIDATES]),
+              "blocked": len(blocked), "created": int(applied.get("created") or 0),
+              "updated": int(applied.get("updated") or 0),
+              "skipped": int(applied.get("skipped") or 0),
+              "contradicted": int(applied.get("contradicted") or 0)}
+    elapsed = int(round((time.time() - t0) * 1000))
+    try:
+        js.finish(job["id"], status="done", ms=elapsed, candidates=funnel["candidates"],
+                  blocked=funnel["blocked"], created_n=funnel["created"],
+                  updated_n=funnel["updated"], skipped_n=funnel["skipped"],
+                  contradicted_n=funnel["contradicted"], reasons=reasons)
+    except Exception as exc:  # noqa: BLE001
+        log(f"exp import finish failed: {type(exc).__name__}: {exc}")
+    payload = {"job_id": job["id"], "status": "done", "funnel": funnel, "reasons": reasons,
+               "ms": elapsed, "warnings": [], "applied": bool(apply_writes), "mode": "client",
+               "blocked": [{"reason": b["reason"], "detail": b.get("detail")}
+                           for b in blocked[:20]],
+               "dedupMerged": len(dedup["merged"])}
+    if applied.get("errors"):
+        payload["writeErrors"] = applied["errors"][:10]
+    return payload, 200
+
+
+def exp_jobs_list_payload(limit=None, offset=None, session_id=None, status=None, workflow=None):
+    """GET /v1/exp/jobs：抽取任务流水（倒序），进度/漏斗的数据面。"""
+    js, err = _jobs_store()
+    if err:
+        return err
+    try:
+        limit = EXP_JOB_LIST_DEFAULT if limit in (None, "") else int(limit)
+        offset = 0 if offset in (None, "") else int(offset)
+    except (TypeError, ValueError):
+        return {"error": "bad-pagination"}, 400
+    limit = max(1, min(limit, PIPELINE_RUN_MAX_LIMIT))
+    return js.list_jobs(limit, max(0, offset), status=status or None,
+                        session_id=session_id or None, workflow=workflow or None), 200
+
+
+# ---------------------------------------------------------------- 历史重放（后台线程）
+def _exp_archive_root():
+    return os.path.expanduser(os.environ.get("EXP_ARCHIVE_ROOT") or "~/.dsh/archive")
+
+
+def _exp_replay_targets(req):
+    """解析重放目标 → [(session_id, [segment_*.md...])]，以及失败原因（None = 正常）。"""
+    root = _exp_archive_root()
+    if not os.path.isdir(root):
+        return [], "archive-missing"
+    ids = req.get("session_ids")
+    if _exp_bool(req.get("all")):
+        ids = sorted(x for x in os.listdir(root) if os.path.isdir(os.path.join(root, x)))
+    if not isinstance(ids, list) or not ids:
+        return [], "no-session"
+    targets = []
+    for raw in ids:
+        sid = str(raw or "").strip()
+        if not re.match(r"^[A-Za-z0-9._-]{1,80}$", sid):  # 防目录穿越
+            continue
+        directory = os.path.join(root, sid)
+        if not os.path.isdir(directory):
+            continue
+        files = sorted(f for f in os.listdir(directory) if re.match(r"^segment_\d+\.md$", f))
+        if files:
+            targets.append((sid, [os.path.join(directory, f) for f in files]))
+    return targets, None
+
+
+def _exp_replay_worker(plan, apply_writes):
+    """逐段重放：每段一条 exp_jobs（幂等键 = session_id + segment_no，重放覆盖更新）。"""
+    done = failed = 0
+    try:
+        for sid, paths in plan:
+            total = len(paths)
+            for index, path in enumerate(paths, start=1):
+                digits = re.findall(r"segment_(\d+)\.md$", os.path.basename(path))
+                segment_no = int(digits[0]) if digits else index
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as handle:
+                        text = handle.read()
+                except OSError as exc:
+                    failed += 1
+                    log(f"exp replay 读取失败 {path}: {exc}")
+                    continue
+                payload, code = _exp_extract_run(
+                    {"session_id": sid, "segment_no": segment_no, "verbatim": text,
+                     "apply": apply_writes},
+                    mode="server", segments_total=total,
+                )
+                ok = code == 200 and (payload or {}).get("status") != "failed"
+                done, failed = (done + 1, failed) if ok else (done, failed + 1)
+                log(f"exp replay {sid} 段 {index}/{total}: {(payload or {}).get('status')}"
+                    f" candidates={((payload or {}).get('funnel') or {}).get('candidates')}")
+    except Exception as exc:  # noqa: BLE001 —— 后台线程不能把异常漏给 HTTP 层
+        log(f"exp replay 中断: {type(exc).__name__}: {exc}")
+    finally:
+        EXP_REPLAY_STATE.update({
+            "running": False, "doneAt": int(time.time()), "done": done, "failed": failed,
+            "lastError": None if not failed else f"{failed} 段失败",
+        })
+
+
+def exp_replay_payload(req):
+    """POST /v1/admin/exp/replay：后台线程逐段读归档调抽取，进度看 /v1/exp/jobs。
+
+    body: {all:true} 或 {session_ids:[...]}；apply 默认 true；since（yyyy-mm-dd）按段文件 mtime 过滤。
+    """
+    req = dict(req or {})
+    if not _exp_configured() and EXP_LLM_STUB is None:
+        return {"queued": 0, "status": "skipped", "reason": "llm-not-configured"}, 200
+    if EXP_REPLAY_STATE.get("running"):
+        return {"queued": 0, "status": "already-running",
+                "startedAt": EXP_REPLAY_STATE.get("startedAt")}, 200
+    targets, why = _exp_replay_targets(req)
+    if why == "no-session":
+        return {"error": "bad-replay", "detail": "all=true 或 session_ids 至少给一项"}, 400
+    if why:
+        return {"queued": 0, "status": "skipped", "reason": why,
+                "archiveRoot": _exp_archive_root()}, 200
+    since_ts = _exp_day_ts(req.get("since"))
+    apply_writes = _exp_bool(req.get("apply"), True)
+    plan, queued = [], 0
+    for sid, files in targets:
+        picked = []
+        for path in files[:EXP_REPLAY_MAX_SEGMENTS]:
+            try:
+                if since_ts and os.path.getmtime(path) < since_ts:
+                    continue
+            except OSError:
+                continue
+            picked.append(path)
+        if picked:
+            plan.append((sid, picked))
+            queued += len(picked)
+    if not queued:
+        return {"queued": 0, "status": "nothing-to-replay",
+                "archiveRoot": _exp_archive_root()}, 200
+    EXP_REPLAY_STATE.update({"running": True, "startedAt": int(time.time()),
+                             "sessions": len(plan), "segments": queued, "done": 0,
+                             "failed": 0, "doneAt": None, "lastError": None})
+    threading.Thread(target=_exp_replay_worker, args=(plan, apply_writes),
+                     name="exp-replay", daemon=True).start()
+    return {"queued": queued, "sessions": len(plan), "status": "queued",
+            "archiveRoot": _exp_archive_root(), "apply": apply_writes}, 200
 
 
 def scope_list(repo_id=None, kind=None, q=None, sort="updated_at", order="desc", limit=50, offset=0):
@@ -4758,6 +5860,31 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._end()
 
+    def do_PUT(self):
+        self._begin()
+        try:
+            self._do_PUT()
+        finally:
+            self._end()
+
+    def _do_PUT(self):
+        """PUT 只承载"局部更新"语义（目前只有 LLM 设置）；其余路径 404。
+
+        settings 存在 admin.db（不是索引库）：故意不 gate state["ready"]，
+        这样索引还没建好也能先把抽取配置填好。
+        """
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path != "/v1/admin/settings/llm":
+            return self._send(404, {"error": "not found"})
+        if not self._admin_ok():
+            return self._unauthorized(basic=bool(ADMIN_PASSWORD))
+        try:
+            req = self._body()
+        except Exception as e:  # noqa: BLE001
+            return self._send(400, {"error": f"bad json: {e}"})
+        payload, code = llm_settings_update_payload(req)
+        return self._send(code, payload)
+
     def _do_GET(self):
         u = urlparse(self.path)
         path = u.path.rstrip("/") or "/"
@@ -4767,7 +5894,7 @@ class Handler(BaseHTTPRequestHandler):
             no_store = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
             if not self._admin_ok():
                 return self._send(200, LOGIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8", headers=no_store)
-            return self._send(200, ADMIN_HTML.encode("utf-8"), ctype="text/html; charset=utf-8", headers=no_store)
+            return self._send(200, _admin_html().encode("utf-8"), ctype="text/html; charset=utf-8", headers=no_store)
         if path in ("/favicon.svg", "/favicon.ico"):
             return self._send(200, FAVICON_SVG, ctype="image/svg+xml",
                               headers={"Cache-Control": "public, max-age=86400"})
@@ -4886,6 +6013,9 @@ class Handler(BaseHTTPRequestHandler):
                 (q.get("limit") or [None])[0], (q.get("offset") or [None])[0],
             )
             return self._send(code, payload)
+        if path == "/v1/admin/settings/llm":
+            payload, code = llm_settings_payload()
+            return self._send(code, payload)
         if path == "/v1/admin/runtime":
             return self._send(200, self._runtime_payload())
         if path == "/log":
@@ -4952,6 +6082,19 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/":
             return self._send(200, self._status_payload())
+        if path == "/v1/memories/stats":
+            # 顺序：/stats 必须在 /v1/memories/{id} 通配之前判（否则 "stats" 被当 id）
+            payload, code = memory_stats_payload()
+            return self._send(code, payload)
+        if path == "/v1/exp/jobs":
+            q = parse_qs(u.query or "")
+            payload, code = exp_jobs_list_payload(
+                (q.get("limit") or [None])[0], (q.get("offset") or [None])[0],
+                session_id=(q.get("session_id") or [None])[0],
+                status=(q.get("status") or [None])[0],
+                workflow=(q.get("workflow") or [None])[0],
+            )
+            return self._send(code, payload)
         if path == "/v1/memories/conflicts":
             # 注意顺序：/conflicts 必须在 /v1/memories/{id} 之前判（否则 "conflicts" 被当 id）
             if not store:
@@ -4972,7 +6115,7 @@ class Handler(BaseHTTPRequestHandler):
             payload, code = memory_list_payload(
                 _q1("repo"), _q1("lens"), _q1("status"), _q1("q"), _q1("limit"),
                 _q1("offset"), _q1("stale_days"), category=_q1("category"),
-                workflow=_q1("workflow"),
+                workflow=_q1("workflow"), stage=_q1("stage"),
             )
             return self._send(code, payload)
         if path.startswith("/v1/memories/"):
@@ -5432,6 +6575,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "bad-memory-id"})
                 payload, code = memory_resolve_payload(memory_id, req)
                 return self._send(code, payload)
+            # ---------------- 经验抽取（exp v2：LLM 抽取 / 插件自抽降级导入） ----------------
+            if path == "/v1/exp/extract":
+                payload, code = exp_extract_payload(req)
+                return self._send(code, payload)
+            if path == "/v1/exp/import":
+                payload, code = exp_import_payload(req)
+                return self._send(code, payload)
             # ---------------- 作用域（快照）管理 ----------------
             if path == "/v1/scopes/resolve":
                 try:
@@ -5463,6 +6613,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, result)
             if path.startswith("/v1/admin/"):
                 action = path[len("/v1/admin/") :]
+                if action == "settings/llm":
+                    # PUT 的 POST 别名：同语义（局部更新，api_key 空串=不改）
+                    payload, code = llm_settings_update_payload(req)
+                    return self._send(code, payload)
+                if action == "settings/llm-test":
+                    # 连通性必须由**容器自己**发起（浏览器能通 ≠ 容器能通）
+                    payload, code = llm_test_payload(req)
+                    return self._send(code, payload)
+                if action == "exp/replay":
+                    payload, code = exp_replay_payload(req)
+                    return self._send(code, payload)
+                if action == "exp/jobs/stats":
+                    payload, code = exp_jobs_stats_payload()
+                    return self._send(code, payload)
                 if action == "pipeline-runs":
                     # 管道跑批上报（留痕）；admin 鉴权已在上方 is_admin 分支统一做
                     payload, code = pipeline_run_report_payload(req)
