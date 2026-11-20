@@ -19,12 +19,15 @@ regexes = [
 ]
 
 [[allowlists]]
-description = "模型清单的 sha256 完整性校验值（非凭据；generic-api-key 对 64 位 hex 的固定误报）"
+description = "模型清单的 sha256 完整性校验值（非凭据；generic-api-key 对 64 位 hex 的固定误报）。含历史中已删除的模型工具（ab-embedding-models.mjs / 旧 test.mjs 的模型清单）"
 paths = [
   '''model_downloader\.py$''',
   '''fetch-models\.mjs$''',
+  '''ab-embedding-models\.mjs$''',
+  '''(^|/)test\.mjs$''',
 ]
 regexTarget = "line"
 regexes = [
   '''sha256["']?\s*[:=]\s*["'][0-9a-f]{64}''',
+  '''["'][0-9a-f]{64}["']''',
 ]
